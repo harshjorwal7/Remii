@@ -32,13 +32,17 @@ function appWith(calls: { addServer: unknown[]; addCustomServer: unknown[] }) {
   ) => {
     context.set("actor", {
       id: "user-1",
-      email: "user@openbot.test",
+      email: "user@remii.test",
       role: "admin",
     });
     await next();
   };
   const canUseBot: BotAccessCheck = async () => true;
-  return createPluginRoutes(store, requireUser, canUseBot);
+  // Two access checks, not one: the third says whether they may ACT AS the Bot, the fourth whether they
+  // OWN it. Repeating one check for the other is fine for these tests, which are about validation, but
+  // the argument still has to be passed — it is positional, so leaving it out slid `connect` and the
+  // broker into its place and both then read as `undefined`.
+  return createPluginRoutes(store, requireUser, canUseBot, canUseBot);
 }
 
 function calls() {
@@ -66,7 +70,7 @@ describe("POST /api/plugins/servers", () => {
   ])("refuses %s with 400 and never reaches the store", async (_n, body) => {
     const seen = calls();
     const response = await appWith(seen).request(
-      "http://openbot.test/servers",
+      "http://remii.test/servers",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -85,7 +89,7 @@ describe("POST /api/plugins/servers", () => {
   test("trims the key and optional fields on the happy path", async () => {
     const seen = calls();
     const response = await appWith(seen).request(
-      "http://openbot.test/servers",
+      "http://remii.test/servers",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -130,7 +134,7 @@ describe("POST /api/plugins/servers/custom", () => {
   ])("refuses %s with 400 and never reaches the store", async (_n, body) => {
     const seen = calls();
     const response = await appWith(seen).request(
-      "http://openbot.test/servers/custom",
+      "http://remii.test/servers/custom",
       {
         method: "POST",
         headers: { "content-type": "application/json" },

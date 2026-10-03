@@ -17,7 +17,6 @@
  * Registration still goes to Better Auth. This never writes a provider, so there is one parser for
  * metadata and one place a client secret is stored.
  */
-import { eq } from "drizzle-orm";
 import type { Database } from "../db/client";
 import { ssoProviders } from "../db/schema";
 
@@ -40,13 +39,14 @@ export type RegisteredIdentityProvider = {
 };
 
 export type IdentityProviderStore = {
-  /** Every provider this deployment holds, whoever registered it. */
-  list: () => Promise<RegisteredIdentityProvider[]>;
   /**
-   * Forget one. Answers whether there was one to forget, so a caller can tell a stale screen from a
-   * failure rather than reporting both as success.
+   * Every provider this deployment holds.
+   *
+   * Read-only: individual-user SaaS has no administrator who could authorize
+   * adding or removing one, so providers come from deployment configuration
+   * and this store never writes.
    */
-  remove: (providerId: string) => Promise<boolean>;
+  list: () => Promise<RegisteredIdentityProvider[]>;
 };
 
 export function createIdentityProviderStore(
@@ -73,15 +73,6 @@ export function createIdentityProviderStore(
         protocol: row.samlConfig ? "saml" : "oidc",
         registeredBy: row.userId,
       }));
-    },
-
-    remove: async (providerId) => {
-      const removed = await database
-        .delete(ssoProviders)
-        .where(eq(ssoProviders.providerId, providerId))
-        .returning({ providerId: ssoProviders.providerId });
-
-      return removed.length > 0;
     },
   };
 }

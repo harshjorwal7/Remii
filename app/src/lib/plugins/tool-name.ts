@@ -16,7 +16,70 @@ export type ToolName = {
   detail?: string;
 };
 
-export function readToolName(name: string): ToolName {
+/**
+ * The tools a Bot is given by this app rather than by a server, in the words a person would use.
+ *
+ * `humanise` below is for a vendor's tool, where the name is somebody else's to guess at. These are
+ * this app's own names, and they are the ones a person actually watches: `delegate_bot` and
+ * `computer_run_command` are the two lines in a transcript that say what their Bot is doing, and
+ * both read as code. Guessing at them produces "Delegate bot" and "Computer run command" — the first
+ * says the mechanism, the second says nothing at all about a browser.
+ *
+ * Keyed by exact name rather than by prefix, so a deployment that renames or shadows a tool is not
+ * silently relabelled. A miss falls through to the name, which is the pre-existing behaviour.
+ */
+const OWN_TOOLS: Record<string, string> = {
+  // Delegation. The whole point of a supervisor, so these three get real sentences.
+  delegate_bot: "Delegated",
+  message_bot: "Sent a message to",
+  bot_add_and_delegate: "Summoned and delegated to",
+
+  // The browser, which a person needs to recognise at a glance because they may have to take over.
+  computer_navigate: "Opened a page",
+  computer_page_frame: "Read the page",
+  computer_snapshot: "Looked at the screen",
+  computer_screenshot: "Took a screenshot",
+  computer_read: "Read the screen",
+  computer_click: "Clicked",
+  computer_type: "Typed",
+  computer_key: "Pressed a key",
+  computer_scroll: "Scrolled",
+  computer_read_file: "Read a file on the computer",
+  computer_write_file: "Wrote a file on the computer",
+  computer_list_files: "Listed files on the computer",
+  computer_run_command: "Ran a command on the computer",
+  computer_request_help: "Asked for help with the browser",
+  computer_take_control: "Asked you to take the browser",
+  computer_request_secret: "Asked for a password or secret",
+
+  // The web.
+  web_search: "Searched the web",
+  web_open: "Opened a web page",
+};
+
+/**
+ * Delegation tools, whose line is only half a sentence without its target.
+ *
+ * A label of "Delegated" on its own says that a Bot handed something away and not to whom, which
+ * for a supervisor is the only part worth knowing: the whole design of this app is that the person
+ * cannot see which of their coworkers is holding the work. The target is in the arguments, so it
+ * is read from there.
+ */
+const DELEGATION_TOOLS: Record<string, string> = {
+  delegate_bot: "bot",
+  message_bot: "bot",
+  bot_add_and_delegate: "bot",
+};
+
+export function readToolName(name: string, args?: string): ToolName {
+  const own = OWN_TOOLS[name];
+  if (own) {
+    const target = DELEGATION_TOOLS[name]
+      ? readDelegationTarget(args)
+      : undefined;
+    return target ? { label: `${own} ${target}` } : { label: own };
+  }
+
   const parts = name.split("__");
   if (parts.length < 3 || parts[0] !== "mcp") return { label: name };
 
@@ -51,6 +114,28 @@ export function readToolName(name: string): ToolName {
   const serverWords = wordsOf(server ?? "").map(singular);
   const named = containsPhrase(wordsActedOn, serverWords);
   return named ? { label } : { label, detail: server };
+}
+
+/**
+ * The coworker a delegation tool was aimed at, in the words their name is written with.
+ *
+ * Reads the raw arguments because that is what the transcript holds, and parses defensively: a
+ * malformed or absent argument is a line with no target, never a thrown render. Capped, because
+ * this is a label on screen and a tool argument is model output.
+ */
+function readDelegationTarget(args: string | undefined): string | undefined {
+  if (!args) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(args);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const target = (parsed as Record<string, unknown>).bot;
+  if (typeof target !== "string") return undefined;
+  const trimmed = target.trim().slice(0, 60);
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /**

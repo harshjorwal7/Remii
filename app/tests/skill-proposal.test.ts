@@ -29,6 +29,7 @@ const skill = (over: Partial<PluginSkill> = {}): PluginSkill => ({
   installedBy: null,
   grantedTo: [],
   tools: [],
+  repo: null,
   ...over,
 });
 
@@ -49,6 +50,7 @@ describe("checking what a Bot proposed", () => {
       summary: "Summarise the week.",
       instructions: "List what moved this week, newest first.",
       tools: ["google-drive/search_files"],
+      repo: null,
     });
   });
 

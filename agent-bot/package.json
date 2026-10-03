@@ -1,5 +1,5 @@
 {
-  "name": "@openbot/agent-bot",
+  "name": "@remii/agent-bot",
   "license": "MIT",
   "private": true,
   "type": "module",

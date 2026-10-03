@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { motion, useReducedMotion } from "motion/react";
 import { useState } from "react";
@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import {
+  authClient,
   providerName,
   signInWith,
   signInWithEmailDomain,
@@ -39,6 +40,178 @@ export const Route = createFileRoute("/sign")({
   },
   component: SignScreen,
 });
+
+/**
+ * Email (or username) plus password, Remi-style.
+ *
+ * Two tabs and three fields, no OAuth round trip. Usernames sign in through the username
+ * plugin; anything with an @ signs in by email. On success the session cookie is set by
+ * the response and the app navigates home, where the authed gate reads the new session.
+ */
+function EmailPasswordForm({
+  busy,
+  onError,
+}: {
+  busy: boolean;
+  onError: (message: string | null) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [mode, setMode] = useState<"in" | "up">("in");
+  const [identifier, setIdentifier] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [working, setWorking] = useState(false);
+
+  async function submit(submission: React.FormEvent) {
+    submission.preventDefault();
+    onError(null);
+    setWorking(true);
+    try {
+      if (mode === "up") {
+        if (password !== confirmPassword) {
+          throw new Error("Passwords do not match.");
+        }
+        const id = identifier.trim();
+        const created = await authClient.signUp.email({
+          name: username.trim() || id,
+          username: username.trim() || undefined,
+          email: id,
+          password,
+        });
+        if (created.error) throw new Error(created.error.message);
+      } else if (identifier.includes("@")) {
+        const result = await authClient.signIn.email({
+          email: identifier.trim(),
+          password,
+        });
+        if (result.error) throw new Error(result.error.message);
+      } else {
+        const result = await authClient.signIn.username({
+          username: identifier.trim(),
+          password,
+        });
+        if (result.error) throw new Error(result.error.message);
+      }
+      // The session cookie is set by the response above. The authed gate reads the user
+      // query, which still holds the pre-sign-in null — invalidate first so the landing page
+      // does not bounce straight back here.
+      await queryClient.invalidateQueries({ queryKey: ["auth"] });
+      // A full navigation, not the router's: the fresh document boots authed on the session
+      // cookie with no stale cache to argue with.
+      window.location.assign("/");
+    } catch (caughtError) {
+      onError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Could not sign in.",
+      );
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  const tab = (id: "in" | "up", label: string) => (
+    <button
+      id={`sign-${id}`}
+      role="tab"
+      aria-selected={mode === id}
+      className={`flex-1 rounded-md px-3 py-1.5 text-sm tracking-tight transition-colors ${
+        mode === id
+          ? "bg-background text-foreground shadow-sm"
+          : "text-muted-foreground hover:text-foreground"
+      }`}
+      disabled={busy || working}
+      onClick={() => setMode(id)}
+      type="button"
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="mb-4">
+      <div
+        aria-label="Account access"
+        className="mb-3 flex rounded-lg bg-muted p-1"
+        role="tablist"
+      >
+        {tab("in", "Sign in")}
+        {tab("up", "Sign up")}
+      </div>
+      <form
+        aria-labelledby={`sign-${mode}`}
+        className="flex flex-col gap-2"
+        onSubmit={submit}
+        role="tabpanel"
+      >
+        <Input
+          className="h-10"
+          autoComplete={mode === "up" ? "email" : "username"}
+          disabled={busy || working}
+          onChange={(event) => setIdentifier(event.target.value)}
+          placeholder="Email or username"
+          required
+          value={identifier}
+        />
+        {mode === "up" ? (
+          <Input
+            className="h-10"
+            autoComplete="username"
+            disabled={busy || working}
+            onChange={(event) => setUsername(event.target.value)}
+            placeholder="Username (optional)"
+            value={username}
+          />
+        ) : null}
+        <Input
+          className="h-10"
+          autoComplete={mode === "up" ? "new-password" : "current-password"}
+          disabled={busy || working}
+          minLength={8}
+          onChange={(event) => setPassword(event.target.value)}
+          placeholder="Password (8+ characters)"
+          required
+          type="password"
+          value={password}
+        />
+        {mode === "up" ? (
+          <Input
+            className="h-10"
+            autoComplete="new-password"
+            disabled={busy || working}
+            minLength={8}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+            placeholder="Confirm password"
+            required
+            type="password"
+            value={confirmPassword}
+          />
+        ) : null}
+        <Button
+          className="w-full tracking-tight"
+          disabled={
+            busy ||
+            working ||
+            identifier.trim().length === 0 ||
+            password.length === 0 ||
+            (mode === "up" && password !== confirmPassword)
+          }
+          size="lg"
+          type="submit"
+        >
+          {working
+            ? mode === "up"
+              ? "Creating account…"
+              : "Signing in…"
+            : mode === "up"
+              ? "Create account"
+              : "Sign in"}
+        </Button>
+      </form>
+    </div>
+  );
+}
 
 function SignScreen() {
   // Which provider is being opened, rather than whether one is: with three buttons, a single
@@ -99,7 +272,7 @@ function SignScreen() {
   };
 
   return (
-    <div className="flex flex-col h-dvh w-full items-center justify-center -mt-12">
+    <div className="flex min-h-dvh w-full items-center justify-center overflow-y-auto px-4 py-8">
       <motion.div
         animate="shown"
         className="flex-1 flex w-full max-w-82 flex-col items-center justify-center p-4"
@@ -128,6 +301,9 @@ function SignScreen() {
           transition={{ duration: ENTRANCE_SECONDS, ease: EASE_OUT }}
           variants={{ hidden, shown }}
         >
+          {options?.emailPassword ? (
+            <EmailPasswordForm busy={opening !== null} onError={setError} />
+          ) : null}
           {providers.length > 0 ? (
             <div className="flex flex-col gap-2">
               {providers.map((provider) => (
@@ -140,14 +316,14 @@ function SignScreen() {
                  * that configured three has three, and none of them is the recommended one.
                  */
                 <Button
-                  className="h-10 w-full justify-start gap-3 px-3 tracking-tight"
+                  className="w-full justify-start gap-3 px-3 tracking-tight"
                   disabled={opening !== null}
                   key={provider}
                   onClick={() => handleSignIn(provider)}
                   size="lg"
                   variant="outline"
                 >
-                  <ProviderLogo provider={provider} />
+                  <ProviderLogo data-icon="inline-start" provider={provider} />
                   {/* Centred against the button, not against the space left of the mark. */}
                   <span className="flex-1 text-center">
                     {opening === provider
@@ -159,7 +335,7 @@ function SignScreen() {
                 </Button>
               ))}
             </div>
-          ) : options?.sso ? null : (
+          ) : options?.sso || options?.emailPassword ? null : (
             <p className="text-center text-sm text-muted-foreground">
               No sign-in provider is configured for this deployment.
             </p>
@@ -180,6 +356,7 @@ function SignScreen() {
                 </div>
               ) : null}
               <Input
+                className="h-10"
                 autoComplete="email"
                 onChange={(event) => setEmail(event.target.value)}
                 placeholder="you@company.com"
@@ -188,7 +365,7 @@ function SignScreen() {
                 value={email}
               />
               <Button
-                className="mt-2 h-10 w-full tracking-tight"
+                className="mt-2 w-full tracking-tight"
                 disabled={opening !== null || email.trim().length === 0}
                 size="lg"
                 type="submit"

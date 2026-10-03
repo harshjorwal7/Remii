@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { eq } from "drizzle-orm";
 import {
   createPolicyStore,
   DEFAULT_ACTION_POLICY,
@@ -26,7 +25,22 @@ const configured = DEFAULT_ACTION_POLICY;
 const rule = 'intent == "activate" && contains(element.name, "submit")';
 
 afterEach(async () => {
-  await database.delete(actionPolicy).where(eq(actionPolicy.id, "current"));
+  /*
+   * EVERY row, and on `userId` rather than an `id`.
+   *
+   * `action_policy`'s primary key is the owner column itself — there is no separate `id` — so
+   * `actionPolicy.id` was `undefined` and the `where` rendered as an empty clause. Postgres rejected it
+   * with `syntax error at or near "="`, which reads as a database fault rather than as a column that
+   * does not exist.
+   *
+   * The whole table is cleared rather than one named row, because `set` writes to whichever owner it
+   * was handed — `"default"` with no `by`, or the caller's address with one — so a sweep of one row
+   * left the others behind. A leftover row is not a cosmetic problem here: `load()` answers "the
+   * database" whenever the table is non-empty, so the next test's "a deployment that never set one gets
+   * its configured default" fails on somebody else's boundary. That is what these tests were reporting
+   * before the sweep was widened.
+   */
+  await database.delete(actionPolicy);
 });
 
 describe("a boundary set while running", () => {
@@ -38,9 +52,17 @@ describe("a boundary set while running", () => {
       "admin@example.test",
     );
 
+    /*
+     * `get("admin@example.test")`, because that is who the boundary belongs to.
+     *
+     * `set` writes to whichever owner it was handed — the caller's address when there is a `by`, and
+     * `"default"` when there is not — so the row is now keyed on the person who changed it and a bare
+     * `get()` reads the DEPLOYMENT default rather than theirs. Read it back through the same owner and
+     * this is still a restart test: a fresh store, the same database, no memory of the write.
+     */
     const after = createPolicyStore(configured, database);
-    expect(await after.load()).toBe("the database");
-    expect(after.get().deny).toEqual([rule]);
+    expect(await after.load("admin@example.test")).toBe("the database");
+    expect(after.get("admin@example.test").deny).toEqual([rule]);
   });
 
   test("a deployment that never set one gets its configured default", async () => {

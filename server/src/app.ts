@@ -1,3 +1,5 @@
+import type { Message } from "@ag-ui/client";
+import { and, asc, eq } from "drizzle-orm";
 import type { Hono as HonoApp, MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -9,15 +11,13 @@ import {
   sameToken,
 } from "./agents/callback-token";
 import type { BotAccessCheck } from "./agents/profile-policy";
+import { canManageAgent } from "./agents/profile-policy";
 import type { AgentProfileStore } from "./agents/profile-store";
 import { createAgentRoutes } from "./agents/routes";
 import {
-  type AuditEventType,
   type AuditInitiator,
-  AuditQueryError,
   type AuditReader,
   type AuditStore,
-  auditQueryFromUrl,
   DEPLOYMENT_INITIATOR,
   recordAuditEvent,
 } from "./audit";
@@ -26,10 +26,10 @@ import {
   type AppVariables,
   type AuthService,
   createRequireUser,
-  type RoleRepository,
-  requireAdmin,
 } from "./auth/guards";
 import type { IdentityProviderStore } from "./auth/identity-provider-store";
+import { createBillingRoutes } from "./billing/routes";
+import { createDodoWebhookRoutes } from "./billing/webhook-routes";
 import {
   createAttachmentRoutes,
   createChannelAttachmentRoutes,
@@ -46,17 +46,23 @@ import type { ComponentStore } from "./components/store";
 import type { ComputerGateway } from "./computer/gateway";
 import type { PageFrameStore } from "./computer/page-frames";
 import type { PolicyStore } from "./computer/policy-store";
-import { createComputerRoutes } from "./computer/routes";
+import {
+  createComputerRoutes,
+  createPolicyRoutes,
+} from "./computer/routes";
 import { configuredAuthProviders, type DeploymentConfig } from "./config";
-import type { CredentialAdminService, CredentialInput } from "./credentials";
+import type { CredentialInput, CredentialWriteService } from "./credentials";
 import type { Database } from "./db/client";
 import { withoutStatement } from "./db/query-failure";
+import { users } from "./db/schema";
+import { threadMessages, threads } from "./db/schema/threads";
+import {
+  type ExecutionModeStore,
+  InvalidExecutionModeError,
+} from "./execution-mode";
 import type { HostAccessBroker } from "./host-access/broker";
 import { createHostAccessRoutes } from "./host-access/routes";
-import { createIntelligenceClient } from "./intelligence-client";
-import { parsePageLimit } from "./paging";
 import type { OnboardingStore } from "./people/onboarding";
-import { MAX_PAGE, type PeopleStore } from "./people/store";
 import type { ComposioBroker } from "./plugins/broker";
 import { createPluginRoutes } from "./plugins/routes";
 import {
@@ -65,16 +71,21 @@ import {
   type PluginStore,
 } from "./plugins/store";
 import { REFUSAL_MARKER, vendorAnswer } from "./plugins/tools";
+import { createRemiRoutes } from "./remi/routes";
+import { createTelegramRoutes } from "./remi/telegram-routes";
 import { createRoutineRoutes, type RoutineStore } from "./routines/routes";
 import type { RoutineRunner } from "./routines/runner";
 import type { IntentRouter } from "./routing/classify";
 import { createRoutingRoutes } from "./routing/routes";
+import type { BlobStore } from "./storage/blob-store";
 import type { PackageStatusReader } from "./tenant-package";
+import { expandStoredMessage, truncateHistoryMessage } from "./threads/local";
 import {
   INSTRUCTIONS_LIMIT,
   InstructionsTooLongError,
   type UserInstructionsStore,
 } from "./user-instructions";
+import { createVaultRoutes, type VaultStore } from "./vault/routes";
 
 /**
  * How much of a multipart body is boundary, headers and other fields rather than file.
@@ -121,35 +132,35 @@ export type DeploymentToolCaller = (input: {
   botId: string;
   actorId: string;
   initiator?: AuditInitiator;
+  threadId?: string;
 }) => Promise<{ text: string; isError: boolean } | null>;
 
-async function recordPersonEvent(
-  auditStore: AuditStore | undefined,
-  context: { var: AppVariables },
-  eventType:
-    | "person.role_changed"
-    | "person.access_revoked"
-    | "person.access_restored",
-  person: { id: string; email: string },
-  payload: Record<string, unknown>,
-) {
-  if (!auditStore) return;
-  await recordAuditEvent(auditStore, {
-    eventType,
-    targetType: "person",
-    targetId: person.id,
-    actorUserId: context.var.actor.id,
-    payload: { email: person.email, ...payload },
-  });
+/**
+ * The one `requireUser` this deployment serves, chosen the same way everywhere.
+ *
+ * Exported rather than inlined because two files now need it and the choice is a security
+ * decision, not a detail. A route that quietly built its own copy could end up behind
+ * `createDevRequireUser` — which admits every request as an administrator — while the rest of the
+ * app was checking a real session, and the two would disagree about who is signed in.
+ */
+export function requireUserFor(
+  singleUser: boolean | undefined,
+  auth: AuthService | undefined,
+): MiddlewareHandler<{ Variables: AppVariables }> {
+  // One administrator, when nothing is configured to sign anybody in. Checked first, and only ever
+  // true when there is no provider, so a configured deployment cannot fall back to it.
+  if (singleUser) return createDevRequireUser();
+  if (auth) return createRequireUser(auth);
+  return async (context) =>
+    context.json({ error: "No identity provider is configured." }, 503);
 }
 
 export function createApp(
   config: DeploymentConfig,
   auth?: AuthService,
-  roleRepository?: RoleRepository,
   auditReader?: AuditReader,
-  credentialService?: CredentialAdminService,
-  packageStatusReader?: PackageStatusReader,
+  _credentialService?: CredentialWriteService,
+  _packageStatusReader?: PackageStatusReader,
   /**
    * The CopilotKit endpoint, already built by the caller.
    *
@@ -205,14 +216,6 @@ export function createApp(
    * says nothing about which deployment the conversation belongs to.
    */
   threadIdentity?: ThreadIdentity,
-  /**
-   * Who has signed in, and what an administrator may do about them.
-   *
-   * Absent leaves the people screen answering 503 rather than an empty list, which is the honest
-   * degraded behaviour: "nobody has signed in" and "this deployment cannot tell you" are different
-   * answers and an administrator deciding who has access needs to know which one they are reading.
-   */
-  peopleStore?: PeopleStore,
   /**
    * The enterprise identity providers this deployment has registered.
    *
@@ -313,13 +316,90 @@ export function createApp(
    * no app directory to offer, rather than one that lists apps nobody can connect.
    */
   composio?: { broker: ComposioBroker },
+  /**
+   * One cron tick: claim due scheduled jobs and run each as its owner. Built in index.ts where
+   * the turn runner and channel store live. Absent leaves the route unmounted, the same degraded
+   * shape as the routines door: a deployment with no worker has no tick to call.
+   */
+  cronTick?: () => Promise<{ claimed: number; ran: number; failed: number }>,
+  /**
+   * One Telegram message in, one turn out. Built in index.ts where the turn runner and
+   * channel store live. Absent leaves the route unmounted: no bot token, no door.
+   */
+  telegramIncoming?: (input: {
+    chatId: string;
+    text: string;
+    voiceFileId?: string;
+    photoFileIds?: string[];
+    documentFileId?: string;
+    documentName?: string;
+  }) => Promise<{ replied: boolean }>,
+  /**
+   * Telegram link management for settings screens. Token and username travel together because
+   * a code without the bot it belongs to is a `t.me` link to nowhere. Absent leaves the
+   * routes unmounted.
+   */
+  telegram?: { token?: string; username?: string },
+  /**
+   * One person's execution switch: whether their coworkers act directly or ask first.
+   *
+   * Appended last, like everything above it: these are positional, so inserting one anywhere
+   * else silently shifts every existing call site's arguments by one.
+   *
+   * Absent leaves the routes answering 503. A screen that cannot read the switch must not
+   * draw one in the wrong position.
+   */
+  executionModes?: ExecutionModeStore,
+  /**
+   * One Composio trigger event in, zero or one turns out. Built in index.ts where the turn
+   * runner, channel store and remi store live. Appended last, positionally. Absent leaves
+   * the route unmounted: no broker, no door. The vendor secret is checked at the route when
+   * configured (see below), and the handler itself never throws — a poison payload returns
+   * a reason, not a retry storm.
+   */
+  triggerIncoming?: (payload: unknown) => Promise<{
+    success: boolean;
+    reason?: string;
+    automationId?: string;
+    taskId?: string;
+  }>,
+  /*
+   * Where a saved file's bytes are. APPENDED LAST, FOR THE POSITIONAL REASON THE NOTE ABOVE MAKES:
+   * every caller of this function passes its collaborators by position, and a parameter inserted in
+   * the middle shifts every argument after it — silently, because they are all optional and all
+   * typed `never` in the tests that count them. Absent leaves the Files page listing files it cannot
+   * open, which is the correct degraded behaviour: a deployment with no storage driver has not lost
+   * any files, it simply cannot serve the ones whose bytes went somewhere else.
+   */
+  _blobStore?: BlobStore,
+  /**
+   * One person's saved information: logins, cards, personal details, and the items a coworker may
+   * reach for.
+   *
+   * Appended last, like every collaborator above it: these parameters are positional, so inserting one
+   * anywhere else silently shifts every existing call site's arguments by one.
+   *
+   * Absent leaves the routes unmounted rather than mounted and refusing every call, the same degraded
+   * shape `routineStore` and `userInstructions` take — a deployment that never built the store has no
+   * door for this at all, not a locked one.
+   */
+  vaultStore?: VaultStore,
 ) {
+  /*
+   * The optional collaborators, named once so the routes below can refer to them by name.
+   *
+   * `createApp` takes a long positional list — appended last, in this file's own convention — and
+   * past about the fourth parameter nobody can read which is which without counting from the top.
+   * This alias is what `createRemiRoutes({ blobs: blobStore })` refers to, and it costs one line.
+   */
+  const blobStore = _blobStore;
+
   const app = new Hono<{ Variables: AppVariables }>();
 
   app.get("/health", (context) => context.json({ status: "ok" }));
-  // Projected, never the raw runtime. config.runtime carries the Intelligence contract, including
-  // INTELLIGENCE_API_KEY and the licence token, and this endpoint is reachable by anyone. Returning
-  // the object wholesale would serve deployment secrets to the browser. Add fields here explicitly.
+  // Projected, never the raw runtime. config holds deployment secrets and this endpoint
+  // is reachable by anyone. Returning the object wholesale would serve them to the browser.
+  // Add fields here explicitly.
   app.get("/api/capabilities", async (context) =>
     context.json({
       mode: config.runtime.mode,
@@ -335,6 +415,16 @@ export function createApp(
        */
       generativeUi: config.generativeUi,
       /*
+       * Whether any Bot here has a computer behind it.
+       *
+       * Read by the browser because the browser owns half of this capability too: it offers
+       * the model the computer_* tools and draws the watch-screen button. A deployment that
+       * switched the server half off while the browser kept offering would have Bots calling
+       * tools nothing executes and people opening a screen onto nothing. One flag, read by
+       * both halves, so off means off — and the screen button answers "coming soon".
+       */
+      computer: config.computer !== undefined,
+      /*
        * Which identity providers this deployment can sign somebody in with.
        *
        * Ids only, never the credentials: `configuredAuthProviders` returns names, and the clients
@@ -346,6 +436,17 @@ export function createApp(
        */
       authProviders: configuredAuthProviders(config.auth),
       /*
+       * Whether email (or username) plus password sign-in is on. Separate from the OAuth ids
+       * above because it draws a form, not a button.
+       */
+      emailPassword: config.auth?.emailPassword === true,
+      /*
+       * How Bots act by default on this deployment: `direct` (do what was asked, immediately)
+       * or `ask-first` (confirm external actions via `ask_person` first). A person overrides
+       * this for themselves on the General settings screen; this is the value they inherit.
+       */
+      executionMode: config.executionMode,
+      /*
        * Whether any enterprise identity provider has been registered.
        *
        * A count, not a list. The sign-in screen only needs to know whether to offer the email box
@@ -353,26 +454,24 @@ export function createApp(
        * companies use this deployment, which is not theirs to have before they sign in.
        */
       ssoConfigured: ((await identityProviders?.list()) ?? []).length > 0,
+      authMode: config.auth ? "session" : "single-user",
     }),
   );
   /*
-   * Registering an identity provider is an administrator's decision, not a signed-in one.
-   *
-   * Better Auth's SSO plugin guards these with `sessionMiddleware`, which asks only that somebody is
-   * signed in. That is the wrong bar here: registering an IdP for a domain means anybody it vouches
-   * for can sign in, so a plain user reaching this could mint themselves colleagues. The routes are
-   * mounted through this handler, so the check goes in front of it.
+   * Individual-user SaaS has no company SSO to register at runtime: providers
+   * come from deployment configuration, and there is no administrator who
+   * could authorize a new one. Better Auth's SSO plugin still serves its
+   * mutation routes, and its own guard asks only that somebody is signed in —
+   * which would let any user register an identity provider for a domain and
+   * mint themselves colleagues. So those three paths are closed entirely.
+   * Sign-in through an already-configured provider keeps working; nothing
+   * here touches it.
    */
-  const ADMIN_ONLY_AUTH_ROUTES = new Set([
+  const CLOSED_SSO_ROUTES = new Set([
     "/api/auth/sso/register",
     "/api/auth/sso/update-provider",
     "/api/auth/sso/delete-provider",
   ]);
-
-  const AUTH_ROUTE_EVENTS: Record<string, AuditEventType | undefined> = {
-    "/api/auth/sso/register": "identity_provider.registered",
-    "/api/auth/sso/delete-provider": "identity_provider.removed",
-  };
 
   app.on(["GET", "POST"], "/api/auth/*", async (context) => {
     if (!auth) {
@@ -382,78 +481,45 @@ export function createApp(
       );
     }
 
-    if (ADMIN_ONLY_AUTH_ROUTES.has(new URL(context.req.url).pathname)) {
-      const session = await auth.api.getSession({
-        headers: context.req.raw.headers,
-        // Fresh, not the cookie cache: a role changed a moment ago has to apply to this request.
-        query: { disableCookieCache: true },
-      });
-      const roles = session?.user
-        ? ((await roleRepository?.rolesForUser(session.user.id)) ?? [])
-        : [];
-      if (!roles.includes("admin")) {
-        return context.json(
-          { error: "Only an administrator may change identity providers." },
-          403,
-        );
+    if (CLOSED_SSO_ROUTES.has(new URL(context.req.url).pathname)) {
+      return context.json(
+        { error: "Registering an identity provider is not available." },
+        410,
+      );
+    }
+
+    return auth.handler(context.req.raw);
+  });
+
+  const requireUser = requireUserFor(config.singleUser, auth);
+
+  app.get("/api/me", requireUser, async (context) => {
+    let creditBalance = 50;
+    let stripeCustomerId: string | null = null;
+    let isBanned = false;
+    if (attachmentDatabase) {
+      const [u] = await attachmentDatabase
+        .select({
+          creditBalance: users.creditBalance,
+          stripeCustomerId: users.stripeCustomerId,
+          isBanned: users.isBanned,
+        })
+        .from(users)
+        .where(eq(users.id, context.var.actor.id))
+        .limit(1);
+      if (u) {
+        creditBalance = u.creditBalance ?? 50;
+        stripeCustomerId = u.stripeCustomerId ?? null;
+        isBanned = u.isBanned ?? false;
       }
     }
 
-    const eventType =
-      AUTH_ROUTE_EVENTS[new URL(context.req.url).pathname] ?? undefined;
-
-    // Read before the handler runs, because it consumes the stream: a clone taken afterwards is of
-    // a request whose body is already gone, and the row would name no provider.
-    const named =
-      auditStore && eventType
-        ? ((await context.req.raw
-            .clone()
-            .json()
-            .catch(() => null)) as { providerId?: unknown } | null)
-        : null;
-
-    const answer = await auth.handler(context.req.raw);
-
-    if (auditStore && eventType && answer.ok) {
-      const session = await auth.api.getSession({
-        headers: context.req.raw.headers,
-        query: { disableCookieCache: true },
-      });
-      await recordAuditEvent(auditStore, {
-        eventType,
-        targetType: "identity_provider",
-        ...(typeof named?.providerId === "string"
-          ? { targetId: named.providerId }
-          : {}),
-        ...(session?.user ? { actorUserId: session.user.id } : {}),
-        payload: {
-          ...(typeof named?.providerId === "string"
-            ? { providerId: named.providerId }
-            : {}),
-          ...(session?.user?.email ? { by: session.user.email } : {}),
-        },
-      });
-    }
-
-    return answer;
-  });
-
-  const authenticationUnavailable: MiddlewareHandler<{
-    Variables: AppVariables;
-  }> = async (context) =>
-    context.json({ error: "No identity provider is configured." }, 503);
-  // One administrator, when nothing is configured to sign anybody in. Checked first, and only ever
-  // true when there is no provider, so a configured deployment cannot fall back to it.
-  const requireUser = config.singleUser
-    ? createDevRequireUser()
-    : auth && roleRepository
-      ? createRequireUser(auth, roleRepository)
-      : authenticationUnavailable;
-
-  app.get("/api/me", requireUser, async (context) =>
-    context.json({
+    return context.json({
       user: {
         ...context.var.actor,
+        creditBalance,
+        stripeCustomerId,
+        isBanned,
         /*
          * Read here rather than in the guard, so only this route pays the extra query. Null means
          * this deployment does not track onboarding, which the app reads as nothing to finish;
@@ -463,8 +529,8 @@ export function createApp(
           ? await onboardingStore.status(context.var.actor.id)
           : null,
       },
-    }),
-  );
+    });
+  });
   app.post("/api/me/onboarding", requireUser, async (context) => {
     if (!onboardingStore) {
       return context.json({ error: "Onboarding is not available." }, 503);
@@ -499,7 +565,7 @@ export function createApp(
   /*
    * A person's own standing instructions, read and written by the person they belong to.
    *
-   * `requireUser` and never `requireAdmin`, and scoped to `context.var.actor.id` rather than to
+   * `requireUser` for every signed-in person (no administrator tier exists), and scoped to `context.var.actor.id` rather than to
    * anything in the path or the body. There is deliberately no route here for reading somebody
    * else's or writing on their behalf: these instructions go into a prompt that then speaks as that
    * person's coworker, so a way to set them for another account would be a way to put words in
@@ -579,380 +645,80 @@ export function createApp(
 
     return context.json({ instructions: saved });
   });
-  app.get("/api/admin/status", requireUser, (context) => {
-    const denied = requireAdmin(context);
-    return denied ?? context.json({ status: "ok" });
-  });
-  app.get("/api/admin/audit-events", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) {
-      return denied;
-    }
-    if (!auditReader) {
-      return context.json({ error: "Audit logging is not configured." }, 503);
+
+  /*
+   * One person's execution switch, read and written by the person it belongs to.
+   *
+   * `requireUser` for every signed-in person (no administrator tier exists), scoped to `context.var.actor.id`, for the same
+   * reason as standing instructions above: this changes how every coworker acts for that
+   * person, so setting it for somebody else would be acting on their behalf in every channel
+   * they work in. The value itself is safe to audit (it is a switch position, not prose), so
+   * unlike instructions the trail records what it was set to.
+   */
+  app.get("/api/settings/execution-mode", requireUser, async (context) => {
+    if (!executionModes) {
+      return context.json({ error: "Execution mode is not available." }, 503);
     }
 
-    try {
+    return context.json({
+      // Null is what inheriting the deployment default looks like to a settings screen, and
+      // the screen draws the inherited value beside it from /api/capabilities.
+      mode: await executionModes.read(context.var.actor.id),
+      defaultMode: config.executionMode,
+    });
+  });
+  app.put("/api/settings/execution-mode", requireUser, async (context) => {
+    if (!executionModes) {
+      return context.json({ error: "Execution mode is not available." }, 503);
+    }
+
+    const body = (await context.req.json().catch(() => undefined)) as
+      | { mode?: unknown }
+      | undefined;
+
+    if (
+      body?.mode !== undefined &&
+      body?.mode !== null &&
+      typeof body?.mode !== "string"
+    ) {
       return context.json(
-        await auditReader.list(auditQueryFromUrl(new URL(context.req.url))),
+        { error: 'Send "direct", "ask-first" or empty.' },
+        400,
+      );
+    }
+
+    let saved: "direct" | "ask-first" | null;
+    try {
+      saved = await executionModes.write(
+        context.var.actor.id,
+        (body?.mode ?? null) as "direct" | "ask-first" | null,
       );
     } catch (error) {
-      if (error instanceof AuditQueryError) {
+      if (error instanceof InvalidExecutionModeError) {
         return context.json({ error: error.message }, 400);
       }
       throw error;
     }
-  });
-  /*
-   * Who is here, and what they may do.
-   *
-   * Administrator-only, like every other route in this group. A plain user reading the list would
-   * learn every colleague's address and when they last signed in, which is not theirs to have.
-   */
-  app.get("/api/admin/people", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) {
-      return denied;
-    }
-    if (!peopleStore) {
-      return context.json({ error: "People are not available." }, 503);
-    }
 
-    /*
-     * A page, not the deployment.
-     *
-     * `limit` is parsed strictly and clamped into range at the edge, against the same ceiling the
-     * store enforces, so a caller cannot ask for everybody by naming a large number and a typo
-     * like `12abc` is a 400 rather than a silently coerced page. `search` is what makes paging
-     * usable: an administrator looking for one colleague should not have to walk pages to reach
-     * them.
-     */
-    const url = new URL(context.req.url);
-    const parsed = parsePageLimit(url.searchParams.get("limit"), MAX_PAGE);
-    if (!parsed.ok) {
-      return context.json({ error: parsed.error }, 400);
-    }
-    // An unbounded `search` becomes a `%...% ILIKE` full scan. Cap it so a multi-megabyte
-    // query cannot be used as a cheap denial of service against the people table.
-    const search = url.searchParams.get("search");
-    if (search !== null && search.length > 200) {
-      return context.json(
-        { error: "A search of at most 200 characters is required." },
-        400,
-      );
-    }
-
-    return context.json(
-      await peopleStore.list({
-        ...(url.searchParams.get("search")
-          ? { search: url.searchParams.get("search") as string }
-          : {}),
-        ...(url.searchParams.get("cursor")
-          ? { cursor: url.searchParams.get("cursor") as string }
-          : {}),
-        ...(parsed.limit !== undefined ? { limit: parsed.limit } : {}),
-      }),
-    );
-  });
-
-  app.post("/api/admin/people/:userId/role", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) {
-      return denied;
-    }
-    if (!peopleStore) {
-      return context.json({ error: "People are not available." }, 503);
-    }
-
-    const body = await context.req.json().catch(() => null);
-    const role = (body as { role?: unknown } | null)?.role;
-    if (role !== "admin" && role !== "user") {
-      return context.json(
-        { error: "A role of admin or user is required." },
-        400,
-      );
-    }
-
-    const userId = context.req.param("userId");
-    const person = await peopleStore.find(userId);
-    if (!person) {
-      return context.json({ error: "That person is not here." }, 404);
-    }
-
-    /*
-     * The configured floor wins over the screen.
-     *
-     * Somebody named in INITIAL_ADMIN_EMAILS is promoted again at their next sign-in whatever this
-     * route writes, so allowing the demotion would produce a screen that lies until they come back.
-     * Refusing says the real thing: change the deployment's configuration.
-     */
-    if (person.configuredAdmin && role !== "admin") {
-      return context.json(
-        {
-          error:
-            "This deployment names that address in INITIAL_ADMIN_EMAILS, so they stay an administrator. Change the configuration instead.",
+    if (auditStore) {
+      await recordAuditEvent(auditStore, {
+        eventType: "configuration.changed",
+        targetType: "execution_mode",
+        targetId: context.var.actor.id,
+        actorUserId: context.var.actor.id,
+        payload: {
+          change:
+            saved === null
+              ? "execution_mode_inherited"
+              : "execution_mode_saved",
+          ...(saved === null ? {} : { mode: saved }),
         },
-        409,
-      );
-    }
-
-    /*
-     * Nobody demotes themselves.
-     *
-     * An administrator who does has just locked themselves out of the screen that would undo it,
-     * and on a deployment with one administrator that is the whole deployment. Somebody else with
-     * the role can do it, which is the check that makes handover possible without making lockout
-     * a slip of the finger.
-     */
-    if (context.var.actor.id === userId && role !== "admin") {
-      return context.json(
-        { error: "You cannot remove your own administrator role." },
-        409,
-      );
-    }
-
-    if (person.role !== role) {
-      await peopleStore.setRole(userId, role);
-      await recordPersonEvent(
-        auditStore,
-        context,
-        "person.role_changed",
-        person,
-        {
-          from: person.role,
-          to: role,
-        },
-      );
-    }
-
-    return context.json({ person: await peopleStore.find(userId) });
-  });
-
-  app.post("/api/admin/people/:userId/access", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) {
-      return denied;
-    }
-    if (!peopleStore) {
-      return context.json({ error: "People are not available." }, 503);
-    }
-
-    const body = await context.req.json().catch(() => null);
-    const revoked = (body as { revoked?: unknown } | null)?.revoked;
-    if (typeof revoked !== "boolean") {
-      return context.json({ error: "revoked must be true or false." }, 400);
-    }
-
-    const userId = context.req.param("userId");
-    const person = await peopleStore.find(userId);
-    if (!person) {
-      return context.json({ error: "That person is not here." }, 404);
-    }
-
-    // The same floor, for the same reason: removing somebody the configuration names would last
-    // until their next sign-in and no longer.
-    if (person.configuredAdmin && revoked) {
-      return context.json(
-        {
-          error:
-            "This deployment names that address in INITIAL_ADMIN_EMAILS, so they cannot be removed here. Change the configuration instead.",
-        },
-        409,
-      );
-    }
-
-    // Nobody can remove themselves. An administrator who does has locked themselves out of the
-    // screen that would undo it.
-    if (revoked && context.var.actor.id === userId) {
-      return context.json({ error: "You cannot remove your own access." }, 409);
-    }
-
-    if (person.revoked !== revoked) {
-      if (revoked) {
-        await peopleStore.revoke(userId, context.var.actor.id);
-      } else {
-        await peopleStore.restore(userId);
-      }
-      await recordPersonEvent(
-        auditStore,
-        context,
-        revoked ? "person.access_revoked" : "person.access_restored",
-        person,
-        {},
-      );
-    }
-
-    if (revoked) {
-      await peopleStore.retireOwned(userId, context.var.actor.id);
-    }
-
-    return context.json({ person: await peopleStore.find(userId) });
-  });
-
-  /*
-   * The identity providers this deployment has registered.
-   *
-   * Not Better Auth's own `GET /sso/providers`, which answers with the ones the person asking
-   * registered themselves. Two administrators therefore saw two different deployments: the second
-   * one to open this screen found it empty and registered a provider that was already there. What is
-   * registered is a fact about the deployment, so every administrator sees the same list.
-   */
-  app.get("/api/admin/identity-providers", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) {
-      return denied;
-    }
-    if (!identityProviders) {
-      return context.json(
-        { error: "Identity providers are not available." },
-        503,
-      );
-    }
-
-    return context.json({ providers: await identityProviders.list() });
-  });
-
-  /*
-   * Remove one.
-   *
-   * Ours rather than Better Auth's `delete-provider`, which refuses unless the person asking is the
-   * one who registered it. That leaves a provider nobody can remove as soon as the administrator who
-   * set it up has left, which is the same moment somebody most needs to.
-   */
-  app.delete(
-    "/api/admin/identity-providers/:providerId",
-    requireUser,
-    async (context) => {
-      const denied = requireAdmin(context);
-      if (denied) {
-        return denied;
-      }
-      if (!identityProviders) {
-        return context.json(
-          { error: "Identity providers are not available." },
-          503,
-        );
-      }
-
-      const providerId = context.req.param("providerId");
-      const removed = await identityProviders.remove(providerId);
-      if (!removed) {
-        // A screen somebody left open, or two administrators removing the same one. Saying so beats
-        // reporting success for something that was not there.
-        return context.json({ error: "There is no such provider." }, 404);
-      }
-
-      if (auditStore) {
-        await recordAuditEvent(auditStore, {
-          eventType: "identity_provider.removed",
-          targetType: "identity_provider",
-          targetId: providerId,
-          actorUserId: context.var.actor.id,
-          payload: { removedBy: context.var.actor.email },
-        });
-      }
-
-      return context.json({ removed: true });
-    },
-  );
-
-  app.get("/api/admin/credentials", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) {
-      return denied;
-    }
-    if (!credentialService) {
-      return context.json(
-        { error: "Credential storage is not configured." },
-        503,
-      );
-    }
-
-    return context.json({ credentials: await credentialService.list() });
-  });
-  app.post("/api/admin/credentials", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) {
-      return denied;
-    }
-    if (!credentialService) {
-      return context.json(
-        { error: "Credential storage is not configured." },
-        503,
-      );
-    }
-
-    const body = await context.req.json().catch(() => null);
-    const input = credentialInput(body, context.var.actor.id);
-    if (!input) {
-      return context.json({ error: "Credential input is invalid." }, 400);
-    }
-
-    return context.json(
-      { credential: await credentialService.create(input) },
-      201,
-    );
-  });
-  app.post(
-    "/api/admin/credentials/:credentialId/rotate",
-    requireUser,
-    async (context) => {
-      const denied = requireAdmin(context);
-      if (denied) {
-        return denied;
-      }
-      if (!credentialService) {
-        return context.json(
-          { error: "Credential storage is not configured." },
-          503,
-        );
-      }
-
-      const body = await context.req.json().catch(() => null);
-      const input = credentialInput(body, context.var.actor.id);
-      if (!input) {
-        return context.json({ error: "Credential input is invalid." }, 400);
-      }
-
-      return context.json({
-        credential: await credentialService.rotate({
-          ...input,
-          previousCredentialId: context.req.param("credentialId"),
-        }),
       });
-    },
-  );
-  app.post(
-    "/api/admin/credentials/:credentialId/revoke",
-    requireUser,
-    async (context) => {
-      const denied = requireAdmin(context);
-      if (denied) {
-        return denied;
-      }
-      if (!credentialService) {
-        return context.json(
-          { error: "Credential storage is not configured." },
-          503,
-        );
-      }
-
-      return context.json({
-        credential: await credentialService.revoke(
-          context.req.param("credentialId"),
-          context.var.actor.id,
-        ),
-      });
-    },
-  );
-  app.get("/api/admin/package", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) return denied;
-    if (!packageStatusReader) {
-      return context.json({ error: "Tenant package is not configured." }, 503);
     }
-    return context.json({ package: await packageStatusReader.active() });
+
+    return context.json({ mode: saved, defaultMode: config.executionMode });
   });
+
   /*
    * Where the worker hands a routine run back. Not under /api and not behind requireUser: the
    * worker is not a person with a session, it is another process on this deployment's own network,
@@ -1031,14 +797,267 @@ export function createApp(
       return context.json({ accepted: true }, 202);
     });
   }
+  /*
+   * The cron tick, called by the worker about once a minute with the worker's secret.
+   *
+   * Same credential shape as the routines door above (audited refusal, byte-identical 401s),
+   * because it is the same trust: this process runs turns, and only the worker may ask it to.
+   * Synchronous, unlike routines dispatch: claiming and running happen here, so the worker only
+   * needs a clock. A tick that throws still answers what it managed, so one wedged job does not
+   * read as a dead ticker.
+   */
+  if (cronTick) {
+    app.post("/internal/cron/tick", async (context) => {
+      const offered = context.req.header("authorization");
+      const expected = config.workerSharedSecret
+        ? `Bearer ${config.workerSharedSecret}`
+        : null;
+      if (!expected || !offered || !sameToken(offered, expected)) {
+        if (auditStore) {
+          try {
+            await recordAuditEvent(auditStore, {
+              eventType: "routines.dispatch_refused",
+              targetType: "worker",
+              initiator: DEPLOYMENT_INITIATOR,
+              payload: {
+                reason: !expected
+                  ? "unconfigured"
+                  : !offered
+                    ? "missing-header"
+                    : "mismatch",
+                note: "A worker's bearer secret did not check out, so no cron tick ran.",
+              },
+            });
+          } catch (error) {
+            console.error(
+              JSON.stringify({
+                type: "cron-dispatch-audit-write-failed",
+                error: String(error),
+              }),
+            );
+          }
+        }
+        return context.json({ error: "This endpoint is the worker's." }, 401);
+      }
+      try {
+        return context.json(await cronTick());
+      } catch (error) {
+        return context.json(
+          {
+            claimed: 0,
+            ran: 0,
+            failed: 0,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          500,
+        );
+      }
+    });
+  }
+  /*
+   * Telegram delivery, called by the worker that long-polls getUpdates. Same worker-secret
+   * credential as the other internal doors. Validates shape minimally (a chat id and text);
+   * everything else — linking, ownership, the turn — happens inside.
+   */
+  if (telegramIncoming) {
+    app.post("/internal/telegram/incoming", async (context) => {
+      const offered = context.req.header("authorization");
+      const expected = config.workerSharedSecret
+        ? `Bearer ${config.workerSharedSecret}`
+        : null;
+      if (!expected || !offered || !sameToken(offered, expected)) {
+        return context.json({ error: "This endpoint is the worker's." }, 401);
+      }
+      const body = (await context.req.json().catch(() => null)) as {
+        chatId?: unknown;
+        text?: unknown;
+        voiceFileId?: unknown;
+        photoFileIds?: unknown;
+        documentFileId?: unknown;
+        documentName?: unknown;
+      } | null;
+      if (
+        typeof body?.chatId !== "string" ||
+        !body.chatId.trim() ||
+        typeof body?.text !== "string"
+      ) {
+        return context.json({ error: "A chatId and text are required." }, 400);
+      }
+      const strings = (value: unknown): string[] =>
+        Array.isArray(value)
+          ? value.filter(
+              (entry): entry is string =>
+                typeof entry === "string" && entry.length > 0,
+            )
+          : [];
+      try {
+        return context.json(
+          await telegramIncoming({
+            chatId: body.chatId,
+            text: body.text,
+            ...(typeof body.voiceFileId === "string" && body.voiceFileId
+              ? { voiceFileId: body.voiceFileId }
+              : {}),
+            ...(strings(body.photoFileIds).length > 0
+              ? { photoFileIds: strings(body.photoFileIds) }
+              : {}),
+            ...(typeof body.documentFileId === "string" && body.documentFileId
+              ? { documentFileId: body.documentFileId }
+              : {}),
+            ...(typeof body.documentName === "string" && body.documentName
+              ? { documentName: body.documentName }
+              : {}),
+          }),
+        );
+      } catch (error) {
+        return context.json(
+          {
+            replied: false,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          500,
+        );
+      }
+    });
+  }
+  /*
+   * Composio trigger events in. Mounted only when the broker is configured: with no Composio
+   * key no trigger can name this deployment, so there is no door rather than an open one.
+   *
+   * The vendor secret is checked here when `COMPOSIO_TRIGGER_SECRET` is set, and a mismatch
+   * answers 401 without the payload ever being read. Unset means the deployment resolves the
+   * user strictly or drops the event — spoofing then files todos only for resolvable users,
+   * which is why production sets the secret. The handler never throws (a poison payload
+   * returns a reason), so this answers 200 with the outcome either way.
+   */
+  if (
+    triggerIncoming &&
+    (process.env.COMPOSIO_TRIGGER_SECRET?.trim() ||
+      process.env.NODE_ENV !== "production")
+  ) {
+    if (!process.env.COMPOSIO_TRIGGER_SECRET?.trim()) {
+      console.error(
+        JSON.stringify({
+          type: "composio-trigger-secret-missing",
+          note: "COMPOSIO_TRIGGER_SECRET is not set. Trigger events are attributed strictly (no email guessing) and mismatches are dropped, but set the secret in production so forged webhooks are refused at the door with 401.",
+        }),
+      );
+    }
+    app.post("/api/webhooks/composio", async (context) => {
+      const expected = process.env.COMPOSIO_TRIGGER_SECRET?.trim();
+      if (expected) {
+        const offered =
+          context.req.header("x-composio-secret") ??
+          context.req.header("x-trigger-secret") ??
+          "";
+        if (offered !== expected) {
+          return context.json(
+            { error: "This endpoint belongs to Composio." },
+            401,
+          );
+        }
+      }
+      const payload = await context.req.json().catch(() => null);
+      return context.json(await triggerIncoming(payload));
+    });
+  }
   // The CopilotKit runtime, behind the same session guard as every other API route. Mounted last so
-  // its own routing under /api/copilotkit cannot shadow an OpenBot route declared above.
+  // its own routing under /api/copilotkit cannot shadow an Remii route declared above.
   if (copilotHandler) {
+    /*
+     * SaaS mode: no credits, no ban gate, no turn toll. The person asking is trusted and the
+     * Bot always works: every POST to the runtime starts a turn. (Usage rows may still be
+     * recorded downstream for cost visibility, but nothing here refuses a turn over them.)
+     */
     // Mounted at the ROOT with the handler carrying its own basePath. Mounting it at
     // "/api/copilotkit" as well double-prefixes it: Hono strips the prefix before the handler sees
     // the path, so every route lands at /api/copilotkit/api/copilotkit/* and /info 404s. The browser
     // reports that as "Runtime info request failed with status 404" and every run fails before it
     // starts, with nothing at all in the server log.
+    //
+    // The one runtime path shadowed on purpose: thread messages. The handler
+    // serves that path from its runner's process memory, which forgets every
+    // restart; this deployment persists transcripts in Postgres, so its own
+    // route — registered first, so it wins — answers from the table. Same
+    // `{ messages }` envelope the browser already reads.
+    app.get(
+      "/api/copilotkit/threads/:threadId/messages",
+      requireUser,
+      async (context) => {
+        if (!attachmentDatabase) {
+          return context.json({ messages: [] });
+        }
+        const rows = await attachmentDatabase
+          .select({
+            messageId: threadMessages.messageId,
+            role: threadMessages.role,
+            content: threadMessages.content,
+          })
+          .from(threadMessages)
+          .innerJoin(threads, eq(threadMessages.threadId, threads.id))
+          .where(
+            and(
+              eq(threadMessages.threadId, context.req.param("threadId")),
+              eq(threads.userId, context.var.actor.id),
+            ),
+          )
+          .orderBy(asc(threadMessages.createdAt))
+          .catch(() => []);
+        return context.json({
+          // Expanded through the store's own reader: rows are Remi parts
+          // (`{remi, parts}`), and the browser only parses AG-UI. Serving
+          // them raw dropped every parts-shaped turn as unreadable.
+          //
+          // Trimmed after that: one tool result can hold a whole mailbox, and
+          // an unbounded history payload outruns the browser's history
+          // deadline on every open — which reads as chats that never load.
+          // The stored rows are untouched; only the served copy is cut, with
+          // the cut marked in the text itself.
+          messages: rows
+            .map((row) => {
+              try {
+                return truncateHistoryMessage(expandStoredMessage(row));
+              } catch {
+                const content = row.content as Record<string, unknown>;
+                return truncateHistoryMessage({
+                  ...(typeof content === "object" && content !== null
+                    ? content
+                    : {}),
+                  id: row.messageId,
+                  role: row.role as Message["role"],
+                } as Message);
+              }
+            })
+            .filter((msg): msg is Message => msg !== null),
+        });
+      },
+    );
+    /*
+     * Everything the runtime serves that is not the transcript read is behind a sign-in.
+     *
+     * The runtime is a library mounted whole, and only ONE of its paths was shadowed above: the
+     * transcript read, which this deployment answers from Postgres. Every other path fell through to
+     * the library, whose own thread endpoints answer from the runner's process memory — and that
+     * memory is not partitioned by person. Concretely, on an unauthenticated request:
+     *
+     *   - `GET  /api/copilotkit/threads`            lists every live thread id in the process;
+     *   - `GET  /api/copilotkit/threads/:id/events` replays a thread's whole AG-UI event stream,
+     *                                                    which is the conversation: what the person
+     *                                                    typed, what the Bot said, and the model's
+     *                                                    own reasoning;
+     *   - `POST /api/copilotkit/threads/clear`      wipes every person's in-memory thread state.
+     *
+     * So an id from the first request opened the second, and nothing was asked of the caller. The
+     * list is the sharp end: it hands out the ids the read needs.
+     *
+     * `requireUser` is registered immediately before the mount so it runs first for these paths
+     * (Hono applies middleware in registration order). `/info` stays open because the sign-in page
+     * reads it before anybody has a session, and it names agents rather than anyone's data.
+     */
+    app.use("/api/copilotkit/*", async (context, next) => {
+      if (context.req.path === "/api/copilotkit/info") return next();
+      return requireUser(context, next);
+    });
     app.route("/", copilotHandler);
   }
 
@@ -1057,6 +1076,22 @@ export function createApp(
         (await agentProfileStore.get(actor, botId)) !== null
     : async () => true;
 
+  /*
+   * Ownership, as distinct from reachability.
+   *
+   * `canUseBot` above answers "may this person see it", which for a Bot several people share is
+   * yes. Some grants need the stronger question: a connection that spends the ASKER'S account is
+   * only their business while the Bot is theirs, because wiring it into a Bot other people can also
+   * reach changes how that Bot behaves for them. Same store, different question, so it is asked
+   * separately rather than inferred from a reachable row.
+   */
+  const canManageBot: BotAccessCheck = agentProfileStore
+    ? async (actor, botId) => {
+        const agent = await agentProfileStore.get(actor, botId);
+        return agent !== null && canManageAgent(actor, agent);
+      }
+    : async () => false;
+
   // The Bot computer. Acting on a page needs the gateway and the policy it enforces, so both arrive
   // together or the routes are not mounted. An ungoverned computer is not a reduced feature. It is
   // the one shape of this feature that must not exist.
@@ -1070,6 +1105,30 @@ export function createApp(
         canUseBot,
         pageFrames,
         auditReader,
+        attachmentDatabase,
+        // Verification is only demanded when codes can actually be delivered. Without a mail
+        // provider nobody could ever complete it, and the gate would refuse every computer
+        // use forever — the same line sign-in draws in auth/index.ts.
+        config.auth?.email !== undefined,
+      ),
+    );
+  }
+
+  /*
+   * The policy surface is the one half of the computer routes that needs no computer. The gateway
+   * is absent on any deployment whose provider is unset, and a boundary only ever reads and writes
+   * the person's own rules — so mounting it with no gateway leaves nothing ungoverned: nothing
+   * exists here that a policy would govern. Without this, an operator who set no computer provider
+   * got a Boundaries screen that could not load its own policy.
+   */
+  if (computerPolicy && !computerGateway) {
+    app.route(
+      "/api/computers",
+      createPolicyRoutes(
+        computerPolicy,
+        requireUser,
+        auditReader,
+        attachmentDatabase,
       ),
     );
   }
@@ -1097,15 +1156,8 @@ export function createApp(
       createAgentRoutes(
         agentProfileStore,
         requireUser,
-        // The same stance the computer uses: a laptop legitimately talks to its own services, a hosted
-        // deployment must not. Passed from configuration rather than defaulted here, so "hosted and
-        // permissive" cannot happen by forgetting something.
-        config.computer?.allowPrivateHosts ?? false,
         // A Bot's own refusal goes in the same trail as everything else it does.
         auditStore,
-        // Addresses this deployment named, which is how a hosted one reaches an agent on its own
-        // network without dropping the floor for everything else.
-        config.agentEndpointAllowedHosts,
         /*
          * What the Bot's own screen needs to show, and change, which Bots it may hand work to.
          *
@@ -1123,12 +1175,6 @@ export function createApp(
               runsHere: (agentId) => pluginStore.agentRunsHere(agentId),
             }
           : undefined,
-        // Whether "built-in" is a kind of coworker this deployment can actually make: the create
-        // path falls back to the managed Bot's endpoint, so without one it can only refuse.
-        config.managedAgent?.endpoint !== undefined,
-        // The managed Bot's address, so a coworker created without an endpoint — which creation
-        // stores as running at this address — can be told apart from one a person hosts.
-        config.managedAgent?.endpoint?.toString(),
       ),
     );
     // Choosing a coworker for an untagged message needs the same permission-filtered roster the
@@ -1170,6 +1216,40 @@ export function createApp(
     app.route(
       "/api/channels",
       createChannelRoutes(channelStore, requireUser, channelEvents, auditStore),
+    );
+  }
+
+  /*
+   * The Bot's memory, files, tasks and schedules, for the settings screens. The agent reaches
+   * the same rows through its tools; these routes are the person's own view of that shared
+   * state. Mounted wherever there is a database to read them from.
+   */
+  if (attachmentDatabase) {
+    app.route(
+      "/api/remi",
+      createRemiRoutes({
+        database: attachmentDatabase,
+        requireUser,
+        ...(blobStore ? { blobs: blobStore } : {}),
+      }),
+    );
+  }
+
+  /*
+   * Telegram link management for the settings screen. Always mounted where there is a
+   * database: without a bot token the routes answer 503, and the screen says Telegram is
+   * not configured rather than drawing a code box that goes nowhere.
+   */
+  if (attachmentDatabase) {
+    const tg = telegram ?? {};
+    app.route(
+      "/api/telegram",
+      createTelegramRoutes({
+        database: attachmentDatabase,
+        requireUser,
+        ...(tg.token ? { token: tg.token } : {}),
+        ...(tg.username ? { username: tg.username } : {}),
+      }),
     );
   }
 
@@ -1233,10 +1313,31 @@ export function createApp(
       "/api/attachments",
       createAttachmentRoutes(attachmentDatabase, requireUser),
     );
+    app.route(
+      "/api/billing",
+      createBillingRoutes(attachmentDatabase, requireUser),
+    );
+    app.route("/api/webhooks", createDodoWebhookRoutes(attachmentDatabase));
   }
 
   if (routineStore) {
     app.route("/api/routines", createRoutineRoutes(routineStore, requireUser));
+  }
+
+  /*
+   * The vault, under `/api/vault`.
+   *
+   * Mounted only when a store exists, and mounted whole rather than feature by feature: a deployment
+   * with no vault store has no door, and one with a partial vault would be a half-built lock.
+   *
+   * Every route inside takes its owner from the session and takes nothing else, so there is no path
+   * through this router on which a caller names whose vault it is reaching into. See `vault/routes.ts`.
+   */
+  if (vaultStore) {
+    app.route(
+      "/api/vault",
+      createVaultRoutes(vaultStore, requireUser, auditStore),
+    );
   }
 
   if (componentStore) {
@@ -1253,6 +1354,7 @@ export function createApp(
         pluginStore,
         requireUser,
         canUseBot,
+        canManageBot,
         {
           encryptionKey: config.keyEncryptionKey,
           /*
@@ -1269,9 +1371,18 @@ export function createApp(
            * would be a hole nothing else closes.
            */
           personHasAccess: async (userId) => {
-            if (!peopleStore) return false;
-            const person = await peopleStore.find(userId);
-            return person !== undefined && !person.revoked;
+            // Individual-user SaaS has no people list and nobody to revoke:
+            // the question is only whether this user id names a live account.
+            // No database to ask means the deployment cannot answer, so it
+            // refuses rather than assuming yes.
+            if (!attachmentDatabase) return false;
+            const rows = await attachmentDatabase
+              .select({ id: users.id })
+              .from(users)
+              .where(eq(users.id, userId))
+              .limit(1)
+              .catch(() => []);
+            return rows.length > 0;
           },
           // The deployment-wide fallback a Bot may present, as a yes or no. The secret itself stays
           // in config and is checked in `/api/agent-tools/call`; the surface only needs to know
@@ -1318,7 +1429,7 @@ export function createApp(
       } | null;
 
       const verdict = await authoriseAgentCall({
-        presented: context.req.header("x-openbot-agent-token") ?? "",
+        presented: context.req.header("x-remii-agent-token") ?? "",
         run: body?.run,
         encryptionKey: config.keyEncryptionKey,
         legacyToken,
@@ -1372,6 +1483,7 @@ export function createApp(
           botId: verdict.botId,
           actorId: verdict.actorId,
           initiator: verdict.initiator,
+          ...(verdict.threadId ? { threadId: verdict.threadId } : {}),
         });
         if (deploymentResult) return context.json(deploymentResult);
 
@@ -1459,14 +1571,42 @@ export function createApp(
       createThreadRoutes(
         threadIdentity,
         requireUser,
-        // config.ts refuses to boot without the full Intelligence contract (see copilot.ts's
-        // header comment), so `config.runtime.intelligence` is never missing here. Built from it
-        // rather than assumed, though: this is the one place besides the runtime mount itself that
-        // needs to reach Intelligence, and it should keep working unmodified if that guarantee ever
-        // loosens and a deployment can legitimately have no reader to build.
-        createThreadReader(
-          createIntelligenceClient(config.runtime.intelligence),
-        ),
+        // Threads live in this deployment's Postgres (see threads/local), so
+        // the reader is a row lookup, not a platform call. Absent database
+        // there is nothing to ask and only minting is registered.
+        attachmentDatabase
+          ? createThreadReader({
+              getThread: async ({
+                threadId,
+                userId,
+              }: {
+                threadId: string;
+                userId: string;
+              }) => {
+                const rows = await attachmentDatabase
+                  .select({ id: threads.id })
+                  .from(threads)
+                  .where(
+                    and(eq(threads.id, threadId), eq(threads.userId, userId)),
+                  )
+                  .limit(1);
+                if (rows.length === 0) {
+                  const missing = new Error("Thread not found.");
+                  (missing as { status?: number }).status = 404;
+                  throw missing;
+                }
+                return rows[0];
+              },
+            })
+          : undefined,
+        attachmentDatabase
+          ? async (threadId: string, userId: string) => {
+              await attachmentDatabase
+                .insert(threads)
+                .values({ id: threadId, userId })
+                .onConflictDoNothing();
+            }
+          : undefined,
       ),
     );
   }
@@ -1513,7 +1653,7 @@ export function createApp(
   return app;
 }
 
-function credentialInput(
+function _credentialInput(
   value: unknown,
   actorUserId: string,
 ): CredentialInput | null {

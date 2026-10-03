@@ -12,6 +12,7 @@ function channel(
     id,
     name: id,
     agentIds: [],
+    mascots: {},
     threadId: `thread-${id}`,
     active: true,
     summary,

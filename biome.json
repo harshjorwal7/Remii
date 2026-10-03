@@ -9,7 +9,8 @@
       "!app/src/routeTree.gen.ts",
       "!desktop/src-tauri/gen",
       "!**/target",
-      "!server/drizzle"
+      "!server/drizzle",
+      "!app/tests/visual/sheet.html"
     ]
   },
   "formatter": {
@@ -33,6 +34,15 @@
             "noNonNullAssertion": "off"
           }
         }
+      }
+    },
+    {
+      "includes": ["app/src/mascot/bloub/**"],
+      "formatter": {
+        "enabled": false
+      },
+      "linter": {
+        "enabled": false
       }
     },
     {

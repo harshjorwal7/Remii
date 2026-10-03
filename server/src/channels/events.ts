@@ -45,7 +45,23 @@ export type ChannelActivityEvent = {
    * streams. A missed one costs at most a stuck-looking dot until the next real event, never data.
    */
   busy?: boolean;
+  /**
+   * What a run is doing in this channel, or that nothing is. Absent on an ordinary activity event.
+   *
+   * Carries the state rather than a run id to fetch, for the reason `busy` is a boolean and not a
+   * lookup: this arrives per tool call, and a client that had to ask what changed to draw a dot
+   * would ask on every step of every run. A terminal state carries `null`, which is a fact — the
+   * run is over — and not an absence, so the roster clears its mark rather than keeping a stale
+   * one until the next unrelated event.
+   */
+  activity?: {
+    state: RunActivityState;
+    label: string | null;
+    detail: string | null;
+  } | null;
 };
+
+import type { RunActivityState } from "../db/schema";
 
 /** "The roster you hold may be wrong." Carries no delta, because what was lost is not recoverable. */
 export type ChannelResyncEvent = { resync: true };

@@ -373,6 +373,8 @@ export function toVisibleChatItems(
     if (!isReadableMessage(message)) continue;
     if (isToolResult(message)) results.set(message.toolCallId, message.content);
   }
+  // Call ids already drawn, across every message. See the assistant branch below.
+  const seenCalls = new Set<string>();
 
   return messages.flatMap((message): VisibleChatItem[] => {
     if (!isReadableMessage(message)) return [];
@@ -406,6 +408,15 @@ export function toVisibleChatItems(
         // Read three fields deep off something nothing has validated: a hole in the array, or a
         // call with no `function`, threw before a single row could be drawn.
         if (!isReadableToolCall(toolCall)) continue;
+        /*
+         * One row per call id, however many messages carry it. The same logical call reaches
+         * this projection twice when a live-streamed turn and its restored stored turn overlap
+         * (or a turn is retried): the merge dedupes by `message.id` while rows key on
+         * `toolCall.id`, so both copies projected and the card drew twice. The first copy wins,
+         * which is the live one in message order.
+         */
+        if (seenCalls.has(toolCall.id)) continue;
+        seenCalls.add(toolCall.id);
         /*
          * The call that draws an interface is not a row of its own; the interface is.
          *

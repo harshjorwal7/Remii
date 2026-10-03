@@ -1,15 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { eq, inArray } from "drizzle-orm";
-import { createApp } from "../src/app";
 import { createAuditStore } from "../src/audit";
-import { loadConfig } from "../src/config";
 import { encryptSecret } from "../src/credentials";
 import { createDatabase } from "../src/db/client";
 import { credentials, mcpServers, mcpTools } from "../src/db/schema";
 import { createPluginStore } from "../src/plugins/store";
+import { createTestApp } from "./support/app";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
-import { testEnvironment } from "./support/environment";
 
 /**
  * The whole path an administrator's request actually takes, with nothing stubbed between the request
@@ -45,31 +43,46 @@ const store = createPluginStore({
   policy: () => ({ mode: "enforce", deny: [], allow: ["true"] }),
 });
 
-const ADMIN = {
-  id: "admin-1",
-  email: "admin@openbot.test",
-  name: "An Administrator",
+/**
+ * The person whose deployment this is.
+ *
+ * NOT an administrator: there is no such role here. Individual-user SaaS has exactly one kind of
+ * caller — a signed-in person, sovereign over their own deployment — so `createApp` mounts this
+ * surface behind `requireUser` and nothing else. The name is `OWNER` for that reason, and the tests
+ * that used to ask what a non-administrator saw now ask what somebody signed out sees.
+ */
+const OWNER = {
+  id: "owner-1",
+  email: "owner@remii.test",
+  name: "The Owner",
   image: null,
 };
 
-function request(
-  body: unknown,
-  role: "admin" | "user" = "admin",
-  path = "/api/plugins/servers",
-) {
-  const app = createApp(
-    loadConfig(testEnvironment()),
-    {
-      handler: () => new Response(null, { status: 204 }),
-      api: { getSession: async () => ({ user: ADMIN }) },
-    } as never,
-    { rolesForUser: async () => [role] },
-    // Positions 4-14 are the other stores; the real one is 15, pluginStore.
-    ...(Array.from({ length: 11 }) as never[]),
-    store as never,
-  );
+function request(body: unknown, path = "/api/plugins/servers") {
+  /*
+   * The store is NAMED, not counted into place. `createApp` takes thirty-five positional parameters
+   * and every one from the third onwards is optional, so a hand-counted hole passes `tsc` at any count
+   * and answers 404 at runtime for a reason that names nothing. See `support/app.ts`.
+   */
+  const app = createTestApp({
+    as: OWNER,
+    parts: { pluginStore: store },
+  });
 
-  return app.request(`http://openbot.test${path}`, {
+  return app.request(`http://remii.test${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** The same request with nobody signed in, which is the only caller this surface still refuses. */
+function requestSignedOut(body: unknown, path = "/api/plugins/servers") {
+  const app = createTestApp({
+    parts: { pluginStore: store },
+    signedOut: true,
+  });
+  return app.request(`http://remii.test${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -192,10 +205,19 @@ describe("adding a curated server over HTTP", () => {
     });
   });
 
-  test("somebody who is not an administrator is refused before the store", async () => {
-    const response = await request({ key: serverId }, "user");
+  test("somebody signed out is refused before the store", async () => {
+    /*
+     * Was "somebody who is not an administrator", asserting 403. There is no administrator to be:
+     * `RemiiRole` is the literal type `"user"`, so an admin bypass is unrepresentable and a route
+     * guarded by one cannot be written. What is left to refuse is a caller with no session, and that
+     * is what this asks — the same refusal `requireUser` gives every other route on this app.
+     */
+    const response = await requestSignedOut({ key: serverId });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "Authentication required.",
+    });
   });
 });
 
@@ -217,7 +239,7 @@ describe("adding a server by URL over HTTP", () => {
         url: "https://collector.attacker.example/mcp",
         credentialId: foreignCredentialId,
       },
-      "admin",
+
       custom,
     );
 
@@ -238,7 +260,7 @@ describe("adding a server by URL over HTTP", () => {
         url: "https://legit.vendor.example/mcp",
         credentialId: ownCredentialId,
       },
-      "admin",
+
       custom,
     );
     expect(added.status).toBe(200);
@@ -250,7 +272,7 @@ describe("adding a server by URL over HTTP", () => {
         url: "https://collector.attacker.example/mcp",
         credentialId: ownCredentialId,
       },
-      "admin",
+
       custom,
     );
     expect(moved.status).toBe(400);

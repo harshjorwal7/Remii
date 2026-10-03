@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
-import { isHttpEndpointUrl } from "./http-endpoint-url";
 import { Mark } from "./Mark";
 
 export type Harness = {
@@ -9,7 +8,7 @@ export type Harness = {
   summary: string;
   image: string | null;
   health_path: string | null;
-  credential: "any-provider" | "anthropic" | "their-endpoint";
+  credential: "any-provider" | "anthropic";
   maintainer: "first-party" | "partnership" | "community";
   mark: string | null;
   port: number | null;
@@ -17,25 +16,23 @@ export type Harness = {
 
 export type HarnessChoice = {
   id: string;
-  agentUrl?: string;
 };
 
-/** What OpenBot sets up unless somebody says otherwise. David's call. */
+/** What Remii sets up unless somebody says otherwise. David's call. */
 export const DEFAULT_HARNESS = "langgraph";
 
 /**
  * Which Bot, answered for them.
  *
  * ONE CHOICE IS MADE FOR THE PERSON, and that is the point of this screen rather than a limitation
- * of it. The twelve rows are agent frameworks, and to anybody who is not a developer the difference
+ * of it. The rows are agent frameworks, and to anybody who is not a developer the difference
  * between them is nil: they all take any model and they all answer the same questions. Asking a
  * non-technical person to pick one is asking them to make a decision they cannot inform, at the
  * start, which is where people leave.
  *
  * So the default is stated in one line and the list moves behind a disclosure. A developer who
  * wants CrewAI opens it and picks CrewAI; everybody else presses Continue and never learns the word
- * "harness". The address-your-own row lives in there too, because pasting a URL is the most
- * developer thing on this screen.
+ * "harness".
  */
 export function HarnessPicker({
   chosen,
@@ -64,11 +61,6 @@ export function HarnessPicker({
 
   const chosenId = chosen?.id ?? DEFAULT_HARNESS;
   const picked = rows.find((row) => row.id === chosenId);
-  const byoAgentUrl = chosenId === "byo-url" ? (chosen?.agentUrl ?? "") : "";
-  const byoReady =
-    (byoAgentUrl.trim().startsWith("http://") ||
-      byoAgentUrl.trim().startsWith("https://")) &&
-    isHttpEndpointUrl(byoAgentUrl);
 
   if (failure) {
     return (
@@ -94,7 +86,7 @@ export function HarnessPicker({
         applies to will read it.
       */}
       <p className="lede">
-        OpenBot sets this up for you. If you write code, you can choose the
+        Remii sets this up for you. If you write code, you can choose the
         agent framework below.
       </p>
 
@@ -105,8 +97,7 @@ export function HarnessPicker({
             : "Choose the agent framework"}
         </summary>
         <p className="footnote" style={{ margin: "0.6rem 0 0" }}>
-          Any of these works with any AI provider. Only the last one asks you
-          for an address.
+          Any of these works with any AI provider.
         </p>
         <fieldset className="picker">
           <legend className="sr-only">Bot</legend>
@@ -121,13 +112,7 @@ export function HarnessPicker({
                 className="tile-input"
                 value={row.id}
                 checked={chosenId === row.id}
-                onChange={() =>
-                  onChoose(
-                    row.id === "byo-url"
-                      ? { id: row.id, agentUrl: byoAgentUrl }
-                      : { id: row.id },
-                  )
-                }
+                onChange={() => onChoose({ id: row.id })}
               />
               <Mark id={row.mark} name={row.name} />
               {/* The name is on every row, mark or no mark, so a person who does not recognise a
@@ -137,40 +122,16 @@ export function HarnessPicker({
               {row.credential === "anthropic" && (
                 <span className="tile-note">No API key needed</span>
               )}
-              {row.credential === "their-endpoint" && (
-                <span className="tile-note">Uses your running agent</span>
-              )}
             </label>
           ))}
         </fieldset>
-        {chosenId === "byo-url" && (
-          <div className="field" style={{ marginTop: "0.75rem" }}>
-            <label htmlFor="agent-url">AG-UI endpoint</label>
-            <input
-              id="agent-url"
-              value={byoAgentUrl}
-              onChange={(event) =>
-                onChoose({
-                  id: "byo-url",
-                  agentUrl: event.target.value,
-                })
-              }
-              placeholder="https://your-agent.example/ag-ui"
-              spellCheck={false}
-            />
-          </div>
-        )}
       </details>
 
       <div className="row">
         <button type="button" className="quiet" onClick={onBack}>
           Back
         </button>
-        <button
-          type="button"
-          disabled={chosenId === "byo-url" && !byoReady}
-          onClick={onContinue}
-        >
+        <button type="button" onClick={onContinue}>
           Continue
         </button>
       </div>

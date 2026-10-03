@@ -1,0 +1,55 @@
+# AKS. Azure Database, workload identity, Key Vault through external-secrets.
+config:
+  intelligence:
+    apiUrl: https://api.intelligence.copilotkit.ai
+    gatewayWsUrl: wss://realtime.intelligence.copilotkit.ai
+  auth:
+    google:
+      clientId: example.apps.googleusercontent.com
+  publicUrl: https://remii.example.com
+postgresql:
+  enabled: false
+database:
+  existingSecret: remii-database
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000
+server:
+  podLabels:
+    azure.workload.identity/use: "true"
+externalSecrets:
+  enabled: true
+  secretStoreRef:
+    name: azure-key-vault
+  data:
+    - secretKey: key-encryption-key
+      remoteRef:
+        key: remii-key-encryption-key
+    # Sessions are signed with this. The server refuses to start when sign-in is configured and it
+    # is missing, so every provider store has to carry it.
+    - secretKey: better-auth-secret
+      remoteRef:
+        key: remii-better-auth-secret
+    - secretKey: intelligence-api-key
+      remoteRef:
+        key: remii-intelligence-api-key
+    - secretKey: google-client-secret
+      remoteRef:
+        key: remii/google-client-secret
+    - secretKey: computer-token
+      remoteRef:
+        key: remii/computer-token
+    - secretKey: license-token
+      remoteRef:
+        key: remii-license-token
+ingress:
+  enabled: true
+  className: webapprouting.kubernetes.azure.com
+  hosts:
+    - host: remii.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+computers:
+  mode: shared

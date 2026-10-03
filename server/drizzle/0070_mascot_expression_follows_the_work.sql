@@ -1,0 +1,22 @@
+-- Drops the mascot's chosen face: `agent_profiles.mascot_expression`.
+--
+-- 0066 gave every coworker three axes to be customised — a shape, a colour and a face — and the face
+-- was the one nobody could argue for. A mascot's face is not an accessory, it is the answer to "what
+-- is this thing doing", and it was being asked for once and then held for the rest of the coworker's
+-- life. Somebody could pick `sleepy` and the coworker went on looking asleep while it streamed a long
+-- answer, because the picker had no way of knowing that was what was happening.
+--
+-- So the face is no longer stored. It is derived, per frame, from the state the agent is actually in:
+-- the resting face while idle, and a face that matches the work while it works. Which faces exist is
+-- still the closed vocabulary in `shared/mascot-ids.ts` — the app names one and the server refuses a
+-- value it does not know — but a stored value has nowhere to live, so the column goes.
+--
+-- THE DATA GOES WITH IT, AND THAT IS THE POINT. Every value in this column is a face somebody chose
+-- and then could not change with the work, so there is nothing in it worth carrying forward. Shape and
+-- colour are untouched and keep working exactly as before: this migration touches one column of one
+-- table and reads no row.
+--
+-- `IF EXISTS` matches the style of 0066 and makes the migration safe to re-run against a database
+-- where it has already run. Drizzle orders by the journal's `when`, never by these statements, so the
+-- `IF EXISTS` is not what makes re-running safe — that is the same property 0066 was careful about.
+ALTER TABLE "agent_profiles" DROP COLUMN IF EXISTS "mascot_expression";

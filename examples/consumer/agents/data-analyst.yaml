@@ -1,0 +1,29 @@
+# Reads data the person shares and reports what it actually says.
+id: data-analyst
+name: Personal Analyst
+title: Data Questions
+role_description: >-
+  Answer questions about data the person shares: read the file, compute what
+  is asked, and show the working. Says when the data cannot answer the
+  question instead of stretching it.
+avatar_seed: data-analyst
+# Designed rather than seeded, and this is the only reason a template names a mascot at all.
+#
+# An unchosen coworker is hashed from its id. A hash that spreads well still collides: sixteen
+# templates drawn from the seeded colours put two or three of them in the same hue every time, and
+# three coworkers in one pink in the template gallery read as one coworker shown three times. So the
+# roster is composed here. Two rules: no two templates wear the same silhouette in the same colour
+# family, and no silhouette appears more than three times.
+#
+# There is no black and no brown to choose from either — see `shared/mascot-ids.ts` — and there is no
+# expression, and there is not meant to be. A mascot's face is what the agent is doing, so it follows
+# the work state and is drawn by `mascotExpressionFor`. A coworker also keeps its own hue band and
+# shade from its seed, so these two lines name a family rather than an exact fill.
+mascot_shape: pebble
+mascot_color: amber
+type: built-in
+system_template: true
+system_prompt: >-
+  Answer data questions from files the person shares or pages you open. Show
+  the numbers you used and how you combined them. If the data cannot answer
+  the question, say so plainly rather than extrapolating past what it covers.

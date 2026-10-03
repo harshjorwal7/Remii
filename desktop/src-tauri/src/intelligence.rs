@@ -27,7 +27,7 @@ const PRODUCT_API: &str = "https://api.intelligence.copilotkit.ai";
 /// How long somebody gets to finish signing in.
 const PATIENCE: Duration = Duration::from_secs(600);
 
-/// A project somebody can put OpenBot in.
+/// A project somebody can put Remii in.
 #[derive(Clone, Debug, serde::Serialize, Deserialize, PartialEq, Eq)]
 pub struct Project {
     pub id: String,
@@ -185,7 +185,7 @@ impl SigningInToIntelligence {
         }
         reply(
             &mut stream,
-            "Signed in. You can close this tab and go back to OpenBot.",
+            "Signed in. You can close this tab and go back to Remii.",
         );
         Ok(Some(token))
     }
@@ -194,7 +194,7 @@ impl SigningInToIntelligence {
 /// A small page, so the browser does not sit on a blank tab.
 fn reply(stream: &mut TcpStream, said: &str) {
     let body = format!(
-        "<!doctype html><meta charset=utf-8><title>OpenBot</title>\
+        "<!doctype html><meta charset=utf-8><title>Remii</title>\
          <body style=\"font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0\">\
          <p>{said}</p>"
     );
@@ -281,7 +281,7 @@ fn read_json(
         let mut shown = without_credentials(body.trim());
         shown.truncate(2000);
         crate::problem::Problem::with(
-            format!("CopilotKit's {what} came back in a shape OpenBot does not understand."),
+            format!("CopilotKit's {what} came back in a shape Remii does not understand."),
             format!("HTTP {status}\n{error}\n\n{shown}"),
         )
     })
@@ -320,7 +320,7 @@ fn exchange(clerk_token: &str) -> Result<String, crate::problem::Problem> {
         .map(|session| session.cli_token)
         .map_err(|error| {
             crate::problem::Problem::with(
-                "CopilotKit's sign-in came back without the session OpenBot needs.",
+                "CopilotKit's sign-in came back without the session Remii needs.",
                 format!("{error}\n\n{raw}"),
             )
         })
@@ -357,7 +357,7 @@ fn product_credential(session: &str) -> Result<String, crate::problem::Problem> 
         .map(|payload| payload.product_credential.token)
         .map_err(|error| {
             crate::problem::Problem::with(
-                "CopilotKit's credential came back in a shape OpenBot does not understand.",
+                "CopilotKit's credential came back in a shape Remii does not understand.",
                 format!("{error}\n\n{raw}"),
             )
         })
@@ -389,7 +389,7 @@ fn list_projects(product: &str) -> Result<Vec<Project>, crate::problem::Problem>
      */
     if found.is_empty() && !looks_genuinely_empty(&raw) {
         return Err(crate::problem::Problem::with(
-            "CopilotKit's project list came back in a shape OpenBot does not understand.",
+            "CopilotKit's project list came back in a shape Remii does not understand.",
             without_credentials(&raw.to_string()),
         ));
     }
@@ -441,7 +441,7 @@ pub fn provision_key(product: &str, project_id: &str) -> Result<String, crate::p
          */
         .json(&serde_json::json!({
             "project_id": as_number(project_id),
-            "name": "OpenBot Desktop",
+            "name": "Remii Desktop",
         }))
         .send()
         .map_err(|error| {

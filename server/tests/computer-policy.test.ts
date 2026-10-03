@@ -32,11 +32,25 @@ function context(overrides: Partial<PolicyContext> = {}): PolicyContext {
 const permissive: ActionPolicy = { mode: "enforce", deny: [], allow: ["true"] };
 
 describe("evaluateActionPolicy", () => {
-  test("an absent policy refuses, rather than permitting everything", () => {
+  test("an absent policy permits, because the platform default is permissive", () => {
+    /*
+     * WAS "an absent policy refuses, rather than permitting everything", and it was the load-bearing
+     * fail-closed rule of the whole module.
+     *
+     * The default flipped deliberately. `evaluateActionPolicy` now substitutes
+     * `{mode: "enforce", deny: [], allow: ["true"]}` for an absent policy — which is exactly
+     * `DEFAULT_PLATFORM_POLICY` in `policy-store.ts`, permissive, shared by free and starter users
+     * while Pro and Power may define their own rules. An unconfigured deployment therefore behaves
+     * like a deployment that said "everything", rather than like one that said "nothing".
+     *
+     * The fail-closed property is NOT gone; it moved to where it still holds and is still tested
+     * below: a policy with an EMPTY allow list refuses, a broken rule refuses, and deny beats allow.
+     * What changed is the one case where nothing has been said at all.
+     */
     const decision = evaluateActionPolicy(undefined, context());
-    expect(decision.allowed).toBe(false);
-    expect(decision.forward).toBe(false);
-    expect(decision.source).toBe("default");
+    expect(decision.allowed).toBe(true);
+    expect(decision.forward).toBe(true);
+    expect(decision.source).toBe("allow");
   });
 
   test("an empty allow list refuses", () => {
@@ -56,9 +70,19 @@ describe("evaluateActionPolicy", () => {
     expect(decision.allowed).toBe(false);
     expect(decision.forward).toBe(false);
     expect(decision.source).toBe("deny");
-    // The reason is read by a person and names both the thing and the rule.
-    expect(decision.reason).toContain("Submit order");
-    expect(decision.reason).toContain("example.com");
+    /*
+     * The reason quotes the RULE, and nothing else.
+     *
+     * It used to render the context — "does not allow that: the button Submit order on example.com" —
+     * and that sentence had to be written four times over, once per surface (element, tool, file,
+     * command), which is how the four drifted apart and how one of them ended up reading "null" for a
+     * page that was never loaded. One sentence that quotes the expression gives an operator the row
+     * they need to find, and `matched` carries the same string for a caller that wants to match on it.
+     */
+    expect(decision.matched).toBe('contains(element.name, "submit")');
+    expect(decision.reason).toBe(
+      'Refused by boundary rule: contains(element.name, "submit")',
+    );
   });
 
   test("a deny rule leaves unrelated elements alone", () => {
@@ -176,14 +200,35 @@ describe("evaluateActionPolicy", () => {
     expect(byBot.allowed).toBe(false);
   });
 
-  test("a rule about an element still decides when the element is unknown", () => {
-    // An action on something the server could not resolve must be decided on, not waved through as
-    // unrecognised. `contains` on a missing field throws, and a throwing deny expression denies.
+  test("a missing element becomes an empty one rather than a throwing rule", () => {
+    /*
+     * WAS "a rule about an element still decides when the element is unknown", expecting a REFUSAL, on
+     * the reasoning that `contains` on a missing field throws and a throwing rule denies.
+     *
+     * Under CEL the throw no longer happens: the context is defaulted before evaluation
+     * (`element: context.element ?? {ref:"",role:"",name:"",type:""}`), so the rule reads a real empty
+     * string, answers false, and the action is permitted.
+     *
+     * This is a genuine loosening and is pinned here rather than left to pass silently, because it is
+     * the one place where "we could not identify what was clicked" no longer implies "refuse". An
+     * operator who needs the old behaviour writes the rule to match the empty case:
+     * `element.name == ""`. The gateway's own comment says a deny rule for an unresolvable ref "should
+     * still refuse it", so this is the rule that does that — and it is a rule somebody can write,
+     * which the old behaviour made unnecessary.
+     */
     const decision = evaluateActionPolicy(
       { ...permissive, deny: ['contains(element.name, "submit")'] },
       context({ element: undefined }),
     );
-    expect(decision.allowed).toBe(false);
+    expect(decision.allowed).toBe(true);
+
+    // And the rule that DOES refuse it, which is the case the test above used to cover implicitly.
+    const refusing = evaluateActionPolicy(
+      { ...permissive, deny: ['element.name == ""'] },
+      context({ element: undefined }),
+    );
+    expect(refusing.allowed).toBe(false);
+    expect(refusing.source).toBe("deny");
   });
 });
 
@@ -342,10 +387,13 @@ describe("a rule written about what an action does", () => {
 /**
  * A rule about keypresses must not refuse everything else.
  *
- * `key` exists only on a keypress. An expression naming an absent identifier errors, and the engine
- * treats an error as a refusal, correctly, since a rule nobody can evaluate must not wave things
- * through. A bare `key == "Enter"` therefore refuses navigation too; scoped rules guard on the tool
- * name before reading key-specific fields.
+ * `key` is defaulted before evaluation (`key: context.key ?? ""`), so an expression naming it does NOT
+ * error on an action that carries none — it reads an empty string and answers.
+ *
+ * Under the previous engine the missing key was an absent CEL identifier, which errored, which the
+ * engine read as a refusal. That made every unguarded key rule refuse navigations as collateral, and
+ * the fix was a guard on the tool name in every shipped rule. Defaulting the field instead removes
+ * the need for that guard: a rule now says what it means and only what it means.
  */
 describe("a rule that names an identifier only some actions carry", () => {
   const navigating: PolicyContext = {
@@ -356,14 +404,20 @@ describe("a rule that names an identifier only some actions carry", () => {
     intent: "navigate",
   };
 
-  test("unguarded, it refuses a navigation that has no key at all", () => {
+  test("an unguarded key rule lets the navigation through, because the key is empty", () => {
     const decision = evaluateActionPolicy(
       { mode: "enforce", deny: ['key == "Enter"'], allow: ["true"] },
       navigating,
     );
-    // Failing closed on an unevaluable rule is the safe answer. The shipped preset carries the guard
-    // below to keep this rule scoped to keypresses.
-    expect(decision.allowed).toBe(false);
+    /*
+     * WAS a refusal, on the reasoning that a rule nobody can evaluate must not wave things through.
+     *
+     * That reasoning still holds for a rule that CANNOT be evaluated — a syntax error, an unknown
+     * function — and it is still tested below. What no longer happens is this rule being
+     * unevaluable: the context is defaulted first, so `key` is the empty string, `"Enter"` does not
+     * equal it, and the navigation is allowed. A rule now denies exactly what it names.
+     */
+    expect(decision.allowed).toBe(true);
   });
 
   test("guarded by the tool name, the navigation is allowed", () => {
@@ -398,12 +452,16 @@ describe("a rule that names an identifier only some actions carry", () => {
 });
 
 /**
- * What a refusal says it refused.
+ * A refusal now quotes the rule and says nothing else.
  *
- * A tool call carries every browser field the engine knows about, all of them empty, so that a rule
- * written about a page evaluates to false against it rather than being unevaluable. That is correct
- * for the decision and wrong for the sentence: each of those empty fields is present, so a refusal
- * described from them names a page nobody visited or a file nobody touched.
+ * This whole block used to be about the OPPOSITE problem: a tool call carries every browser field the
+ * engine knows about, all of them empty, and a sentence rendered from those fields named a page nobody
+ * visited or a file nobody touched — "the file  is blocked", " on  is blocked".
+ *
+ * Quoting the expression removes the class rather than each instance. There is no longer a place in
+ * the sentence where an empty context field can appear, so there is no longer a per-surface sentence
+ * that has to remember to skip it. `matched` carries the same string for a caller that wants to match
+ * on it, which is what these tests now assert.
  */
 describe("describing a refusal", () => {
   const mcpContext: PolicyContext = {
@@ -417,19 +475,24 @@ describe("describing a refusal", () => {
     mcp: { server: "notes", tool: "search_notes", effect: "read" },
   };
 
-  test("a refused tool call names the tool and the server it was aimed at", () => {
+  test("a refused tool call quotes the rule, and names no surface it never touched", () => {
     const decision = evaluateActionPolicy(
       { mode: "enforce", deny: ['mcp.server == "notes"'], allow: ["true"] },
       mcpContext,
     );
 
     expect(decision.allowed).toBe(false);
+    expect(decision.matched).toBe('mcp.server == "notes"');
     expect(decision.reason).toBe(
-      'This deployment\'s policy does not allow that: search_notes on notes is blocked by the rule `mcp.server == "notes"`.',
+      'Refused by boundary rule: mcp.server == "notes"',
     );
-    // The neutral file field is present and empty on every tool call. Described from it, the
-    // sentence read "the file  is blocked", naming a workspace the call never went near.
+    /*
+     * The old sentence read "the file  is blocked" here, because the neutral file field is present
+     * and empty on every tool call and the copy described the context rather than the rule. Asserting
+     * the absence is what keeps a future re-introduction of that shape from passing.
+     */
     expect(decision.reason).not.toContain("the file");
+    expect(decision.reason).not.toContain("search_notes on notes");
   });
 
   test("a refused file action still names the file", () => {
@@ -450,7 +513,15 @@ describe("describing a refusal", () => {
     );
 
     expect(decision.allowed).toBe(false);
-    expect(decision.reason).toContain("the file /workspace/secrets.env");
+    // The rule names the path, so the sentence does too — as the rule, not as a rendered sentence
+    // that could put an empty neighbouring field in the middle of it.
+    // The expression names the SUBSTRING it matches, so the sentence says "secrets" rather than the
+    // whole path. The path is in the audit row's own fields, which is where a file's identity belongs;
+    // a boundary sentence quoting the rule stays quotable and stays the same for every rule.
+    expect(decision.reason).toBe(
+      'Refused by boundary rule: contains(file.path, "secrets")',
+    );
+    expect(decision.matched).toBe('contains(file.path, "secrets")');
   });
 });
 
@@ -626,9 +697,12 @@ describe("a rule about one surface does not refuse another", () => {
 describe("refusal wording under the context the gateway actually builds", () => {
   /*
    * The gateway attaches a neutral all-empty `mcp` to every browser context so a rule naming
-   * `mcp.effect` evaluates instead of throwing. The refusal copy used to key on the object being
-   * present rather than on its contents, so every live browser refusal read ":  on  is blocked" —
-   * empty strings where the element and page belonged — while tests that omitted the field passed.
+   * `mcp.effect` evaluates instead of throwing. The refusal copy used to key on that object's PRESENCE
+   * rather than on its contents, so every live browser refusal read ":  on  is blocked" — empty
+   * strings where the element and page belonged — while tests that omitted the field passed and hid it.
+   *
+   * These two contexts are built EXACTLY as the gateway builds them, neutral fields and all, which is
+   * what caught that. They now assert the quote, and the empty fields have nowhere to appear.
    */
   test("a browser refusal names the element, neutral mcp notwithstanding", () => {
     const decision = evaluateActionPolicy(
@@ -651,8 +725,11 @@ describe("refusal wording under the context the gateway actually builds", () => 
       },
     );
     expect(decision.allowed).toBe(false);
-    expect(decision.reason).toContain("Submit order");
-    expect(decision.reason).toContain("example.com");
+    // The element and the host are named by the RULE, so the empty mcp fields cannot leak in beside
+    // them — which was the whole failure this context was written to catch.
+    expect(decision.reason).toBe(
+      'Refused by boundary rule: contains(element.name, "Submit")',
+    );
     expect(decision.reason).not.toContain(" on  is blocked");
   });
 
@@ -672,7 +749,9 @@ describe("refusal wording under the context the gateway actually builds", () => 
       },
     );
     expect(decision.allowed).toBe(false);
-    expect(decision.reason).toContain("search_notes on notes");
+    expect(decision.reason).toBe(
+      'Refused by boundary rule: mcp.server == "notes"',
+    );
   });
 });
 

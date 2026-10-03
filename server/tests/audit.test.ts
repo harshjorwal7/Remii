@@ -2,38 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createApp } from "../src/app";
 import {
   auditEventTypes,
   createAuditStore,
   recordAuditEvent,
   redactAuditPayload,
 } from "../src/audit";
-import { loadConfig } from "../src/config";
-import { testEnvironment } from "./support/environment";
-
-const config = loadConfig({
-  ...testEnvironment(),
-});
-
-const adminAuth = {
-  handler: () => new Response(null, { status: 204 }),
-  api: {
-    getSession: async () => ({
-      user: { id: "admin", email: "admin@openbot.test" },
-    }),
-  },
-};
-
-const memberAuth = {
-  handler: () => new Response(null, { status: 204 }),
-  api: {
-    getSession: async () => ({
-      user: { id: "member", email: "member@openbot.test" },
-    }),
-  },
-};
-
 /**
  * Every event type this deployment declares, it can actually write.
  *
@@ -192,73 +166,12 @@ describe("audit event immutability", () => {
   });
 });
 
-describe("admin audit API", () => {
-  test("returns a filtered audit page to an administrator", async () => {
-    const queries: unknown[] = [];
-    const app = createApp(
-      config,
-      adminAuth,
-      { rolesForUser: async () => ["admin"] },
-      {
-        list: async (query) => {
-          queries.push(query);
-          return {
-            events: [
-              {
-                id: "event-1",
-                eventType: "connector.sync_succeeded",
-                targetType: "connector",
-                targetId: "drive-1",
-                actorUserId: "admin",
-                payload: { itemCount: 3 },
-                createdAt: "2026-08-13T12:00:00.000Z",
-              },
-            ],
-            nextCursor: "next-page",
-          };
-        },
-      },
-    );
-
-    const response = await app.request(
-      "http://openbot.local/api/admin/audit-events?eventType=connector.sync_succeeded&limit=10",
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      events: [
-        {
-          id: "event-1",
-          eventType: "connector.sync_succeeded",
-          targetType: "connector",
-          targetId: "drive-1",
-          actorUserId: "admin",
-          payload: { itemCount: 3 },
-          createdAt: "2026-08-13T12:00:00.000Z",
-        },
-      ],
-      nextCursor: "next-page",
-    });
-    expect(queries).toEqual([
-      { eventType: "connector.sync_succeeded", limit: 10 },
-    ]);
-  });
-
-  test("denies a non-admin caller", async () => {
-    const app = createApp(
-      config,
-      memberAuth,
-      { rolesForUser: async () => ["user"] },
-      { list: async () => ({ events: [] }) },
-    );
-
-    const response = await app.request(
-      "http://openbot.local/api/admin/audit-events",
-    );
-
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toEqual({
-      error: "Administrator access required.",
-    });
-  });
-});
+/*
+ * WAS a `describe("admin audit API")` here with two tests: one building `createApp` and reading
+ * `/api/admin/audit-events?eventType=...` expecting a filtered page, one expecting a non-admin to be
+ * denied.
+ *
+ * The route went with the rest of the admin surface, so both were answering 404 against 200 and 403.
+ * What they covered above them — redaction, the append-only trigger, the reader's paging — is all
+ * still here and still exercised. The wiring they added was to a route that no longer exists.
+ */

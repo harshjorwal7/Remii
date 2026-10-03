@@ -1,8 +1,8 @@
-# OpenBot, whole, in one container.
+# Remii, whole, in one container.
 #
 # WHAT THIS IS FOR. Everything a laptop runs, minus the database, in one image on one port. Deploy it
-# anywhere that runs a container and you get what `scripts/start.sh` gives you locally: the app, the
-# API, and a browser the Bots can drive.
+# anywhere that runs a container and you get what `scripts/start.sh` gives you locally: the app and
+# the API.
 #
 # WHAT IS NOT HERE, AND WHY.
 #
@@ -10,31 +10,37 @@
 #   product. `DATABASE_URL` points at a managed instance, which is one click on every platform this
 #   is meant to run on.
 #
-#   The supervisor. It exists to give each Bot its own container, which needs a Docker socket, which
-#   no serverless container platform permits. Without it every Bot shares the browser below, exactly
-#   as they do on a laptop with no supervisor configured. Per-Bot isolation is A6.
+#   Chromium, Playwright, and the per-Bot browser service.
 #
-# Chromium comes from Playwright's own installer, but the final image is not Playwright's all-browser
-# image. Keep this version matched to `agent-computer/package.json`: bump both or neither.
+#     The computer is not in this image any more. A person gets one desktop inside their own E2B
+#     sandbox (`E2B_IMAGE`, see `.env.example`), reached over the E2B API, and this container
+#     holds nothing but the API that drives it. That is why there is no browser here and no
+#     `PLAYWRIGHT_VERSION` to keep matched with anything: a browser in the API image would be a few
+#     hundred megabytes of memory holding one person's logins, in every replica, which is the
+#     opposite of stateless.
+#
+#     `agent-computer/` and `supervisor/` were deleted when that move was made. They were a browser
+#     per Bot and a Docker socket to spawn them with; both are gone from the tree, and the references
+#     left behind here and in `docker/s6` are what this section removed.
+#
+#   The supervisor. It existed to give each Bot its own container, which needs a Docker socket, which
+#   no serverless container platform permits. E2B gives each person a sandbox instead, and needs
+#   no socket from us.
 
 FROM node:24.18.1-bookworm-slim AS node-toolchain
 FROM oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS bun-toolchain
 
 FROM ubuntu:24.04 AS base
 
-# The Bun image digest pins the amd64/arm64 release bytes, including if its tag changes.
-ARG PLAYWRIGHT_VERSION=1.62.1
 # Keep Bun and global installs readable by the runtime's unprivileged user.
 ENV BUN_INSTALL=/usr/local
 ENV PATH="/usr/local/bin:${PATH}"
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 COPY --from=node-toolchain /usr/local /usr/local
 COPY --from=bun-toolchain /usr/local/bin/bun /usr/local/bin/bun
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip xz-utils \
   && ln -s bun /usr/local/bin/bunx \
-  && bunx --bun "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
   && rm -rf /root/.cache /tmp/* /var/lib/apt/lists/* \
   && useradd --create-home --shell /bin/bash pwuser \
   && useradd --create-home --shell /usr/sbin/nologin apiuser
@@ -56,9 +62,9 @@ RUN bun install --frozen-lockfile
 # is not an error: bun resolves afresh, succeeds, and the flag has decorated nothing. With both files
 # here, the tree in the image is the tree this repository resolved and committed. Bun is already
 # pinned twenty-odd lines above for the same reason; this is the install below it.
-COPY agent-computer/package.json agent-computer/package.json
-COPY agent-computer/bun.lock agent-computer/bun.lock
-RUN cd agent-computer && bun install --frozen-lockfile
+#
+# No second install for `agent-computer`, which had its own lockfile and its own tree. It was a
+# browser per Bot and it is gone; `--frozen-lockfile` failing here is what said so.
 
 # A second tree with the build-time dependencies left out, for the runtime stage to take. Vite,
 # biome and the test tooling are a gigabyte that nothing in a running container imports.
@@ -118,16 +124,10 @@ COPY --from=deps /prod/node_modules node_modules
 COPY --from=deps /prod/server/node_modules server/node_modules
 COPY --from=deps /src/package.json package.json
 COPY --from=deps /src/bun.lock bun.lock
-# The browser's tree is a separate install root with its own lockfile rather than a workspace of the
-# one above, so there is no /prod half of it to take and it ships as resolved, `typescript` included.
-# Pruning it would mean a second `--production` install in the stage above.
-COPY --from=deps /src/agent-computer/node_modules agent-computer/node_modules
 
 COPY server server
 COPY shared shared
 COPY examples examples
-COPY agent-computer/src agent-computer/src
-COPY agent-computer/package.json agent-computer/package.json
 
 # `bun run composio:smoke`, because the manifest copied above carries that entry and the question it
 # answers belongs here rather than on a laptop: it asks what THIS deployment's Composio key can see,
@@ -233,7 +233,7 @@ RUN mkdir -p /workspace /profiles \
 # Where the embedded database answers, when there is one. Overridden by whatever you set, so an
 # external database needs no special case: set DATABASE_URL and EMBEDDED_POSTGRES stays off.
 ENV EMBEDDED_POSTGRES=off
-ENV DATABASE_URL=postgres://openbot@127.0.0.1:5432/openbot
+ENV DATABASE_URL=postgres://remii@127.0.0.1:5432/remii
 
 ENV NODE_ENV=production
 ENV PORT=3001

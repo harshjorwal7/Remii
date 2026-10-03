@@ -12,7 +12,7 @@ const requireUser: MiddlewareHandler<{ Variables: AppVariables }> = async (
 ) => {
   context.set("actor", {
     id: "user-1",
-    email: "user@openbot.test",
+    email: "user@remii.test",
     role: "admin",
   });
   await next();
@@ -32,7 +32,11 @@ describe("POST /api/plugins/call args", () => {
         return { ok: true };
       },
     } as unknown as PluginStore;
-    return createPluginRoutes(store, requireUser, canUseBot);
+    // Two access checks, not one: the third says whether they may ACT AS the Bot, the fourth whether they
+    // OWN it. Repeating one check for the other is fine for these tests, which are about validation, but
+    // the argument still has to be passed — it is positional, so leaving it out slid `connect` and the
+    // broker into its place and both then read as `undefined`.
+    return createPluginRoutes(store, requireUser, canUseBot, canUseBot);
   }
 
   test.each([
@@ -43,7 +47,7 @@ describe("POST /api/plugins/call args", () => {
   ])("refuses %s with 400 and never reaches the store", async (_n, args) => {
     const calls: unknown[] = [];
     const body = { ref: "s/t", agentId: "bot-1", args };
-    const response = await appWith(calls).request("http://openbot.test/call", {
+    const response = await appWith(calls).request("http://remii.test/call", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -63,7 +67,7 @@ describe("POST /api/plugins/call args", () => {
       { ref: "s/t", agentId: "bot-1", args: { q: "hi" } },
       { ref: "s/t", agentId: "bot-1" },
     ]) {
-      const response = await app.request("http://openbot.test/call", {
+      const response = await app.request("http://remii.test/call", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -98,7 +102,7 @@ describe("POST /api/components/:name/call args", () => {
     );
 
     for (const args of ["oops", 42, [1]]) {
-      const response = await app.request("http://openbot.test/widget/call", {
+      const response = await app.request("http://remii.test/widget/call", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ function: "f", agentId: "bot-1", args }),

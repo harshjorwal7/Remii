@@ -56,7 +56,13 @@ export type HandoffCaps = {
 };
 
 export type HandoffOutcome =
-  | { ok: true; to: string; toName: string }
+  | {
+      ok: true;
+      to: string;
+      toName: string;
+      inOwnChannel?: boolean;
+      channelId?: string;
+    }
   | { ok: false; refusal: string };
 
 export type HandoffDesk = {
@@ -71,6 +77,11 @@ export type HandoffDesk = {
     /** The Bot being addressed, as the model named it. */
     target: string;
     envelope: HandoffEnvelope;
+    /**
+     * Run the work in the target Bot's own conversation with this person, rather than in a scratch
+     * thread whose only output is relayed back to the Bot that asked.
+     */
+    runInOwnChannel?: boolean;
   }) => Promise<HandoffOutcome>;
 };
 
@@ -92,10 +103,76 @@ export function createHandoffDesk(options: {
    * fix something else. `mayAddress` beside it catches for exactly this reason.
    */
   actorFor: (userId: string) => Promise<AgentActor | null>;
+  /**
+   * The conversation this person already has with the target Bot, made if they have not had one.
+   *
+   * Resolved here rather than named by the model, so a hop can only ever land in a channel the
+   * person and that Bot already share.
+   *
+   * BOTH IDS, AND NAMED, because a channel and its thread are two different things and a bare
+   * `Promise<string>` cannot say which one it returned. This seam returned a channel id while every
+   * caller treated the value as a thread id, and the whole delegation was invisible to the person
+   * as a result — so the return type now makes the question unaskable. See `ownThreadFor` in
+   * `index.ts` for what that looked like in the database.
+   */
+  ownThreadFor?: (
+    actorId: string,
+    botId: string,
+  ) => Promise<{ channelId: string; threadId: string } | null>;
+  /**
+   * The channel a thread belongs to, or null for a thread that is not one anybody opens.
+   *
+   * A second seam beside `ownThreadFor` and not folded into it, because the two answer opposite
+   * questions: this goes from a conversation to the row a roster is made of, and the other goes from
+   * a coworker to the conversation they share with a person.
+   */
+  channelIdForThread?: (threadId: string) => Promise<string | null>;
+  /**
+   * Told that a hop was accepted, so the asking run can be shown as waiting rather than working.
+   *
+   * A SEPARATE SEAM FROM `refuse`, and not a return value, for the reason every side effect here is
+   * one: the caller is a tool executing inside a run, and a hop that has been accepted must not be
+   * un-accepted because a working indicator could not be lit. Never awaited.
+   *
+   * Called on ACCEPTANCE ONLY. A refused hop leaves the asking run doing whatever it does next,
+   * which is the honest state — the work was not handed over, so nothing is waiting on a coworker.
+   */
+  onDelegated?: (input: {
+    /** The run that asked, so the row to move is named rather than guessed at. */
+    fromRunId: string;
+    fromBotId: string;
+    toBotId: string;
+    toName: string;
+    actorId: string;
+    /**
+     * Where the work lands, when it lands in the target's own channel. Absent for a hop into a
+     * scratch thread, whose output comes back by relay instead.
+     */
+    ownChannel?: { channelId: string; threadId: string } | null;
+    /**
+     * The conversation that ASKED, resolved to a channel.
+     *
+     * A run's own thread cannot be relied on to say this — a chat turn's thread is whatever the
+     * browser sent, and a hop's is a scratch thread — so the desk resolves it while it still holds
+     * the asking Bot and the person, and hands over a channel id. Absent when nothing matched, which
+     * is a run with no channel rather than a wrong one.
+     */
+    askingChannelId?: string | null;
+  }) => void;
   auditStore: AuditStore;
   caps: HandoffCaps;
 }): HandoffDesk {
-  const { queue, profiles, mayAddress, actorFor, auditStore, caps } = options;
+  const {
+    queue,
+    profiles,
+    mayAddress,
+    actorFor,
+    ownThreadFor,
+    channelIdForThread,
+    onDelegated,
+    auditStore,
+    caps,
+  } = options;
 
   /** Said once, so the trail carries the same words the Bot was given. */
   async function refuse(
@@ -130,7 +207,7 @@ export function createHandoffDesk(options: {
   }
 
   return {
-    async send({ from, target, envelope }) {
+    async send({ from, target, envelope, runInOwnChannel }) {
       const task = envelope.task?.trim() ?? "";
       if (!task) {
         return refuse(
@@ -216,9 +293,46 @@ export function createHandoffDesk(options: {
       const byName = roster.filter(
         (candidate) => candidate.name.toLowerCase() === wanted,
       );
+      /*
+       * A template is a definition, not a coworker, and it is not something
+       * work can be handed to.
+       *
+       * Summoning is the act that turns one into a Bot that answers, and it is
+       * the only act. Left in this list, a template both answers to its name
+       * and makes that name ambiguous against the summoned copy beside it — so
+       * a workspace that summoned "Research Desk" from the template of that
+       * name could never hand work to either of them by name, and the refusal
+       * it got back for it would be `ambiguous_bot` naming two ids and
+       * explaining nothing about either.
+       *
+       * Templates are on the roster this person can already see, so naming one
+       * here discloses nothing the roster did not — which is why this is a
+       * clearer sentence than the flat "no such Bot" below deliberately is.
+       */
+      const isTemplate = (candidate: (typeof byName)[number]) =>
+        candidate.isSystemTemplate === true;
+      // Hidden and deleted are filtered here for the same reason they were
+      // before: the ambiguity check below must count exactly what the fallback
+      // below would pick from, or the two disagree about whether there was ever
+      // a choice to make.
       const reachable = byName.filter(
-        (candidate) => !candidate.hidden && candidate.deletedAt === null,
+        (candidate) =>
+          !candidate.hidden &&
+          candidate.deletedAt === null &&
+          !isTemplate(candidate),
       );
+      const namedButOnlyTemplates =
+        byName.length > 0 &&
+        reachable.length === 0 &&
+        byName.some((candidate) => !candidate.hidden && isTemplate(candidate));
+      if (namedButOnlyTemplates || (byId && isTemplate(byId))) {
+        return refuse(
+          from,
+          target,
+          "not_a_coworker",
+          `"${target.trim().slice(0, 60)}" is a shared template rather than a coworker, so it cannot be given work. Summon it into the workspace first, then hand the work to the copy.`,
+        );
+      }
       if (!byId && reachable.length > 1) {
         /*
          * Named rather than guessed at. The ids are the escape hatch this refusal is pointing at,
@@ -270,8 +384,43 @@ export function createHandoffDesk(options: {
           from,
           target,
           "not_granted",
-          `You have not been given ${found.name} to hand work to. An administrator grants that.`,
+          `You have not been given ${found.name} to hand work to.`,
         );
+      }
+
+      /*
+       * The Bot's own conversation, when the caller asked for the work to happen there rather than
+       * in a scratch thread whose only output is relayed back.
+       *
+       * RESOLVED HERE, NEVER NAMED BY THE MODEL. A thread id in a tool argument is a Bot choosing
+       * where its own work runs, which is the same authority as choosing whose conversation it
+       * speaks in. This resolves the one conversation this person and that Bot already share, and
+       * makes it if they have not had one, so a hop into an own channel always lands somewhere the
+       * person can actually open and read.
+       */
+      let ownChannel: { channelId: string; threadId: string } | null = null;
+      if (runInOwnChannel) {
+        if (!ownThreadFor) {
+          return refuse(
+            from,
+            target,
+            "no_own_channel",
+            `${found.name} has nowhere of its own to work in right now. Do the work yourself, or ask the person.`,
+          );
+        }
+        try {
+          ownChannel = await ownThreadFor(from.actorId, found.id);
+        } catch {
+          ownChannel = null;
+        }
+        if (!ownChannel) {
+          return refuse(
+            from,
+            target,
+            "no_own_channel",
+            `${found.name}'s own channel could not be opened, so the work was not delegated. Do it yourself, or ask the person.`,
+          );
+        }
       }
 
       /*
@@ -328,10 +477,32 @@ export function createHandoffDesk(options: {
           depth: depth + 1,
           ...(from.initiator ? { initiator: from.initiator } : {}),
           /*
+           * Set ONLY when the caller asked for the work to run in the target Bot's own channel.
+           *
+           * `answerIn` alone means two different things to the delivery — "run here" and "this is a
+           * relay coming home" — and a delegation into a specialist's own channel is the first without
+           * being the second. So the second is named rather than inferred from the first.
+           */
+          /*
+           * The THREAD the work runs in, and the CHANNEL a person opens to read it, as two fields.
+           *
+           * They were one field for as long as this existed, and one field could only be one of
+           * them: `answerIn` is what the delivery runs the hop in, and the delivery needs a thread.
+           * Passing the channel there produced a phantom thread named after a channel, and the
+           * coworker's real conversation stayed empty.
+           */
+          ...(ownChannel
+            ? {
+                answerIn: ownChannel.threadId,
+                ownChannel: true,
+                ownChannelId: ownChannel.channelId,
+              }
+            : {}),
+          /*
            * The asking Bot's display name, resolved here against the same roster the target was.
            *
            * The delivery writes one line of this into the addressed Bot's conversation, and a person
-           * reading it should see "General Assistant" rather than `general-assistant`. Resolved on
+           * reading it should see "Remii" rather than `general-assistant`. Resolved on
            * this side because this is the side holding the roster; the delivery runs minutes later
            * on another replica and would have to fetch it again.
            */
@@ -407,7 +578,52 @@ export function createHandoffDesk(options: {
         },
       });
 
-      return { ok: true, to: found.id, toName: found.name };
+      /*
+       * Accepted, so the asking run is now waiting on somebody. Told here rather than by the caller
+       * polling, because the caller is a tool inside a run and has no way to know the desk accepted
+       * anything until it reads the tool's own return value — by which time the hop may already be
+       * running somewhere else.
+       */
+      try {
+        onDelegated?.({
+          fromRunId: from.runId,
+          fromBotId: from.botId,
+          toBotId: found.id,
+          toName: found.name,
+          actorId: from.actorId,
+          /*
+           * The CHANNEL the work lands in, which the run that asked has no way to work out: it is
+           * the target's conversation, and the asker is not a member of it. Passed whole so the
+           * activity row can name a channel rather than only a Bot.
+           */
+          ownChannel,
+          /*
+           * And the one that ASKED, resolved here because this is the last moment that holds the
+           * asking conversation and the person who owns it together.
+           */
+          askingChannelId: channelIdForThread
+            ? await channelIdForThread(from.threadId).catch(() => null)
+            : null,
+        });
+      } catch {
+        // A side effect. The hop is queued either way.
+      }
+
+      return {
+        ok: true,
+        to: found.id,
+        toName: found.name,
+        /*
+         * `channelId` IS THE CHANNEL'S ID, or it is not reported at all.
+         *
+         * It used to carry the thread id under a channel id's name, which is a field nothing read
+         * and that a future reader would have believed. A tool's return value is read by a model,
+         * so a field that looks like an id and is the wrong kind of id is worse than no field.
+         */
+        ...(ownChannel
+          ? { inOwnChannel: true, channelId: ownChannel.channelId }
+          : {}),
+      };
     },
   };
 }

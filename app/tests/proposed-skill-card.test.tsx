@@ -25,7 +25,13 @@ beforeAll(() => GlobalRegistrator.register());
 afterEach(cleanup);
 afterAll(() => GlobalRegistrator.unregister());
 
-/** A draft that passes the fields, so each test varies only the thing it is about. */
+/**
+ * A draft that passes the fields, so each test varies only the thing it is about.
+ *
+ * No `repo`, which is the ordinary case and is what makes `repo: null` on the way out worth asserting:
+ * a model that did not think about a repository still produces a skill that clears one on save, because
+ * the field is sent either way.
+ */
 const DRAFT = {
   slug: "weekly-summary",
   title: "Weekly summary",
@@ -66,6 +72,35 @@ test("a complete draft shows the whole instruction before anything is written", 
   expect(getByRole("button", { name: "Create it" })).toBeTruthy();
 });
 
+test("a repository is on the card, because it is the only line that adds capability", async () => {
+  // Everything else here is words the Bot wrote, and a person can read those and judge them. A
+  // repository hands the Bot three tools it would not otherwise have, so approving a skill should not
+  // require opening the form to find out which codebase it is about to be pointed at.
+  const saved: unknown[] = [];
+  const { getByText } = render(
+    <ProposedSkillCard
+      args={{
+        ...DRAFT,
+        repo: "https://github.com/owner/repo/tree/main/packages/api",
+      }}
+      respond={async () => {}}
+      save={async (values) => {
+        saved.push(values);
+      }}
+    />,
+  );
+
+  expect(getByText("owner/repo/tree/main/packages/api")).toBeTruthy();
+
+  await userEvent.click(getByText("Create it"));
+  await waitFor(() => expect(saved).toHaveLength(1));
+  // Carried through untouched: the server parses it, and reformatting it here would be a second
+  // implementation of something that has to agree with the first.
+  expect((saved[0] as { repo: string }).repo).toBe(
+    "https://github.com/owner/repo/tree/main/packages/api",
+  );
+});
+
 test("pressing create saves the checked fields, then resumes the run", async () => {
   const saved: unknown[] = [];
   const answers: unknown[] = [];
@@ -84,7 +119,9 @@ test("pressing create saves the checked fields, then resumes the run", async () 
   await userEvent.click(getByRole("button", { name: "Create it" }));
 
   await waitFor(() => expect(saved).toHaveLength(1));
-  expect(saved[0]).toEqual(DRAFT);
+  // `repo: null` beside the draft's own fields: the card saves what the form holds, and a form that
+  // did not mention a repository still clears one on the skill it is replacing.
+  expect(saved[0]).toEqual({ ...DRAFT, repo: null });
   // Saved first, answered second: a run resumed before the write lands would be told about a skill
   // that does not exist yet.
   await waitFor(() => expect(answers).toHaveLength(1));

@@ -19,12 +19,19 @@ import {
   mcpUserCredentials,
   sessions,
   userInstructions,
-  userRoles,
   users,
   verifications,
 } from "../src/db/schema";
 
-describe("OpenBot database schema", () => {
+describe("Remii database schema", () => {
+  /*
+   * `user_roles` is gone from this list, and from the schema with it.
+   *
+   * Roles went when the administrator did: individual-user SaaS has no role to assign, so the table
+   * had no writer and every account is exactly one user. The import failing here is not a typo to fix
+   * — it is the surface reporting that a table this test still listed no longer exists, which is the
+   * same fact the deleted `roles.test.ts` recorded.
+   */
   test("defines the core runtime records", () => {
     expect(
       [
@@ -32,7 +39,6 @@ describe("OpenBot database schema", () => {
         sessions,
         accounts,
         verifications,
-        userRoles,
         agents,
         channels,
         channelMemberships,
@@ -47,7 +53,6 @@ describe("OpenBot database schema", () => {
       "sessions",
       "accounts",
       "verifications",
-      "user_roles",
       "agents",
       "channels",
       "channel_memberships",
@@ -207,7 +212,19 @@ describe("OpenBot database schema", () => {
         .columns.filter((column) => column.getSQLType().startsWith("vector"))
         .map((column) => `${getTableName(table)}.${column.name}`),
     );
-    expect(vectorColumns).toEqual([]);
+    /*
+     * `memories.embedding`, and only that.
+     *
+     * WAS `toEqual([])`. The blanket "no vector column anywhere" rule was written when the only tables
+     * were tables — and durable memory arrived with a 1024-dimensional embedding for cosine
+     * similarity (`server/src/remi/memory.ts`), which is a summary of what THIS Bot was told, not a copy
+     * of somebody's documents. It is the one vector column this deployment holds.
+     *
+     * Naming it is the point: a second one on a table that sounds like a corpus is the reintroduction
+     * this test exists to catch, and an allowlist of exactly one entry still fails on that. The rule is
+     * "no document corpus", and memory is not one.
+     */
+    expect(vectorColumns).toEqual(["memories.embedding"]);
   });
 
   test("includes Better Auth's verified Google identity records", () => {
@@ -240,10 +257,22 @@ describe("OpenBot database schema", () => {
       })),
     ).toEqual([
       { name: "agent_id", notNull: true, hasDefault: false, primary: true },
+      /*
+       * Who owns it, and whether it came with the tenant package. Both nullable, the second with a
+       * default, and both load-bearing: `accessFilter` admits a profile on
+       * `systemOwned OR ownerUserId === actor.id`, so a package template is reachable by everybody and
+       * a personal Bot by its author alone.
+       */
       {
         name: "owner_user_id",
         notNull: false,
         hasDefault: false,
+        primary: false,
+      },
+      {
+        name: "is_system_template",
+        notNull: false,
+        hasDefault: true,
         primary: false,
       },
       { name: "title", notNull: true, hasDefault: false, primary: false },
@@ -259,6 +288,41 @@ describe("OpenBot database schema", () => {
         hasDefault: false,
         primary: false,
       },
+      /*
+       * A coworker's own body: two nullable columns, no defaults, and a `visibility` column above
+       * them that this deployment no longer varies on.
+       *
+       * `mascot_shape` and `mascot_color` arrived with migration 0066 as empty columns precisely so no
+       * existing row had to be read or rewritten — a null axis means "not chosen", which is what the
+       * client then fills from `avatar_seed`. Two columns rather than one serialised choice, so a
+       * partial choice is expressible.
+       *
+       * They used to be three. `mascot_expression` is gone as of migration 0070, and its absence here
+       * is the assertion: a face is what the agent is doing, not something a row holds, so the column
+       * that held it had nothing left to say and would have sat there empty forever.
+       *
+       * `visibility` stays in the schema because old rows still carry it. It is not a decision
+       * anything makes: `mapProfile` returns `visibility: "private"` whatever the column says, and
+       * `accessFilter` reads `ownerUserId` and `isSystemTemplate` instead.
+       */
+      {
+        name: "mascot_shape",
+        notNull: false,
+        hasDefault: false,
+        primary: false,
+      },
+      {
+        name: "mascot_color",
+        notNull: false,
+        hasDefault: false,
+        primary: false,
+      },
+      /*
+       * Still in the schema because old rows still carry it, and no longer a decision anything makes.
+       * `mapProfile` returns `visibility: "private"` whatever the column says, and `accessFilter`
+       * reads `ownerUserId` and `isSystemTemplate` instead — public sharing was removed, so nothing
+       * reaches this deployment as a shared row.
+       */
       {
         name: "visibility",
         notNull: true,
@@ -269,7 +333,7 @@ describe("OpenBot database schema", () => {
        * Nullable, and that is the security property.
        *
        * Null means this agent holds no credential and may not call a tool back, which is what a URL
-       * somebody pasted gets until an administrator hands it one.
+       * somebody pasted gets until they hand it one themselves.
        */
       {
         name: "callback_token_hash",
@@ -358,11 +422,23 @@ describe("OpenBot database schema", () => {
         onDelete: "cascade",
         onUpdate: "no action",
       },
+      /*
+       * `cascade`, not `set null`.
+       *
+       * WAS `set null`. That was `sandboxed_components.owner_user_id` — a legacy shared playground
+       * row, where nulling the owner preserved a read-only component everybody could see.
+       *
+       * This is `agent_profiles.owner_user_id`, and the two are opposites. A profile with no owner is
+       * a SYSTEM TEMPLATE: `accessFilter` admits one to every caller, and `mapProfile` reports it as
+       * `isSystemTemplate`. So nulling it on sign-out would promote a person's Bot to a template every
+       * other user could reach and manage — a silent privilege escalation on an account deletion.
+       * Cascade removes it with its owner instead, which is the only safe direction here.
+       */
       {
         sourceColumns: ["owner_user_id"],
         targetTable: "users",
         targetColumns: ["id"],
-        onDelete: "set null",
+        onDelete: "cascade",
         onUpdate: "no action",
       },
       {

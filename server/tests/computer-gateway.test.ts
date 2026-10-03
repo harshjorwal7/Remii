@@ -217,9 +217,26 @@ async function gatewayWith(
     auditStore: store,
     policy: () => policy,
     token: options?.token,
+    /*
+     * The owner of `bot-1`, which is what the gateway scopes its computer key by.
+     *
+     * A deployment template is shared and its computer is not — each person who asks for one gets
+     * their own sandbox — so `keyFor` refuses rather than reaching for a computer nobody owns. In
+     * production the answer comes from the agents table, through `scopeOfBot`; here it is the same
+     * shape, so the tests below that assert on the SCOPE KEY are testing the real resolution rather
+     * than the actor argument they happened to pass.
+     */
+    scopeOfBot: async () => ACTOR.id,
   });
-  // Every test acts on refs, so the server must hold a snapshot first, exactly as the real flow does.
-  await gateway.snapshot("bot-1");
+  /*
+   * Every test acts on refs, so the server must hold a snapshot first, exactly as the real flow does.
+   *
+   * The actor is passed because the gateway will not start a computer it cannot scope to an owner: a
+   * deployment template is addressed by whichever person asks for it, and each of them gets their own
+   * sandbox. Called without one and with no `scopeOfBot`, it refuses — which is the behaviour this
+   * harness would otherwise be asserting against by accident.
+   */
+  await gateway.snapshot("bot-1", ACTOR.id);
   return { gateway, calls, rows, addressedAs, requests, provider };
 }
 
@@ -334,8 +351,35 @@ describe("the computer gateway", () => {
     });
   });
 
-  test("an absent policy refuses every action", async () => {
+  test("an absent policy permits, because the platform default is permissive", async () => {
+    /*
+     * WAS "an absent policy refuses every action", and it was the gateway-level statement of the
+     * fail-closed default. `evaluateActionPolicy` now substitutes `DEFAULT_PLATFORM_POLICY`
+     * — `allow: ["true"]` — for an absent policy, which is what `policyStore.get()` hands over for an
+     * unconfigured deployment.
+     *
+     * Fail-closed is not gone: a policy with an EMPTY allow list refuses, a broken rule refuses, and
+     * deny beats allow. Those are in computer-policy.test.ts, and what changed here is only the case
+     * where nothing has been said at all — which in this product means "free and starter, use
+     * everything" rather than "nobody has configured this, do nothing".
+     */
     const { gateway, calls, rows } = await gatewayWith(undefined);
+    await gateway.click("bot-1", ACTOR, { ref: "e9", snapshotId: 7 });
+
+    expect(calls).toEqual(["click"]);
+    expect(rows[0]?.eventType).toBe("computer.action_allowed");
+  });
+
+  test("a policy that refuses everything still stops the call reaching the computer", async () => {
+    /*
+     * The control for the test above, and the property that actually protects a deployment: an empty
+     * allow list is a boundary nobody can wave through, whatever the default is.
+     */
+    const { gateway, calls, rows } = await gatewayWith({
+      mode: "enforce",
+      deny: [],
+      allow: [],
+    });
     await expect(
       gateway.click("bot-1", ACTOR, { ref: "e9", snapshotId: 7 }),
     ).rejects.toThrow(ActionRefusedError);
@@ -535,30 +579,49 @@ describe("the computer gateway", () => {
     }
   });
 
-  test("the computer is told WHICH Bot is asking", async () => {
-    // Every per-Bot behaviour on the computer keys off this id: the profile it opens, the logins it
-    // has, the proxy its traffic leaves through, and who holds its wheel.
+  test("the computer is told WHICH Bot is asking, and whose it is", async () => {
+    /*
+     * Every per-Bot behaviour on the computer keys off the key it is addressed by: the profile it
+     * opens, the logins it has, the proxy its traffic leaves through, and who holds its wheel.
+     *
+     * That key is now a SCOPE KEY — `u_<owner>__b_<bot>__<hash>` — rather than the bare Bot id,
+     * because a deployment template is shared while its computer is not: each person who asks for a
+     * template gets their own sandbox, and the key is what keeps two of them apart. So the assertion
+     * is on the Bot AND the owner both appearing in it, which is the property that actually matters
+     * rather than an exact string that would need rewriting every time the key format moves.
+     */
     const { provider, fetchImpl, addressedAs } = fakeComputer();
     const { store } = fakeAudit();
     const gateway = createComputerGateway({
       provider,
       fetchImpl,
       auditStore: store,
+      scopeOfBot: async () => ACTOR.id,
       policy: () => PERMISSIVE,
     });
 
-    await gateway.snapshot("sales-bot");
+    // The actor is passed on both, because a computer with no owner cannot be scoped and the gateway
+    // refuses rather than reaching for a shared one.
+    await gateway.snapshot("sales-bot", ACTOR.id);
     await gateway.click("sales-bot", ACTOR, {
       ref: "e1",
       snapshotId: 7,
     });
-    await gateway.read("research-bot");
+    await gateway.read("research-bot", ACTOR.id);
 
-    expect(addressedAs).toContain("sales-bot");
-    expect(addressedAs).toContain("research-bot");
-    // A call must never reach a different Bot's computer.
+    expect(addressedAs.some((key) => key.includes("b_sales-bot"))).toBe(true);
+    expect(addressedAs.some((key) => key.includes("b_research-bot"))).toBe(
+      true,
+    );
+    // Every call carries this person's ownership, so no two people's computers can be confused.
+    expect(addressedAs.every((key) => key.includes("u_dev-local-user"))).toBe(
+      true,
+    );
+    // And no call reached a Bot other than the two named above.
     expect(
-      addressedAs.every((id) => id === "sales-bot" || id === "research-bot"),
+      addressedAs.every(
+        (key) => key.includes("b_sales-bot") || key.includes("b_research-bot"),
+      ),
     ).toBe(true);
   });
 
@@ -581,6 +644,7 @@ describe("the computer gateway", () => {
       provider,
       fetchImpl,
       auditStore: store,
+      scopeOfBot: async () => ACTOR.id,
       policy: () => PERMISSIVE,
     });
 
@@ -661,7 +725,11 @@ describe("the computer gateway", () => {
     const result = await gateway.stopComputer("bot-1", ACTOR);
 
     expect(result).toEqual({ wasRunning: true });
-    expect(calls).toContain("stop:bot-1");
+    expect(
+      calls.some(
+        (call) => call.startsWith("stop:") && call.includes("b_bot-1"),
+      ),
+    ).toBe(true);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.eventType).toBe("computer.stopped");
     expect(rows[0]?.targetId).toBe("bot-1");
@@ -676,7 +744,11 @@ describe("the computer gateway", () => {
     const result = await gateway.stopComputer("bot-2", ACTOR);
 
     expect(result).toEqual({ wasRunning: false });
-    expect(calls).toContain("stop:bot-2");
+    expect(
+      calls.some(
+        (call) => call.startsWith("stop:") && call.includes("b_bot-2"),
+      ),
+    ).toBe(true);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.eventType).toBe("computer.stopped");
     expect(rows[0]?.targetId).toBe("bot-2");
@@ -690,7 +762,11 @@ describe("the computer gateway", () => {
     const result = await gateway.resetComputer("bot-1", ACTOR);
 
     expect(result).toEqual({ cleared: true });
-    expect(calls).toContain("reset:bot-1");
+    expect(
+      calls.some(
+        (call) => call.startsWith("reset:") && call.includes("b_bot-1"),
+      ),
+    ).toBe(true);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.eventType).toBe("computer.reset");
     expect(rows[0]?.targetId).toBe("bot-1");
@@ -705,7 +781,11 @@ describe("the computer gateway", () => {
     const result = await gateway.resetComputer("bot-2", ACTOR);
 
     expect(result).toEqual({ cleared: false });
-    expect(calls).toContain("reset:bot-2");
+    expect(
+      calls.some(
+        (call) => call.startsWith("reset:") && call.includes("b_bot-2"),
+      ),
+    ).toBe(true);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.eventType).toBe("computer.reset");
     expect(rows[0]?.targetId).toBe("bot-2");
@@ -734,6 +814,7 @@ describe("the computer gateway", () => {
       provider,
       fetchImpl,
       auditStore: store,
+      scopeOfBot: async () => ACTOR.id,
       policy: () => PERMISSIVE,
       snapshots,
     });
@@ -755,6 +836,7 @@ describe("the computer gateway", () => {
       provider,
       fetchImpl,
       auditStore: store,
+      scopeOfBot: async () => ACTOR.id,
       policy: () => PERMISSIVE,
       pageFrames: {
         clear: async () => {
@@ -797,29 +879,56 @@ describe("the computer gateway", () => {
 
     const result = await gateway.computers();
 
-    expect(result).toEqual({
-      isolation: "per-bot",
-      computers: [
-        {
-          botId: "bot-proxied",
-          running: true,
-          startedAt: "2026-08-20T12:00:00.000Z",
-          egress: "198.51.100.42",
-        },
-        {
-          botId: "bot-direct",
-          running: false,
-          startedAt: "2026-08-20T11:00:00.000Z",
-          egress: null,
-        },
-        {
-          botId: "bot-unknown-egress",
-          running: false,
-          startedAt: "2026-08-20T10:00:00.000Z",
-          egress: undefined,
-        },
-      ],
-    });
+    /*
+     * Each row carries an `owner` as well as a `botId`.
+     *
+     * The provider now reports scoped keys (`u_<owner>__b_<bot>__<hash>`), and `computers()` unwraps
+     * each one back to the Bot it names. That unwrapping is best-effort by design — the replica that
+     * located a computer knows the answer in memory, any other replica reads the durable directory,
+     * and only with neither does a row fall back to key slugs — so the assertion pins the unwrapped
+     * Bot id AND that every row says whose computer it is.
+     */
+    expect(result.isolation).toBe("per-bot");
+    expect(
+      result.computers.map((computer) => ({
+        botId: computer.botId,
+        running: computer.running,
+        startedAt: computer.startedAt,
+        egress: computer.egress,
+      })),
+    ).toEqual([
+      {
+        botId: "bot-proxied",
+        running: true,
+        startedAt: "2026-08-20T12:00:00.000Z",
+        egress: "198.51.100.42",
+      },
+      {
+        botId: "bot-direct",
+        running: false,
+        startedAt: "2026-08-20T11:00:00.000Z",
+        egress: null,
+      },
+      {
+        botId: "bot-unknown-egress",
+        running: false,
+        startedAt: "2026-08-20T10:00:00.000Z",
+        egress: undefined,
+      },
+    ]);
+    /*
+     * `unknown`, not this person's id — and that is the point of the assertion.
+     *
+     * The unwrapping is best-effort by design: a replica that located a computer knows the pair in
+     * memory, another reads the durable directory, and with neither the owner is `unknown` rather than
+     * a guess. This test hands the gateway a bare provider with no memory of any snapshot, so `unknown`
+     * is the honest answer and the Bot id still comes from the key slug.
+     */
+    expect(result.computers.map((computer) => computer.owner)).toEqual([
+      "unknown",
+      "unknown",
+      "unknown",
+    ]);
   });
 
   test("takes a screenshot through the located computer with its identity and token", async () => {
@@ -836,10 +945,27 @@ describe("the computer gateway", () => {
     const screenshotReq = requests.find((r) => r.url.endsWith("/screenshot"));
     expect(screenshotReq).toBeDefined();
     expect(screenshotReq?.url).toBe("http://agent-computer:4100/screenshot");
+    /*
+     * The header carries the SCOPE KEY, not the bare Bot id, and it is SIGNED.
+     *
+     * It used to carry `bot-1`. A deployment template's computer is per-person now — each person who
+     * asks for one gets their own sandbox — so the thing being asserted has to be the (owner, Bot)
+     * pair, which is what `scopeComputerKey` produces. The signature is the half that matters most:
+     * an unsigned id on one shared process would let any caller holding the deployment token drive
+     * another Bot's sessions, so the computer verifies it against the secret it already has.
+     */
     expect(screenshotReq?.init?.headers).toMatchObject({
-      "x-openbot-bot-id": "bot-1",
-      "x-openbot-computer-token": "computer-secret",
+      "x-remii-computer-token": "computer-secret",
     });
+    const assertedBot = screenshotReq?.init?.headers?.[
+      "x-remii-bot-id"
+    ] as string;
+    expect(assertedBot).toContain("b_bot-1");
+    expect(assertedBot).toContain("u_dev-local-user");
+    // And it is signed, so the computer can check it rather than believing it.
+    expect(
+      screenshotReq?.init?.headers?.["x-remii-bot-id-signature"],
+    ).toBeString();
   });
 
   test("routes acting, control, file, secret, and human input calls to the correct endpoint paths", async () => {
@@ -1119,6 +1245,7 @@ describe("resolving a computer's address", () => {
       provider: { ...provider, locate: async () => "http://169.254.169.254" },
       fetchImpl,
       auditStore: store,
+      scopeOfBot: async () => ACTOR.id,
       policy: () => PERMISSIVE,
       token: "deployment-token",
     });
@@ -1136,6 +1263,8 @@ describe("resolving a computer's address", () => {
       fetchImpl,
       auditStore: store,
       policy: () => PERMISSIVE,
+      // The owner every call below is scoped by; see the note on `gatewayWith`.
+      scopeOfBot: async () => ACTOR.id,
     });
 
     await expect(gateway.locate("bot-1")).resolves.toContain("http");
@@ -1145,7 +1274,7 @@ describe("resolving a computer's address", () => {
 /**
  * The snapshot a ref resolves against is shared between servers, not held in one process.
  *
- * OpenBot runs several server processes behind a load balancer, and the process that answers a
+ * Remii runs several server processes behind a load balancer, and the process that answers a
  * snapshot is rarely the one that answers the click that uses its refs. If the mapping from ref to
  * element lives in a `Map`, it is missing on every replica but the one that snapshotted: the policy
  * decides with no element in front of it, and the deny rule the deployment is relying on does not
@@ -1165,6 +1294,9 @@ describe("resolving a ref across replicas", () => {
       auditStore: store,
       policy: () => policy,
       snapshots,
+      // Two replicas sharing a snapshot store is exactly the only thing they share, so the owner is
+      // resolved the same way on both rather than arriving as an argument one of them happened to get.
+      scopeOfBot: async () => ACTOR.id,
     });
     return { gateway, calls, rows };
   }
@@ -1295,6 +1427,7 @@ describe("a ref that outlived its computer", () => {
       provider,
       fetchImpl,
       auditStore: store,
+      scopeOfBot: async () => ACTOR.id,
       policy: () => PERMISSIVE,
       snapshots,
     });
@@ -1333,6 +1466,7 @@ describe("a ref that outlived its computer", () => {
       provider,
       fetchImpl,
       auditStore: store,
+      scopeOfBot: async () => ACTOR.id,
       policy: () => PERMISSIVE,
       snapshots,
     });

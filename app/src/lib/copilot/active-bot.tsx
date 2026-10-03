@@ -58,6 +58,24 @@ export function useActiveBot(botId: string | undefined): void {
     holder.current = botId ?? DEFAULT_BOT_ID;
     value?.announce(botId ?? DEFAULT_BOT_ID);
     return () => {
+      /*
+       * The placeholder is restored only over another real value.
+       *
+       * A run does not end when this surface unmounts. A computer tool call is
+       * executed by the browser AFTER the run that asked for it has finished,
+       * so a turn still in flight outlives the page that started it, and the
+       * handler reads this holder at the moment it runs. Leaving a chat for
+       * another page in the app unmounts this effect while that call is still
+       * coming, and restoring `"default"` here sent it to a Bot that does not
+       * exist: the call came back "your computer could not be reached", the
+       * chain stopped mid-task, and the only way forward was to type "continue".
+       *
+       * So the last real Bot stands until another surface declares its own,
+       * which is what the restore is for anyway — it exists so one channel
+       * cannot leave its Bot addressed to whatever mounts next, and a surface
+       * that declares nothing has no claim on the value to take back.
+       */
+      if (previous === DEFAULT_BOT_ID) return;
       holder.current = previous;
       value?.announce(previous);
     };

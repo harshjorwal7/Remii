@@ -1,16 +1,16 @@
 [package]
-name = "openbot-desktop"
+name = "remii-desktop"
 version = "0.0.13"
-description = "OpenBot Desktop"
+description = "Remii Desktop"
 edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "openbot_desktop_lib"
+name = "remii_desktop_lib"
 path = "src/lib.rs"
 
 [[bin]]
-name = "openbot-desktop"
+name = "remii-desktop"
 path = "src/main.rs"
 
 [build-dependencies]

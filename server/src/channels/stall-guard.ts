@@ -62,12 +62,17 @@ export type WatchedBot = {
   initiator?: AuditInitiator;
 };
 
+/** Hard cap continuous channel runs to 20 minutes. */
+export const MAX_CHANNEL_RUN_MS = 20 * 60 * 1000;
+
 export type StallGuardOptions = {
   /** Silence this long ends the turn. Zero or less leaves every stream untouched. */
   stallMs: number;
   /** Absent leaves the trail without stall rows; the recovery still happens. */
   auditStore?: AuditStore;
   now?: () => number;
+  /** Continuous channel run limit in ms. Defaults to 20 minutes (MAX_CHANNEL_RUN_MS). */
+  maxDurationMs?: number;
 };
 
 export type StallGuard = {
@@ -110,8 +115,10 @@ const ENCODER = new TextEncoder();
  * of reporting lag, and nobody testing a sixty-millisecond limit can wait a second for it. Bounded
  * at both ends so a very long timeout still sweeps every second and a very short one does not spin.
  */
-function sweepIntervalFor(stallMs: number): number {
-  return Math.min(1_000, Math.max(50, Math.floor(stallMs / 4)));
+function sweepIntervalFor(stallMs: number, maxDurationMs = 0): number {
+  const base =
+    stallMs > 0 ? stallMs : maxDurationMs > 0 ? maxDurationMs : 1_000;
+  return Math.min(1_000, Math.max(50, Math.floor(base / 4)));
 }
 
 /** What one watched stream needs in order to be ended from outside it. */
@@ -136,11 +143,18 @@ type OpenStream = {
 
 export function createStallGuard(options: StallGuardOptions): StallGuard {
   const streams = new Map<string, OpenStream>();
-  const sweepEveryMs = sweepIntervalFor(options.stallMs);
+  const maxDurationMs =
+    options.maxDurationMs !== undefined
+      ? options.maxDurationMs
+      : options.stallMs > 0
+        ? MAX_CHANNEL_RUN_MS
+        : 0;
+  const sweepEveryMs = sweepIntervalFor(options.stallMs, maxDurationMs);
   let sweeper: ReturnType<typeof setInterval> | undefined;
 
   const watchdog = new TurnWatchdog({
     stallMs: options.stallMs,
+    maxDurationMs,
     ...(options.now ? { now: options.now } : {}),
     onStall: (stalled) => {
       void giveUp(stalled);
@@ -207,6 +221,47 @@ export function createStallGuard(options: StallGuardOptions): StallGuard {
     if (!stream) return;
 
     const turn = turnOf(stream.requestBody);
+
+    if (stalled.exceededMaxDuration) {
+      console.error(
+        JSON.stringify({
+          type: "agent-stream-max-duration-exceeded",
+          bot: stream.bot.id,
+          silentForMs: stalled.silentForMs,
+          chunks: stalled.chunks,
+          ...(turn ? { thread: turn.threadId, run: turn.runId } : {}),
+          note: "The channel run exceeded the 20-minute continuous execution limit, so the turn was ended.",
+        }),
+      );
+
+      stream.cancelUpstream();
+
+      if (stream.sse) {
+        void stream.writer
+          .write(maxDurationEvent(stream.bot.name, maxDurationMs))
+          .catch(() => undefined);
+      }
+      void stream.writer.close().catch(() => undefined);
+
+      if (options.auditStore) {
+        await recordAuditEvent(options.auditStore, {
+          eventType: "agent.stream_stalled",
+          targetType: "agent",
+          targetId: stream.bot.id,
+          ...(stream.bot.initiator ? { initiator: stream.bot.initiator } : {}),
+          payload: {
+            bot: stream.bot.id,
+            silentForMs: stalled.silentForMs,
+            chunks: stalled.chunks,
+            exceededMaxDuration: true,
+            maxDurationMs,
+            ...(turn ? { thread: turn.threadId, run: turn.runId } : {}),
+          },
+        }).catch(() => undefined);
+      }
+      return;
+    }
+
     console.error(
       JSON.stringify({
         type: "agent-stream-stalled",
@@ -375,6 +430,17 @@ function turnOf(
  * turn is over, and says what to do next. No identifiers and no milliseconds: a run id in a sentence
  * is a thing the reader has to decide to ignore, and it is not what they came to find out.
  */
+function maxDurationEvent(botName: string, maxDurationMs: number): Uint8Array {
+  const event = {
+    type: "RUN_ERROR",
+    message:
+      `${botName} exceeded the maximum continuous execution limit of ${inWords(maxDurationMs)}. ` +
+      "This channel run was ended to prevent abuse.",
+    code: "CHANNEL_RUN_MAX_DURATION_EXCEEDED",
+  };
+  return ENCODER.encode(`data: ${JSON.stringify(event)}\n\n`);
+}
+
 function stalledEvent(botName: string, stallMs: number): Uint8Array {
   const event = {
     type: "RUN_ERROR",
@@ -391,8 +457,11 @@ function stalledEvent(botName: string, stallMs: number): Uint8Array {
  *
  * Floored at a second. A timeout below one is only ever a test's, and "nothing arrived from it for
  * 0 seconds" is a sentence that makes a reader doubt everything else on the screen.
+ *
+ * Exported because the channel's own deadline is explained to the same reader in the same words,
+ * from `RunBuiltAgent` in copilot.ts. Two sentences about one limit, written once.
  */
-function inWords(ms: number): string {
+export function inWords(ms: number): string {
   if (ms >= 60_000 && ms % 60_000 === 0) {
     const minutes = ms / 60_000;
     return minutes === 1 ? "a minute" : `${minutes} minutes`;

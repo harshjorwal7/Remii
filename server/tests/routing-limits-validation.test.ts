@@ -3,6 +3,7 @@ import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import type { AppVariables } from "../src/auth/guards";
 import { createApp } from "../src/app";
+import { createTestApp } from "./support/app";
 import { loadConfig } from "../src/config";
 import { createRoutingRoutes } from "../src/routing/routes";
 import { createComputerRoutes } from "../src/computer/routes";
@@ -15,7 +16,7 @@ const requireUser: MiddlewareHandler<{ Variables: AppVariables }> = async (
 ) => {
   context.set("actor", {
     id: "user-1",
-    email: "user@openbot.test",
+    email: "user@remii.test",
     role: "admin",
   });
   await next();
@@ -45,7 +46,7 @@ describe("POST /api/route text cap", () => {
 
   test("refuses oversized text with 400 and never routes", async () => {
     const calls: unknown[] = [];
-    const response = await app(calls).request("http://openbot.test/", {
+    const response = await app(calls).request("http://remii.test/", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "x".repeat(10001) }),
@@ -61,7 +62,7 @@ describe("POST /api/route text cap", () => {
     const calls: unknown[] = [];
     // Empty roster -> 409 "No coworker is available.", which still proves the text passed the
     // cap and reached the router path.
-    const response = await app(calls).request("http://openbot.test/", {
+    const response = await app(calls).request("http://remii.test/", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "x".repeat(10000) }),
@@ -72,32 +73,24 @@ describe("POST /api/route text cap", () => {
 
 const SECRET = "worker-shared-secret";
 
+/**
+ * The worker callback, mounted and not.
+ *
+ * WAS a hand-written array of twenty `undefined`s and then `runner`, spread into `createApp(...args)`.
+ * `routineRunner` is parameter 20 of thirty-five, not 23 — the list ran past it and the runner landed
+ * on `triggerIncoming`, so the route this describe is about was never mounted and every case was
+ * answering 404 against an expected 400.
+ *
+ * {@link createTestApp} names it, which is the only version of this that survives the signature
+ * changing again. The comment above it is not decoration either: a positional list of thirty-five
+ * optional slots is silent about its own mistake, and this one had been wrong long enough for the
+ * tests to be green-wrong about it.
+ */
 function internalApp(runner: RoutineRunner | undefined) {
-  const args: Parameters<typeof createApp> = [
-    loadConfig({ ...testEnvironment(), WORKER_SHARED_SECRET: SECRET }),
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    runner,
-  ];
-  return createApp(...args);
+  return createTestApp({
+    config: loadConfig({ ...testEnvironment(), WORKER_SHARED_SECRET: SECRET }),
+    parts: { routineRunner: runner },
+  });
 }
 
 /**
@@ -119,7 +112,7 @@ describe("POST /internal/routines/run id", () => {
         },
       });
       const response = await app.request(
-        "http://openbot.local/internal/routines/run",
+        "http://remii.local/internal/routines/run",
         {
           method: "POST",
           headers: {
@@ -147,11 +140,18 @@ describe("GET /api/computers/:botId/page-frame/:toolCallId", () => {
         return null;
       },
     };
+    /*
+     * `keyOf`, which the route needs to turn the Bot in the path into the (user, Bot) key a frame is
+     * filed under. Without it the read threw inside the handler and the route answered 500 — which
+     * this case was reporting as "a blank tool call id is accepted" when it had not reached the
+     * validation at all.
+     */
+    const gateway = { keyOf: async (botId: string) => `computer:${botId}` };
     const app = new Hono<{ Variables: AppVariables }>();
     app.route(
       "/",
       createComputerRoutes(
-        {} as never,
+        gateway as never,
         {} as never,
         requireUser,
         async () => true,
@@ -164,17 +164,21 @@ describe("GET /api/computers/:botId/page-frame/:toolCallId", () => {
   test("returns null frame on the happy path", async () => {
     const calls: unknown[] = [];
     const response = await app(calls).request(
-      "http://openbot.test/bot-1/page-frame/turn-1",
+      "http://remii.test/bot-1/page-frame/turn-1",
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ frame: null });
-    expect(calls).toEqual([["bot-1", "turn-1"]]);
+    // The COMPUTER KEY, not the Bot id: a frame is a screenshot of a signed-in page, so it is filed
+    // under the (user, Bot) key the gateway resolves. The read above reaches the store with whatever
+    // `keyOf` returned, which is what this asserts — it used to expect the bare Bot id and so could
+    // never have passed against a gateway that resolves keys.
+    expect(calls).toEqual([["computer:bot-1", "turn-1"]]);
   });
 
   test("refuses an overlong toolCallId with 400 and never reads", async () => {
     const calls: unknown[] = [];
     const response = await app(calls).request(
-      `http://openbot.test/bot-1/page-frame/${"t".repeat(201)}`,
+      `http://remii.test/bot-1/page-frame/${"t".repeat(201)}`,
     );
     expect(response.status).toBe(400);
     expect(calls).toEqual([]);

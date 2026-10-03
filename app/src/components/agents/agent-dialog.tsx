@@ -9,11 +9,13 @@ import {
 } from "@tabler/icons-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ZodType } from "zod";
 import { AbstractAvatar } from "@/components/agents/abstract-avatar";
-import { CallbackTokenPanel } from "@/components/agents/callback-token-panel";
+import { ConnectionSection } from "@/components/agents/agent-connections";
 import { HandoffPanel } from "@/components/agents/handoff-panel";
+import { RowMark } from "@/components/layout/row-mark";
+import { AppMark } from "@/components/plugins/app-mark";
 import { RoutinesList } from "@/components/routines/routines-list";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,13 +40,6 @@ import {
   ItemDescription,
   ItemTitle,
 } from "@/components/ui/item";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Sidebar,
   SidebarContent,
@@ -71,8 +66,14 @@ import {
 } from "@/lib/agents/mutations";
 import { type AgentProfile, agentQueryOptions } from "@/lib/agents/queries";
 import { isComposing } from "@/lib/composing";
-import { agentPluginsQueryOptions } from "@/lib/plugins/queries";
+import {
+  agentPluginsQueryOptions,
+  type PluginServer,
+  pluginsSlimQueryOptions,
+} from "@/lib/plugins/queries";
 import { readToolName } from "@/lib/plugins/tool-name";
+import { MascotAvatar } from "@/mascot/mascot-avatar";
+import { MascotPicker } from "@/mascot/mascot-picker";
 
 /**
  * A coworker, in a dialog with its own sidebar.
@@ -151,6 +152,7 @@ function AgentDialogBody({ agentId }: { agentId: string }) {
             <AbstractAvatar
               name={profile.name}
               seed={profile.avatarSeed}
+              mascot={profile.mascot}
               size={36}
             />
             <div className="flex min-w-0 flex-col">
@@ -194,6 +196,7 @@ function AgentDialogBody({ agentId }: { agentId: string }) {
               <AbstractAvatar
                 name={profile.name}
                 seed={profile.avatarSeed}
+                mascot={profile.mascot}
                 size={28}
               />
               <span className="truncate text-sm font-medium">
@@ -252,7 +255,7 @@ function GeneralSection({
 
   /*
    * One field at a time, over the whole update endpoint: the API takes the full profile, so the
-   * unchanged fields ride along as they are on screen. The empty key means "keep the current one".
+   * unchanged fields ride along as they are on screen.
    */
   const save = (patch: Partial<AgentFormValues>) =>
     updateAgent.mutateAsync({
@@ -263,12 +266,12 @@ function GeneralSection({
         roleDescription: profile.roleDescription,
         visibility: profile.visibility,
         /*
-         * Not a built-in coworker's endpoint. That is the managed Bot's own address, which nobody
-         * typed, and the route checks any endpoint it is sent as one somebody did: on a deployment
-         * whose Bot is on localhost it refused every edit. Empty leaves the stored one where it is.
+         * Carried on every save, including the ones that only touched a name. The update endpoint
+         * takes the whole profile, and an omitted `mascot` means "leave the row alone" to the server —
+         * so the alternative is not "keeps the mascot", it is "silently returns it to being seeded",
+         * which reads as the customizer losing somebody's work.
          */
-        endpoint: profile.builtIn ? "" : (profile.endpoint ?? ""),
-        authValue: "",
+        mascot: profile.mascot ?? undefined,
         ...patch,
       }),
     });
@@ -300,11 +303,40 @@ function GeneralSection({
           schema={agentFormSchema.shape.roleDescription}
           value={profile.roleDescription}
         />
-        <VisibilityItem
-          canManage={profile.canManage}
-          onSave={(visibility) => save({ visibility })}
-          value={profile.visibility}
-        />
+        {/*
+         * The one field in this list that is not text, so it gets an item of its own rather than an
+         * `EditableTextItem`. It saves through the same `save` call as everything else, which matters
+         * more than it looks: that function re-sends the whole profile, so a mascot it forgot to carry
+         * would be replaced by the server's "leave it alone" default the first time somebody fixed a
+         * typo in a name. `mascot: profile.mascot ?? undefined` below is what keeps it.
+         */}
+        <Item variant="muted">
+          <ItemContent>
+            <ItemTitle>Mascot</ItemTitle>
+            <ItemDescription>
+              {profile.canManage
+                ? "Its shape and colour. Anything left alone stays decided by this agent's own id, and its face follows the work."
+                : "Read only."}
+            </ItemDescription>
+            {profile.canManage ? (
+              <MascotPicker
+                className="mt-2"
+                seed={profile.avatarSeed || profile.id}
+                value={profile.mascot ?? undefined}
+                onChange={(mascot) => void save({ mascot })}
+              />
+            ) : (
+              <div className="mt-2">
+                <MascotAvatar
+                  name={profile.name}
+                  seed={profile.avatarSeed || profile.id}
+                  choice={profile.mascot}
+                  size={48}
+                />
+              </div>
+            )}
+          </ItemContent>
+        </Item>
         {profile.systemOwned ? (
           <Item variant="muted">
             <ItemContent>
@@ -467,79 +499,6 @@ function EditableTextItem({
   );
 }
 
-/**
- * Visibility is two named choices, so it edits as a select that writes on pick — no open state and
- * no Save, because there is no draft worth holding: the pick is the whole of the change.
- */
-function VisibilityItem({
-  value,
-  canManage,
-  onSave,
-}: {
-  value: AgentProfile["visibility"];
-  canManage: boolean;
-  onSave: (visibility: AgentProfile["visibility"]) => Promise<unknown>;
-}) {
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  return (
-    <Item variant="muted">
-      <ItemContent>
-        <ItemTitle>Visibility</ItemTitle>
-        <ItemDescription>
-          {value === "private"
-            ? "Only you can see it and start channels with it."
-            : "Everyone in the deployment can find and use it."}
-        </ItemDescription>
-        {error ? (
-          <p className="text-sm text-destructive" role="alert">
-            {error}
-          </p>
-        ) : null}
-      </ItemContent>
-      <ItemActions>
-        {canManage ? (
-          <Select
-            disabled={saving}
-            // The label map, so the closed trigger says "Private" rather than the raw value.
-            items={{ private: "Private", public: "Public" }}
-            onValueChange={async (next) => {
-              if (next === value) return;
-              setError(null);
-              setSaving(true);
-              try {
-                await onSave(next as AgentProfile["visibility"]);
-              } catch (failure) {
-                setError(
-                  failure instanceof Error
-                    ? failure.message
-                    : "Could not save.",
-                );
-              } finally {
-                setSaving(false);
-              }
-            }}
-            value={value}
-          >
-            <SelectTrigger className="w-28">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="private">Private</SelectItem>
-              <SelectItem value="public">Public</SelectItem>
-            </SelectContent>
-          </Select>
-        ) : (
-          <span className="text-sm text-muted-foreground">
-            {value === "private" ? "Private" : "Public"}
-          </span>
-        )}
-      </ItemActions>
-    </Item>
-  );
-}
-
 /** "google-drive" as "Google Drive": the connector key, said the way a person would. */
 function connectorName(key: string): string {
   return key
@@ -558,6 +517,17 @@ function connectorName(key: string): string {
  */
 function AccessSection({ agentId }: { agentId: string }) {
   const plugins = useQuery(agentPluginsQueryOptions(agentId));
+  const allPlugins = useQuery(pluginsSlimQueryOptions());
+
+  const serverMap = useMemo(() => {
+    const map = new Map<string, PluginServer>();
+    for (const s of allPlugins.data?.servers ?? []) {
+      map.set(s.id, s);
+      const raw = s.id.replace(/^composio-/, "");
+      map.set(raw, s);
+    }
+    return map;
+  }, [allPlugins.data?.servers]);
 
   if (plugins.isPending) return null;
   if (plugins.error || !plugins.data) {
@@ -572,6 +542,8 @@ function AccessSection({ agentId }: { agentId: string }) {
   const connectors = new Map<string, string[]>();
   for (const tool of plugins.data.tools) {
     const key = tool.ref.split("/")[0] ?? tool.ref;
+    // Exclude mock test servers
+    if (key.startsWith("test-srv-") || key.startsWith("test_")) continue;
     let label = readToolName(tool.toolName).label;
     /*
      * Vendors prefix every tool with their own name — "Notion create pages" — which next to a row
@@ -597,8 +569,8 @@ function AccessSection({ agentId }: { agentId: string }) {
             Nothing granted yet
           </EmptyTitle>
           <EmptyDescription>
-            An administrator grants connectors and skills from the Plugins
-            screens. Until then this coworker can converse, and nothing more.
+            Allow app access for this coworker in the Connection tab. Until then
+            this coworker can converse, and nothing more.
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -608,26 +580,38 @@ function AccessSection({ agentId }: { agentId: string }) {
   return (
     <>
       <p className="text-sm text-muted-foreground">
-        What this coworker may reach when it works. Granted by an administrator
-        on the Plugins screens; anything not listed is refused when called.
+        What this coworker may reach when it works. Manage app access and
+        permissions in the Connection tab; anything not listed is refused when
+        called.
       </p>
       <div className="flex flex-col gap-2">
-        {[...connectors.entries()].map(([key, labels]) => (
-          <Item key={key} variant="muted">
-            <ItemContent>
-              <ItemTitle>{connectorName(key)}</ItemTitle>
-              <ItemDescription>
-                {labels.slice(0, 4).join(", ")}
-                {labels.length > 4 ? ` and ${labels.length - 4} more` : ""}
-              </ItemDescription>
-            </ItemContent>
-            <ItemActions>
-              <span className="text-sm text-muted-foreground tabular-nums">
-                {labels.length} {labels.length === 1 ? "tool" : "tools"}
-              </span>
-            </ItemActions>
-          </Item>
-        ))}
+        {[...connectors.entries()].map(([key, labels]) => {
+          const rawKey = key.replace(/^composio-/, "");
+          const server = serverMap.get(key) ?? serverMap.get(rawKey);
+          return (
+            <Item key={key} variant="muted">
+              <RowMark>
+                <AppMark
+                  serverId={key}
+                  logo={server?.broker?.logo}
+                  className="size-4 text-muted-foreground"
+                />
+              </RowMark>
+              <ItemContent>
+                <ItemTitle>{server?.title || connectorName(key)}</ItemTitle>
+                <ItemDescription>
+                  {labels.slice(0, 4).join(", ")}
+                  {labels.length > 4 ? ` and ${labels.length - 4} more` : ""}
+                </ItemDescription>
+              </ItemContent>
+              <ItemActions>
+                <span className="text-sm text-muted-foreground tabular-nums">
+                  {labels.length} {labels.length === 1 ? "tool" : "tools"}
+                </span>
+              </ItemActions>
+            </Item>
+          );
+        })}
         {skills.map((skill) => (
           <Item key={skill.slug} variant="muted">
             <ItemContent>
@@ -640,46 +624,6 @@ function AccessSection({ agentId }: { agentId: string }) {
           </Item>
         ))}
       </div>
-    </>
-  );
-}
-
-function ConnectionSection({
-  agentId,
-  profile,
-}: {
-  agentId: string;
-  profile: AgentProfile;
-}) {
-  /*
-   * A built-in coworker is done the moment it exists: it runs on the deployment's own Bot, whose
-   * process already holds the deployment's tool credential, so its tool calls authenticate with no
-   * setup. Showing it the endpoint and the callback-token panel told the person the opposite —
-   * an internal address they never typed, and a credential they were never supposed to need.
-   */
-  if (!profile.endpoint || profile.builtIn) {
-    return (
-      <p className="text-sm text-muted-foreground">
-        Runs on this deployment's own Bot. Nothing to connect and nothing to
-        authenticate: its tool calls are covered by the deployment's own
-        credential.
-      </p>
-    );
-  }
-  return (
-    <>
-      <section className="grid gap-2">
-        <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Endpoint
-        </h2>
-        <p className="break-all font-mono text-sm">{profile.endpoint}</p>
-      </section>
-      {profile.canManage ? (
-        <CallbackTokenPanel
-          agentId={agentId}
-          hasToken={profile.hasCallbackToken}
-        />
-      ) : null}
     </>
   );
 }

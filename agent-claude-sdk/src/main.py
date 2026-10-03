@@ -5,7 +5,7 @@ This is the row where a plan can stand in for a key. `claude setup-token` mints 
 this harness is the one the model screen offers a subscription on.
 
 The precedence trap is the thing to get right: `ANTHROPIC_API_KEY` wins over the OAuth token, so a
-deployment that sets both silently bills the key and the plan goes unused. OpenBot sets one.
+deployment that sets both silently bills the key and the plan goes unused. Remii sets one.
 """
 
 import os
@@ -14,7 +14,7 @@ from ag_ui_claude_sdk import ClaudeAgentAdapter, add_claude_fastapi_endpoint
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-TOKEN_HEADER = "x-openbot-agent-token"
+TOKEN_HEADER = "x-remii-agent-token"
 
 
 def _refuse_both_credentials() -> None:
@@ -59,6 +59,6 @@ async def health():
 
 add_claude_fastapi_endpoint(
     app=app,
-    adapter=ClaudeAgentAdapter(name="openbot"),
+    adapter=ClaudeAgentAdapter(name="remii"),
     path="/",
 )

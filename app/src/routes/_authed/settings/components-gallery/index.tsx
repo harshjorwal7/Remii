@@ -29,7 +29,7 @@ function RouteComponent() {
 
   return (
     <PageShell
-      description="The pieces a Bot can draw in a conversation instead of describing something in prose. Which of them any one Bot may use is an administrator's decision."
+      description="The pieces a Bot can draw in a conversation instead of describing something in prose."
       title="Components gallery"
     >
       {components.isPending ? null : components.error ? (
@@ -41,7 +41,7 @@ function RouteComponent() {
           <EmptyHeader>
             <EmptyTitle>Nothing published yet</EmptyTitle>
             <EmptyDescription className="text-pretty">
-              When an administrator publishes a component, it will show up here.
+              When a component is published, it will show up here.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -53,7 +53,7 @@ function RouteComponent() {
              * definition, so a dot saying so would be the same mark on every tile.
              */
             <Link
-              className="flex aspect-square flex-col overflow-hidden rounded-lg border border-border bg-card text-left outline-none transition-colors hover:border-ring focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              className="flex aspect-square flex-col overflow-hidden rounded-lg border border-border bg-card text-left outline-none transition-colors hover:border-ring focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50"
               data-testid={`gallery-${component.name}`}
               key={component.name}
               params={{ name: component.name }}

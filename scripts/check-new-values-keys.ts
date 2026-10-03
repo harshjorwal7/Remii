@@ -42,7 +42,7 @@ async function lastReleaseTag(): Promise<string> {
     .map((line) => line.trim())
     .filter(Boolean)) {
     const has = Bun.spawnSync(
-      ["git", "cat-file", "-e", `${tag}:charts/openbot/values.yaml`],
+      ["git", "cat-file", "-e", `${tag}:charts/remii/values.yaml`],
       { stdout: "pipe", stderr: "pipe" },
     );
     if (has.exitCode === 0) return tag;
@@ -75,10 +75,10 @@ function paths(value: unknown, prefix = ""): string[] {
 
 const before = new Set(
   paths(
-    parse(await run(["git", "show", `${since}:charts/openbot/values.yaml`])),
+    parse(await run(["git", "show", `${since}:charts/remii/values.yaml`])),
   ),
 );
-const now = paths(parse(await Bun.file("charts/openbot/values.yaml").text()));
+const now = paths(parse(await Bun.file("charts/remii/values.yaml").text()));
 /*
  * A key whose parent is also new is covered by nulling the parent, and nulling both is the same
  * test twice. The parent is the harsher of the two, because that is what --reuse-values actually
@@ -118,7 +118,7 @@ function render(extra: string[]): { ok: boolean; out: string; err: string } {
       "helm",
       "template",
       "ci",
-      "charts/openbot",
+      "charts/remii",
       "--values",
       valuesFile,
       "--set-string",
@@ -246,7 +246,7 @@ function renderedValue(out: string, variable: string): string | undefined {
  * runs in a job with no Helm — and a test that shells out to a binary which is not there returns
  * undefined rather than failing.
  */
-const rawChartValues = await Bun.file("charts/openbot/values.yaml").text();
+const rawChartValues = await Bun.file("charts/remii/values.yaml").text();
 const chartValues = parse(rawChartValues) as {
   config?: { handoff?: Record<string, number> };
 };
@@ -306,7 +306,7 @@ function enableFor(component: string): string[] {
     "--set",
     `externalSecrets.data[${next}].secretKey=worker-shared-secret`,
     "--set",
-    `externalSecrets.data[${next}].remoteRef.key=openbot/worker-shared-secret`,
+    `externalSecrets.data[${next}].remoteRef.key=remii/worker-shared-secret`,
   ];
 }
 

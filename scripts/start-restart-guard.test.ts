@@ -38,7 +38,7 @@ async function runStartWithStaleServerProbe(
   }: Run = {},
 ) {
   const root =
-    await Bun.$`mktemp -d ${tmpdir()}/openbot-start-guard-XXXXXX`.text();
+    await Bun.$`mktemp -d ${tmpdir()}/remii-start-guard-XXXXXX`.text();
   const directory = root.trim();
   const fakeBin = join(directory, "bin");
   const scripts = join(directory, "scripts");
@@ -50,18 +50,14 @@ async function runStartWithStaleServerProbe(
   const environment = [
     "APP_PORT=3010",
     "SERVER_PORT=3001",
-    "COMPUTER_PORT=4100",
     "BOT_PORT=4200",
     "LANGGRAPH_PORT=4201",
-    "SUPERVISOR_PORT=4500",
-    "SUPERVISOR_TOKEN=supervisor-token",
     "COMPUTER_TOKEN=computer-token",
     "WORKER_SHARED_SECRET=worker-secret",
     "MANAGED_AGENT_TOKEN=managed-token",
     "AGENT_TOOL_TOKEN=agent-tool-token",
     "MANAGED_AGENT_AG_UI_URL=http://localhost:4201/ag-ui",
-    "OPENBOT_ONE_COMPUTER_EACH=true",
-    "DATABASE_URL=postgres://openbot:openbot@localhost:5432/openbot",
+    "DATABASE_URL=postgres://remii:remii@localhost:5432/remii",
   ].filter(
     (line) =>
       ![...omitFromEnv, ...Object.keys(settings)].some((key) =>
@@ -105,7 +101,7 @@ if [[ "$args" == *"/api/copilotkit/info"* ]]; then
   exit 0
 fi
 if [[ "$args" == *"http://localhost:3010/"* ]]; then
-  printf '<title>OpenBot</title>'
+  printf '<title>Remii</title>'
   exit 0
 fi
 exit 0
@@ -134,6 +130,10 @@ exit 0
     "#!/usr/bin/env bash\nexit 0\n",
   );
   await writeExecutable(join(fakeBin, "bun"), "#!/usr/bin/env bash\nexit 0\n");
+  await writeExecutable(
+    join(fakeBin, "python3"),
+    '#!/usr/bin/env bash\nprintf "  runtime ready · mode test · Bots: analyst\\n"\nexit 0\n',
+  );
 
   try {
     const child = Bun.spawn({
@@ -277,11 +277,20 @@ describe("start.sh selected provider services", () => {
         stderr: "",
       });
       expect(result.dockerLog).toContain(
-        "compose up -d --build postgres supervisor agent-computer agent-langgraph",
+        "compose up -d --build postgres agent-langgraph",
       );
       expect(result.dockerLog).not.toContain("agent-bot");
       expect(result.dockerLog).toContain("compose run --rm --build migrate");
-      expect(result.curlLog).toContain("http://localhost:4100/health");
+      /*
+       * Inverted from what this used to assert.
+       *
+       * `start.sh` used to health-probe :4100 waiting for the `agent-computer` container. There is no
+       * such container: a computer is an E2B sandbox and this script cannot reach one, so a probe
+       * here would wait out its timeout on every single startup and delay the whole stack by it.
+       * Asserting the probe is GONE, rather than deleting the line, is what stops a well-meaning
+       * edit from putting it back.
+       */
+      expect(result.curlLog).not.toContain("http://localhost:4100");
       expect(result.curlLog).toContain("http://localhost:4201/health");
       expect(result.curlLog).not.toContain("http://localhost:4200/health");
       expect(result.stdout).toContain("agent-bot: skipped for Anthropic");
@@ -298,7 +307,7 @@ describe("start.sh selected provider services", () => {
     const result = await runStartWithStaleServerProbe(401);
     expect(result.exitCode).toBe(0);
     expect(result.dockerLog).toContain(
-      "compose up -d --build postgres supervisor agent-computer agent-bot agent-langgraph",
+      "compose up -d --build postgres agent-bot agent-langgraph",
     );
     expect(result.curlLog).toContain("http://localhost:4200/health");
     expect(result.stdout).toContain("agent-bot ready");

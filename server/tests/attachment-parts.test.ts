@@ -471,10 +471,24 @@ describe("what a stored attachment becomes is decided by its bytes, not by the p
     );
   });
 
-  test("a stored type this app cannot read becomes a note naming the type", async () => {
-    // Not reachable through today's upload route, which runs `classifyAttachment` first. It becomes
-    // reachable the day a type leaves the accepted lists with rows of it still in the table, and
-    // the answer must not be mojibake — the model has to be told it cannot see the file.
+  /*
+   * A PDF whose text could not be read.
+   *
+   * WAS "a stored type this app cannot read becomes a note naming the type", expecting
+   * `[attachment "invoice.pdf" is a application/pdf file, which cannot be put in front of the model]`
+   * from `unreadableNote`.
+   *
+   * A PDF is no longer such a type — it is EXTRACTED, and a document that yields no text is reported
+   * in the model's own terms rather than as unreadable. `unreadableNote` would have said the file
+   * "cannot be put in front of the model", which is untrue: the file is right there, the extractor
+   * simply got nothing out of it. The sentence a model answers around rather than in is worse than
+   * the reason, so the reason is what it gets.
+   *
+   * The bytes are a bare `%PDF-1.7` header with no body, which is exactly the case: a real PDF,
+   * nothing extractable. `unreadableNote` is not dead code — binary and media types still take it —
+   * and that is asserted elsewhere.
+   */
+  test("a document whose text cannot be read becomes a note naming the reason", async () => {
     const result = (await resolveAttachmentParts(
       partOf("document", "pdf1", "invoice.pdf"),
       loadFrom({
@@ -488,8 +502,13 @@ describe("what a stored attachment becomes is decided by its bytes, not by the p
 
     expect(result[0]).toEqual({
       type: "text",
-      text: '[attachment "invoice.pdf" is a application/pdf file, which cannot be put in front of the model]',
+      text: 'Attached file "invoice.pdf" is a application/pdf file and its text could not be read: the PDF could not be parsed (it may be damaged or in an unusual format).',
     });
+    // The reason, not "cannot be put in front of the model": a model handed that sentence guesses
+    // about the contents instead of asking, and the file is perfectly visible to it.
+    expect(result[0]?.text).not.toContain(
+      "cannot be put in front of the model",
+    );
   });
 
   test("one id named twice in a message is read once and encoded twice", async () => {

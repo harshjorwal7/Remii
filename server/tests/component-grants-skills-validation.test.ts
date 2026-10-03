@@ -13,7 +13,7 @@ const requireUser: MiddlewareHandler<{ Variables: AppVariables }> = async (
 ) => {
   context.set("actor", {
     id: "user-1",
-    email: "user@openbot.test",
+    email: "user@remii.test",
     role: "admin",
   });
   await next();
@@ -27,8 +27,22 @@ function pluginAppWith(calls: { skills: unknown[] }) {
       return { ok: true };
     },
     listSkills: async () => [],
+    /*
+     * The store is asked who owns a slug before an install may overwrite it, and this file's actor is
+     * a plain user rather than an admin, so that lookup happens on the happy path too. Without the
+     * method it threw a TypeError that surfaced as a 500 and read like the handler was at fault.
+     *
+     * `undefined` is the answer for a skill that does not exist yet — "ownership is decided on the way
+     * in". `null` would be the answer for a deployment skill from the tenant package, and that is
+     * refused, which is the one thing this test is not about.
+     */
+    skillOwner: async () => undefined,
   } as unknown as PluginStore;
-  return createPluginRoutes(store, requireUser, canUseBot);
+  // Two access checks, not one: the third says whether they may ACT AS the Bot, the fourth whether they
+  // OWN it. Repeating one check for the other is fine for these tests, which are about validation, but
+  // the argument still has to be passed — it is positional, so leaving it out slid `connect` and the
+  // broker into its place and both then read as `undefined`.
+  return createPluginRoutes(store, requireUser, canUseBot, canUseBot);
 }
 
 function componentAppWith(calls: {
@@ -77,7 +91,7 @@ describe("POST /api/plugins/skills tools/global", () => {
   ])("refuses tools with %s and installs nothing", async (_n, tools) => {
     const calls = { skills: [] as unknown[] };
     const response = await pluginAppWith(calls).request(
-      "http://openbot.test/skills",
+      "http://remii.test/skills",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -97,7 +111,7 @@ describe("POST /api/plugins/skills tools/global", () => {
   ])("refuses %s and installs nothing", async (_n, global) => {
     const calls = { skills: [] as unknown[] };
     const response = await pluginAppWith(calls).request(
-      "http://openbot.test/skills",
+      "http://remii.test/skills",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -111,7 +125,7 @@ describe("POST /api/plugins/skills tools/global", () => {
   test("trims tool refs on the happy path", async () => {
     const calls = { skills: [] as unknown[] };
     const response = await pluginAppWith(calls).request(
-      "http://openbot.test/skills",
+      "http://remii.test/skills",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -139,7 +153,7 @@ describe("component grants/functions", () => {
       revokeFunctions: unknown[];
     };
     const response = await componentAppWith(calls).request(
-      "http://openbot.test/widget/grants",
+      "http://remii.test/widget/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -161,7 +175,7 @@ describe("component grants/functions", () => {
       revokeFunctions: unknown[];
     };
     const response = await componentAppWith(calls).request(
-      "http://openbot.test/widget/grants",
+      "http://remii.test/widget/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -183,7 +197,7 @@ describe("component grants/functions", () => {
       revokeFunctions: unknown[];
     };
     const response = await componentAppWith(calls).request(
-      "http://openbot.test/widget/grants/%20%20%20",
+      "http://remii.test/widget/grants/%20%20%20",
       { method: "DELETE" },
     );
     expect(response.status).toBe(400);

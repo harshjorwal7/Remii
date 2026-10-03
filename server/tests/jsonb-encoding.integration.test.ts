@@ -33,6 +33,8 @@ describe("what a jsonb column actually stores", () => {
       type: "remote_ag_ui",
       configuration: {
         endpoint: "https://example.test/ag-ui",
+        // The tenant package's shape: an AG-UI address the deployment itself configured, which is
+        // how every Bot in the box and every harness picked at setup is registered.
         nested: { a: 1 },
       },
     });

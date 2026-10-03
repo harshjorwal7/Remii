@@ -4,9 +4,12 @@
 # Safe to rerun: anything already stopped is reported and skipped.
 #
 # Four things run, and they are stopped in this order so nothing is left calling something that has
-# gone: the app, then the routine worker, then the API server, then Docker. The Bot computers come
-# last because they are made by the supervisor rather than by compose, so `docker compose down`
-# leaves them running and they are the heaviest thing here, one Chromium each.
+# gone: the app, then the routine worker, then the API server, then Docker.
+#
+# A fifth used to be here — the Bot computers, last, because a supervisor made them rather than
+# compose and so `docker compose down` left them running. There is no fifth thing: a computer is a
+# E2B sandbox and the idle sweep stops it. See the note above the "Bot computers" line below for
+# why this script deliberately does not do that itself.
 
 # Before anything else, and before the `set` line below, which is itself bash-only: this file is
 # bash, and being read by `sh` used to end it with exit 1 and no output at all. See that file.
@@ -17,18 +20,28 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
-KEEP_COMPUTERS=false
 for arg in "$@"; do
   case "$arg" in
-    --keep-computers) KEEP_COMPUTERS=true ;;
+    # Accepted and ignored rather than rejected. It used to mean "leave the per-Bot Chromium
+    # containers alone", and there are no containers of ours holding a browser any more, so the flag
+    # has nothing to act on. Erroring on it would break a muscle-memory invocation in a script that
+    # may well be running unattended from somewhere else, and warn instead: the flag is now noise,
+    # and saying so once is how it gets dropped from the call sites.
+    --keep-computers)
+      echo "note: --keep-computers does nothing now. Computers are E2B desktops, stopped by" >&2
+      echo "      the API server's idle sweep rather than by anything in this repository." >&2
+      ;;
     -h|--help)
       cat <<'EOF'
-Usage: bash scripts/stop.sh [--keep-computers]
+Usage: bash scripts/stop.sh
 
-Stops the app, the routine worker, the API server, the Docker services, and each Bot's computer.
+Stops the app, the routine worker, the API server and the Docker services.
 
-  --keep-computers  Leave the Bot computers running, so their browsers stay signed in and warm.
-                    Their files and browser profiles are Docker volumes and survive either way.
+Nobody's computer is stopped: a desktop is an E2B sandbox reached over the E2B API, and it is
+stopped by the API server's idle sweep or from the Settings page. Nothing here deletes it.
+
+  --keep-computers  Accepted and ignored. It used to leave per-Bot browser containers running, and
+                    there are none.
 EOF
       exit 0
       ;;
@@ -66,22 +79,22 @@ holder() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fcn 2>/dev/null | awk '/^c/{c=substr($0,2)} /^n/{print c" ("substr($0,2)")"; exit}' || true
 }
 
-# Does whatever holds this port answer as OpenBot, rather than merely answer?
+# Does whatever holds this port answer as Remii, rather than merely answer?
 #
 # The same question start.sh asks before starting, asked here for the opposite reason. Starting on
 # an occupied port is a failed run; killing the occupant of a port is somebody else's editor server
 # gone. So a port holder is only killed once it has identified itself, and is otherwise named and
 # left alone.
-identifies_as_openbot() {
+identifies_as_remii() {
   local port="$1" name="$2"
   case "$name" in
     server)
       curl -fsS --max-time 3 "http://localhost:$port/api/copilotkit/info" 2>/dev/null \
-        | grep -q '"licenseStatus"'
+        | grep -q '"agents"'
       ;;
     app)
       curl -fsS --max-time 3 "http://localhost:$port/" 2>/dev/null \
-        | grep -qi '<title>[^<]*OpenBot'
+        | grep -qi '<title>[^<]*Remii'
       ;;
   esac
 }
@@ -98,8 +111,8 @@ stop_port() {
     info "  $name: not running on $port"
     return 0
   fi
-  if ! identifies_as_openbot "$port" "$name"; then
-    red "  $name: port $port is held by something that is not OpenBot: $who"
+  if ! identifies_as_remii "$port" "$name"; then
+    red "  $name: port $port is held by something that is not Remii: $who"
     red "  Left it alone. Stop it yourself if it is in the way."
     return 0
   fi
@@ -117,7 +130,7 @@ stop_port() {
 }
 
 echo
-echo "OpenBot"
+echo "Remii"
 echo "======="
 
 info "1/4  App"
@@ -125,7 +138,8 @@ stop_port "$APP_PORT" app
 
 info "2/4  Routine worker"
 # The same pattern start.sh starts it with, and it has to stay that specific: a bare `bun
-# src/index.ts` matches the server, computer and supervisor containers on a Linux host too.
+# src/index.ts` matches the API server's own container on a Linux host, where processes in a
+# container are visible to `pgrep` as well.
 if pgrep -f "bun worker/src/index.ts" >/dev/null 2>&1; then
   pkill -f "bun worker/src/index.ts" || true
   green "  worker: stopped"
@@ -144,16 +158,20 @@ else
   info "  compose services: not running"
 fi
 
-COMPUTERS="$(docker ps -q --filter label=openbot.supervisor=true 2>/dev/null || true)"
-if [ -z "$COMPUTERS" ]; then
-  info "  Bot computers: none running"
-elif [ "$KEEP_COMPUTERS" = "true" ]; then
-  info "  Bot computers: left running ($(printf '%s\n' "$COMPUTERS" | wc -l | tr -d ' ')), as asked"
-else
-  # shellcheck disable=SC2086
-  docker rm -f $COMPUTERS >/dev/null 2>&1 || true
-  green "  Bot computers: removed ($(printf '%s\n' "$COMPUTERS" | wc -l | tr -d ' '))"
-fi
+#
+# Nothing to stop, and nothing to sweep up.
+#
+# This looked for containers carrying `label=remii.supervisor=true` and removed them, which was a
+# per-Bot Chromium container the supervisor had spawned. Both are gone: a person's computer is a
+# E2B sandbox reached over the E2B API, so there is no container of ours holding a browser and
+# no label worth matching on. Removing the loop also removes the only reason `--keep-computers`
+# existed.
+#
+# A E2B desktop is stopped by the API server's idle sweep or from the Settings page. `stop.sh`
+# does not reach across the API to do it, and should not: the metering that decides when a machine is
+# idle is the server's own, and a script that stopped sandboxes behind its back would leave billing
+# rows open against machines it had already reclaimed.
+info "  Bot computers: none on this host (an E2B desktop is stopped by the API server)"
 
 cat <<EOF
 

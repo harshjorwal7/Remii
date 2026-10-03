@@ -4,7 +4,7 @@ import { eq, sql } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { MAX_IMAGE_BYTES } from "../../shared/attachments";
-import { createApp, UPLOAD_BODY_LIMIT_BYTES } from "../src/app";
+import { UPLOAD_BODY_LIMIT_BYTES } from "../src/app";
 import type { AppVariables } from "../src/auth/guards";
 import {
   createAttachmentRoutes,
@@ -19,6 +19,7 @@ import {
   users,
 } from "../src/db/schema";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
+import { createTestApp } from "./support/app";
 import { testEnvironment } from "./support/environment";
 
 const databaseUrl = testDatabaseUrl();
@@ -185,7 +186,12 @@ describe("a file uploaded through the route and fetched back", () => {
     // attachment from being run as a page on this app's origin.
     expect(served.headers.get("content-type")).toBe("image/png");
     expect(served.headers.get("x-content-type-options")).toBe("nosniff");
-    expect(served.headers.get("content-disposition")).toBe("inline");
+    // Inline AND named. Text, images, audio and video are the inline kinds now, and an inline
+    // disposition with no `filename` gives a browser nothing to save the file under the moment its
+    // owner decides to keep it — so the name is sent either way. See `attachments.ts`.
+    expect(served.headers.get("content-disposition")).toBe(
+      "inline; filename=\"round-trip.png\"; filename*=UTF-8''round-trip.png",
+    );
     // `no-cache` rather than a max-age, and the ETag beside it, are what let a DELETED attachment
     // stop being served: the browser must revalidate every time, and the revalidation is answered
     // behind the same channel-and-membership join a 200 is. A max-age here would put the
@@ -208,52 +214,25 @@ async function seedMemberChannel() {
 /**
  * The whole app, wired to this database and signed in as `userId`.
  *
- * `createApp` positionally, the same as attachment-routes.test.ts does: positions 4-25 are the
- * stores this file has nothing to say about, and `attachmentDatabase` is position 26. It has to be
- * the whole app rather than `createChannelAttachmentRoutes` on its own, because the body limit
- * under test is mounted in app.ts and does not exist on the router by itself.
+ * It has to be the whole app rather than `createChannelAttachmentRoutes` on its own, because the body
+ * limit under test is mounted in `app.ts` and does not exist on the router by itself.
  */
 function appSignedInAs(userId: string) {
-  return createApp(
-    loadConfig(testEnvironment()),
-    {
-      handler: () => new Response(null, { status: 204 }),
-      api: {
-        getSession: async () => ({
-          user: {
-            id: userId,
-            email: `${userId}@example.test`,
-            name: "Attachment Store Test User",
-            image: "https://example.test/avatar.png",
-          },
-        }),
-      },
+  /*
+   * The database is NAMED, not reached by counting twenty-two `undefined` down to position 24.
+   * `createApp` is a thirty-five-parameter positional function and every one after `config` is
+   * optional, so that count is a number that quietly stops meaning what it meant. See
+   * `support/app.ts`.
+   */
+  return createTestApp({
+    as: {
+      id: userId,
+      email: `${userId}@example.test`,
+      name: "Attachment Store Test User",
+      image: "https://example.test/avatar.png",
     },
-    { rolesForUser: async () => ["user"] },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    database,
-  );
+    parts: { attachmentDatabase: database },
+  });
 }
 
 /**
@@ -276,7 +255,7 @@ function uploadRequest(
   formData.set("file", file);
   formData.set("uploadGroup", randomUUID());
   return app.request(
-    `http://openbot.test/api/channels/${channelId}/attachments`,
+    `http://remii.test/api/channels/${channelId}/attachments`,
     { method: "POST", body: formData },
   );
 }

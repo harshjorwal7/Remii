@@ -2,15 +2,12 @@ import { expect, test } from "bun:test";
 import { harnessChoiceEvent, modelChoiceEvent } from "./telemetry";
 
 test("harness telemetry admits catalogue enums and excludes URLs and unknown IDs", () => {
-  expect(harnessChoiceEvent("byo-url")).toEqual({
-    kind: "harness_chosen",
-    harness: "byo_url",
-  });
   expect(harnessChoiceEvent("claude-agent-sdk")).toEqual({
     kind: "harness_chosen",
     harness: "claude_agent_sdk",
   });
   for (const unknown of [
+    "byo-url",
     "https://private-agent.example",
     "future-harness",
     "__proto__",
@@ -79,7 +76,9 @@ test("a skipped model is explicit and unsupported providers are not exported", (
   expect(
     modelChoiceEvent({ provider: "private-provider", login: "api-key" }),
   ).toBeNull();
-  expect(
-    modelChoiceEvent({ provider: "openai", login: "endpoint" }),
-  ).toBeNull();
+  // A subscription provider with the endpoint login is not a shape that exists: `endpoint` belongs to
+  // `openai-compatible`, and the two must not be cross-accepted just because both are now known.
+  for (const provider of ["openai", "anthropic"] as const) {
+    expect(modelChoiceEvent({ provider, login: "endpoint" })).toBeNull();
+  }
 });

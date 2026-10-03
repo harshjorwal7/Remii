@@ -53,8 +53,19 @@ export type ThreadLock = {
     userId: string;
     agentId: string;
   }) => Promise<{ runId: string } | null>;
-  /** Keep it while the addressed Bot works. The lock expires on its own otherwise. */
-  renew: (input: { threadId: string; runId: string }) => Promise<void>;
+  /**
+   * Keep it while the addressed Bot works. The lock expires on its own otherwise.
+   *
+   * It reports whether this run STILL HOLDS it, and the answer is the heartbeat's only honest
+   * signal: `false` means another run took the thread and this one must stop writing to it. A
+   * renewal that could not say so was a renewal that pushed somebody else's lease forward while
+   * reporting success, which is how a locked-out run kept streaming.
+   */
+  renew: (input: {
+    threadId: string;
+    runId: string;
+    ttlSeconds: number;
+  }) => Promise<boolean>;
   /** Give it back, so the next run does not wait out the whole expiry. */
   release: (input: { threadId: string; runId: string }) => Promise<void>;
 };
@@ -67,6 +78,38 @@ export function createHandoffDelivery(options: {
    * second Bot runs as the same person, with its own role and its own grants, and must see what they
    * may see and no more.
    */
+  /**
+   * Told that a hop's run has been given its id, with the run that asked.
+   *
+   * HERE, AND NOT AT THE SIGNER, because this is the first place the hop's REAL run id exists: the
+   * thread lock mints it, and it is the id the run is started and released under. A signer that
+   * invented one produced two ids for a single hop — one in the signed assertion, one everywhere
+   * else — which is how a delegation ends up recorded twice and linked to nothing.
+   */
+  onRunStarted?: (input: {
+    runId: string;
+    parentRunId: string;
+    actorId: string;
+    botId: string;
+    /**
+     * The conversation THIS run runs in — `where.threadId`, not the conversation that asked.
+     *
+     * It was `work.threadId`, which is the asker's, so every delegated run was recorded as running
+     * in the conversation that handed it the work. In the database that showed up as a hop whose
+     * run named a thread that did not exist, and it meant no answer to "which conversation is this
+     * run in" for any run that was not a chat turn.
+     */
+    threadId: string;
+    /**
+     * The channel the run belongs to, when there is one.
+     *
+     * Carried separately from the thread because the two answer different questions and a hop has
+     * both: the thread is where the messages went, the channel is what a roster row is. A hop into
+     * a coworker's own channel has the target's channel, which the asker is not a member of and so
+     * cannot look up. Absent for a scratch thread, which belongs to no conversation anybody opens.
+     */
+    channelId?: string | null;
+  }) => void;
   agentFor: (input: {
     actorId: string;
     botId: string;
@@ -147,6 +190,7 @@ export function createHandoffDelivery(options: {
   deadlineMs?: number;
 }): HandoffDelivery {
   const {
+    onRunStarted,
     agentFor,
     history,
     runner,
@@ -255,18 +299,22 @@ export function createHandoffDelivery(options: {
       }
       try {
         /*
-         * The conversation that ASKED, not the one it is answering in. The addressed Bot is joining
-         * something already in progress and has to have read it; its own conversation is new and
-         * empty, and reading that would tell it nothing.
+         * The conversation that ASKED, not the one it is answering in — unless this hop was told to
+         * run in the target Bot's own channel, in which case that channel is the conversation the
+         * Bot is answering in and its own prior turns are the context it needs.
          *
          * READ BEFORE THE LOCK IS TAKEN, deliberately. The lock is on `where.threadId` and this read
-         * is of `work.threadId` — a conversation the lock never protected — and the read is the one
-         * call here that throws on a platform error. Thrown while holding the lock it would leak it
-         * until the TTL: on a relay that lock is the asking conversation itself, so the person could
-         * not type for two minutes and the retry would collide with the hop's own leftover hold.
+         * is of a different thread — a conversation the lock never protected — and the read is the
+         * one call here that throws on a platform error. Thrown while holding the lock it would leak
+         * it until the TTL: on a relay that lock is the asking conversation itself, so the person
+         * could not type for two minutes and the retry would collide with the hop's own leftover
+         * hold.
          */
+        const contextThreadId = work.ownChannel
+          ? (work.answerIn ?? work.threadId)
+          : work.threadId;
         const prior = conversationOnly(
-          await history({ threadId: work.threadId, actorId: work.actorId }),
+          await history({ threadId: contextThreadId, actorId: work.actorId }),
         );
 
         /*
@@ -294,6 +342,40 @@ export function createHandoffDelivery(options: {
         }
 
         const runId = held.runId;
+
+        /*
+         * The hop now has its id, and the work item knows who asked. Told before the run is built, so
+         * the edge is on the record before anything can read the row and find an orphan.
+         *
+         * A side effect on a path that must not fail: a hop that cannot be recorded is still
+         * delivered, and a missing edge is a smaller problem than an undelivered task.
+         */
+        try {
+          onRunStarted?.({
+            runId,
+            parentRunId: work.runId,
+            actorId: work.actorId,
+            botId: work.toBotId,
+            /*
+             * `where.threadId` — the conversation this hop is about to run in, which is the
+             * target's own channel for a hop into one and a fresh scratch thread otherwise.
+             * `work.threadId` is the conversation that ASKED, and using it here recorded every
+             * delegated run against its parent.
+             */
+            threadId: where.threadId,
+            /*
+             * The channel, only where one is known. `ownChannel` is the flag that says this hop
+             * lands in a conversation a person can open, and the payload names that channel; a
+             * scratch thread has no channel, and claiming one would put a working indicator on a
+             * row the run has nothing to do with.
+             */
+            ...(work.ownChannel && work.ownChannelId
+              ? { channelId: work.ownChannelId }
+              : {}),
+          });
+        } catch {
+          // As above: recorded or not, the work is going to be done.
+        }
 
         /*
          * THE CONVERSATION GOES ON THE AGENT, NOT IN THE RUN.
@@ -324,9 +406,35 @@ export function createHandoffDelivery(options: {
          * Renewed while the addressed Bot works, because the lock expires on its own. A run is minutes
          * and the platform's window is short; a lock that lapses mid-answer lets a second run into the
          * conversation, which is the thing it exists to prevent.
+         *
+         * The run id is the one the LOCK HOLDS, not the one this hop was queued under. Those are
+         * different values — `acquire` is given a freshly minted run id because that is the identity
+         * the gateway checks every streamed event against — and renewing under the queued id would
+         * match no row at all, which is a heartbeat that silently does nothing.
+         *
+         * A HEARTBEAT THAT LOSES THE LOCK STOPS THE HOP, and both ways of losing it count. The
+         * failure used to be swallowed, which meant a database slow enough to outlive the TTL ended
+         * this run's claim on the thread while it went on streaming into it — and `renew` reported
+         * success even to a run that had already been locked out, so there was nothing to notice even
+         * if the caller had been listening. The routine path already treats a failed heartbeat as
+         * fatal to the turn; a hop is a turn, and it now ends the same way.
          */
         const heartbeat = setInterval(() => {
-          void lock.renew({ threadId: where.threadId, runId }).catch(() => {});
+          void lock
+            .renew({
+              threadId: where.threadId,
+              runId: held.runId,
+              ttlSeconds: LOCK_TTL_SECONDS,
+            })
+            .then((stillOurs) => {
+              if (stillOurs) return;
+              clearInterval(heartbeat);
+              agent.abortRun();
+            })
+            .catch(() => {
+              clearInterval(heartbeat);
+              agent.abortRun();
+            });
         }, LOCK_RENEW_EVERY_MS);
 
         try {
@@ -375,7 +483,7 @@ export function createHandoffDelivery(options: {
                  * gone. It is what stops the addressed Bot handing the work on for ever, and it is
                  * signed, so the Bot cannot edit its own depth on the way past.
                  */
-                forwardedProps: { openbotRun: assertion },
+                forwardedProps: { remiiRun: assertion },
               },
             }),
             deadlineMs,
@@ -477,6 +585,15 @@ const RELAY_CONTEXT_MESSAGES = 6;
  * a renewal: the conversation is already free and something else may be in it.
  */
 const LOCK_RENEW_EVERY_MS = 30_000;
+
+/**
+ * The lease the heartbeat extends, and it must match what `acquire` was given.
+ *
+ * `acquire` defaults to 120s, and a heartbeat that renews to a different horizon than the claim it
+ * is protecting would either let the lock lapse between beats or hold it far past the run. Named
+ * here so the two cannot drift apart silently again.
+ */
+const LOCK_TTL_SECONDS = 120;
 
 /**
  * How long one hop may run for by default.

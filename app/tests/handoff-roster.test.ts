@@ -120,4 +120,22 @@ describe("who the handoff panel offers a switch for", () => {
     expect(granted).toBe(0);
     expect(total).toBe(1);
   });
+
+  test("never offers system templates as handoff candidates", () => {
+    const { candidates, total } = handoffRoster({
+      agentId: "a",
+      roster: [
+        bot("a"),
+        bot("b"),
+        { ...bot("template-1"), isSystemTemplate: true },
+        { ...bot("template-2"), isSystemTemplate: true },
+      ],
+      hidden: [{ ...bot("template-3", true), isSystemTemplate: true }],
+      reachable: ["template-1", "template-3"],
+      grantable: true,
+    });
+
+    expect(candidates.map((c) => c.id)).toEqual(["b"]);
+    expect(total).toBe(1);
+  });
 });

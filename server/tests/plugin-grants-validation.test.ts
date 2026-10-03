@@ -22,6 +22,10 @@ function appWith(calls: {
       calls.toolCalls.push(input);
       return { ok: true };
     },
+    // Asked before an install may overwrite a slug, even though these are validation tests about
+    // bodies. `undefined` is "no such skill", the answer that lets a create proceed; `null` would mean
+    // a deployment skill from the tenant package, which is refused with a 403.
+    skillOwner: async () => undefined,
   } as unknown as PluginStore;
   const requireUser: MiddlewareHandler<{ Variables: AppVariables }> = async (
     context,
@@ -29,13 +33,17 @@ function appWith(calls: {
   ) => {
     context.set("actor", {
       id: "user-1",
-      email: "user@openbot.test",
+      email: "user@remii.test",
       role: "admin",
     });
     await next();
   };
   const canUseBot: BotAccessCheck = async () => true;
-  return createPluginRoutes(store, requireUser, canUseBot);
+  // Two access checks, not one: the third says whether they may ACT AS the Bot, the fourth whether they
+  // OWN it. Repeating one check for the other is fine for these tests, which are about validation, but
+  // the argument still has to be passed — it is positional, so leaving it out slid `connect` and the
+  // broker into its place and both then read as `undefined`.
+  return createPluginRoutes(store, requireUser, canUseBot, canUseBot);
 }
 
 /**
@@ -56,7 +64,7 @@ describe("POST /api/plugins/grants", () => {
   ])("refuses %s with 400 and never reaches the store", async (_n, body) => {
     const calls = { grants: [] as unknown[], toolCalls: [] as unknown[] };
     const response = await appWith(calls).request(
-      "http://openbot.test/grants",
+      "http://remii.test/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -94,7 +102,7 @@ describe("DELETE /api/plugins/grants", () => {
       revokes: [] as unknown[],
     };
     const response = await appWith(calls).request(
-      `http://openbot.test/grants${query}`,
+      `http://remii.test/grants${query}`,
       { method: "DELETE" },
     );
 
@@ -112,7 +120,7 @@ describe("DELETE /api/plugins/grants", () => {
       revokes: [] as unknown[],
     };
     const response = await appWith(calls).request(
-      "http://openbot.test/grants?kind=mcp&ref=%20tool%20&agentId=%20bot-1%20",
+      "http://remii.test/grants?kind=mcp&ref=%20tool%20&agentId=%20bot-1%20",
       { method: "DELETE" },
     );
 
@@ -131,7 +139,7 @@ describe("POST /api/plugins/call", () => {
     ["a whitespace ref", { ref: "  ", agentId: "bot-1" }],
   ])("refuses %s with 400 and never reaches the store", async (_n, body) => {
     const calls = { grants: [] as unknown[], toolCalls: [] as unknown[] };
-    const response = await appWith(calls).request("http://openbot.test/call", {
+    const response = await appWith(calls).request("http://remii.test/call", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -150,7 +158,9 @@ describe("POST /api/plugins/skills", () => {
     const store = {
       grant: async () => ({ ok: true }),
       callTool: async () => ({ ok: true }),
-      skillOwner: async () => null,
+      // "No such skill", so a create is allowed through. `null` means a deployment skill from the
+      // tenant package, which is refused with a 403 before the store is ever written.
+      skillOwner: async () => undefined,
       installSkill: async (input: unknown) => {
         calls.installs.push(input);
       },
@@ -162,13 +172,17 @@ describe("POST /api/plugins/skills", () => {
     ) => {
       context.set("actor", {
         id: "user-1",
-        email: "user@openbot.test",
+        email: "user@remii.test",
         role: "admin",
       });
       await next();
     };
     const canUseBot: BotAccessCheck = async () => true;
-    return createPluginRoutes(store, requireUser, canUseBot);
+    // Two access checks, not one: the third says whether they may ACT AS the Bot, the fourth whether they
+    // OWN it. Repeating one check for the other is fine for these tests, which are about validation, but
+    // the argument still has to be passed — it is positional, so leaving it out slid `connect` and the
+    // broker into its place and both then read as `undefined`.
+    return createPluginRoutes(store, requireUser, canUseBot, canUseBot);
   }
 
   /**
@@ -209,7 +223,7 @@ describe("POST /api/plugins/skills", () => {
   ])("refuses %s with 400 and never reaches the store", async (_n, body) => {
     const calls = { installs: [] as unknown[] };
     const response = await skillsApp(calls).request(
-      "http://openbot.test/skills",
+      "http://remii.test/skills",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -224,7 +238,7 @@ describe("POST /api/plugins/skills", () => {
   test("a well-formed skill still installs", async () => {
     const calls = { installs: [] as unknown[] };
     const response = await skillsApp(calls).request(
-      "http://openbot.test/skills",
+      "http://remii.test/skills",
       {
         method: "POST",
         headers: { "content-type": "application/json" },

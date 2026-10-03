@@ -244,8 +244,8 @@ beforeAll(async () => {
     .onConflictDoNothing();
 
   for (const [id, email] of [
-    [askerId, `${askerId}@openbot.test`],
-    [otherId, `${otherId}@openbot.test`],
+    [askerId, `${askerId}@remii.test`],
+    [otherId, `${otherId}@remii.test`],
   ]) {
     await database
       .insert(users)
@@ -531,7 +531,7 @@ describe("retiring the credentials a person owns", () => {
     await store.callTool({ ref, args: {}, botId, actorId: askerId });
     expect(exchanged.at(-1)).toBe(askerRefreshToken);
 
-    await store.retireConnectionsFor(askerId, "admin@openbot.local");
+    await store.retireConnectionsFor(askerId, "admin@remii.local");
 
     const [credential] = await database
       .select({ revokedAt: credentials.revokedAt })
@@ -564,7 +564,7 @@ describe("retiring the credentials a person owns", () => {
       .delete(mcpUserCredentials)
       .where(eq(mcpUserCredentials.userId, otherId));
 
-    await store.retireConnectionsFor(otherId, "admin@openbot.local");
+    await store.retireConnectionsFor(otherId, "admin@remii.local");
 
     const [credential] = await database
       .select({ revokedAt: credentials.revokedAt })
@@ -579,17 +579,17 @@ describe("retiring the credentials a person owns", () => {
     await connect(askerId, askerRefreshToken);
 
     expect(
-      (await store.retireConnectionsFor(askerId, "admin@openbot.local"))
+      (await store.retireConnectionsFor(askerId, "admin@remii.local"))
         .retired,
     ).toBeGreaterThan(0);
     // Already revoked is something an administrator can legitimately do twice.
     expect(
-      (await store.retireConnectionsFor(askerId, "admin@openbot.local"))
+      (await store.retireConnectionsFor(askerId, "admin@remii.local"))
         .retired,
     ).toBe(0);
     // The empty actor is ANONYMOUS_ACTOR. It owns nothing, and must not match rows by being empty.
     expect(
-      (await store.retireConnectionsFor("", "admin@openbot.local")).retired,
+      (await store.retireConnectionsFor("", "admin@remii.local")).retired,
     ).toBe(0);
   });
 });

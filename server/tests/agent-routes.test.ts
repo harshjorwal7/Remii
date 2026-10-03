@@ -12,14 +12,12 @@ import type {
   CreateAgentInput,
 } from "../src/agents/profile-types";
 import { createAgentRoutes, parseAgentInput } from "../src/agents/routes";
-import { createApp } from "../src/app";
 import type { AppVariables, AuthenticatedActor } from "../src/auth/guards";
-import { loadConfig } from "../src/config";
-import { testEnvironment } from "./support/environment";
+import { createTestApp } from "./support/app";
 
 const actor = {
   id: "user-1",
-  email: "member@openbot.test",
+  email: "member@remii.test",
   role: "user",
 } as const;
 
@@ -154,10 +152,20 @@ describe("agent input parser", () => {
       "r".repeat(1001),
       "Role description must be text between 1 and 1000 characters.",
     ],
-    ["visibility", undefined, "Visibility must be public or private."],
-    ["visibility", 1, "Visibility must be public or private."],
-    ["visibility", "   ", "Visibility must be public or private."],
-    ["visibility", "friends", "Visibility must be public or private."],
+    /*
+     * "Visibility must be private", and every one of these is refused — INCLUDING `"public"`, which
+     * is what the first two rows used to expect to be accepted below.
+     *
+     * Individual-user SaaS has no public coworkers: `parseAgentInput` accepts the literal `"private"`
+     * and nothing else, and the refusal says so. The old wording ("public or private") described a
+     * product that had sharing, and a test asserting it would have kept a two-way door in the docs
+     * that the code no longer has.
+     */
+    ["visibility", undefined, "Visibility must be private."],
+    ["visibility", 1, "Visibility must be private."],
+    ["visibility", "   ", "Visibility must be private."],
+    ["visibility", "friends", "Visibility must be private."],
+    ["visibility", "public", "Visibility must be private."],
   ])("rejects invalid %s values", (field, value, error) => {
     expect(parseAgentInput({ ...validInput, [field]: value })).toEqual({
       ok: false,
@@ -172,7 +180,7 @@ describe("agent input parser", () => {
     ["title", ` ${"t".repeat(120)} `, "t".repeat(120)],
     ["roleDescription", "r", "r"],
     ["roleDescription", ` ${"r".repeat(1000)} `, "r".repeat(1000)],
-    ["visibility", " public ", "public"],
+    // Only `private`, and only once the surrounding whitespace is gone.
     ["visibility", " private ", "private"],
   ])("accepts and trims boundary %s values", (field, value, trimmed) => {
     const result = parseAgentInput({ ...validInput, [field]: value });
@@ -195,9 +203,6 @@ describe("agent input parser", () => {
         avatarSeed: "forged-avatar",
         deletedAt: "now",
         systemOwned: true,
-        // `endpoint` is a real field for BYO-agent; validation protects it rather than refusing it
-        // as a forged field. See agent-endpoint.test.ts.
-        endpoint: "https://agents.example.com/ag-ui",
       }),
     ).toEqual({
       ok: true,
@@ -206,8 +211,25 @@ describe("agent input parser", () => {
         title: "Finance Operations",
         roleDescription: "Reviews receipts.",
         visibility: "private",
-        endpoint: "https://agents.example.com/ag-ui",
       },
+    });
+  });
+
+  test("refuses an address or a key rather than dropping them", () => {
+    // Silently ignoring either would let an old build believe it had pointed a Bot at an address of
+    // its own, which is the belief this route exists to remove. Loudly refusing is the whole answer.
+    expect(
+      parseAgentInput({
+        ...validInput,
+        endpoint: "https://agents.example.com/ag-ui",
+      }),
+    ).toMatchObject({ ok: false });
+    expect(parseAgentInput({ ...validInput, auth: { value: "Bearer x" } })).toMatchObject({
+      ok: false,
+    });
+    // Absent is still fine: the deployment decides where a coworker runs.
+    expect(parseAgentInput({ ...validInput, endpoint: undefined })).toMatchObject({
+      ok: true,
     });
   });
 });
@@ -230,7 +252,7 @@ describe("agent lifecycle routes", () => {
     ];
 
     for (const [path, init] of requests) {
-      const response = await app.request(`http://openbot.test${path}`, init);
+      const response = await app.request(`http://remii.test${path}`, init);
       expect(response.status).toBe(401);
     }
     expect(store.calls).toEqual([]);
@@ -247,7 +269,7 @@ describe("agent lifecycle routes", () => {
       "?hidden=1",
       "?hidden=true",
     ]) {
-      expect((await app.request(`http://openbot.test/${query}`)).status).toBe(
+      expect((await app.request(`http://remii.test/${query}`)).status).toBe(
         200,
       );
     }
@@ -265,31 +287,31 @@ describe("agent lifecycle routes", () => {
     const store = fakeStore();
     const app = appFor(store);
 
-    const list = await app.request("http://openbot.test/");
-    const detail = await app.request("http://openbot.test/agent-1");
-    const created = await app.request("http://openbot.test/", {
+    const list = await app.request("http://remii.test/");
+    const detail = await app.request("http://remii.test/agent-1");
+    const created = await app.request("http://remii.test/", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(validInput),
     });
-    const updated = await app.request("http://openbot.test/agent-1", {
+    const updated = await app.request("http://remii.test/agent-1", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(validInput),
     });
     const duplicated = await app.request(
-      "http://openbot.test/agent-1/duplicate",
+      "http://remii.test/agent-1/duplicate",
       {
         method: "POST",
       },
     );
-    const hidden = await app.request("http://openbot.test/agent-1/hide", {
+    const hidden = await app.request("http://remii.test/agent-1/hide", {
       method: "POST",
     });
-    const unhidden = await app.request("http://openbot.test/agent-1/unhide", {
+    const unhidden = await app.request("http://remii.test/agent-1/unhide", {
       method: "POST",
     });
-    const deleted = await app.request("http://openbot.test/agent-1", {
+    const deleted = await app.request("http://remii.test/agent-1", {
       method: "DELETE",
     });
 
@@ -306,12 +328,11 @@ describe("agent lifecycle routes", () => {
       ["get", actor, "agent-1"],
       /*
        * `create` carries a system prompt and `update` does not, and that difference is the point.
-       * This input names no endpoint, so on a deployment with no Bot in the box the coworker runs
-       * here on its own role description rather than being refused — the form calls the endpoint
-       * optional and it now is. `update` is deliberately untouched: changing an existing Bot's type
-       * is a different act and must not happen through the edit path.
-       *
-       * The other create in this file passes an endpoint and correctly gets no prompt.
+       * There is no address to name any more, so the role description is the only instruction a
+       * coworker can be given and the store is handed it on every create — on a deployment with its
+       * own engine the store uses that to run the Bot here, and on one without, to refuse with a
+       * sentence rather than create a Bot that answers nobody. `update` is deliberately untouched:
+       * changing an existing Bot's type is a different act and must not happen through the edit path.
        */
       [
         "create",
@@ -324,6 +345,34 @@ describe("agent lifecycle routes", () => {
       ["setHidden", actor, "agent-1", false],
       ["softDelete", actor, "agent-1"],
     ]);
+  });
+
+  test("refuses a create or update that carries an address or a key", async () => {
+    const store = fakeStore();
+    const app = appFor(store);
+
+    const created = await app.request("http://remii.test/", {
+      method: "POST",
+      body: JSON.stringify({
+        ...validInput,
+        endpoint: "https://agents.example.com/ag-ui",
+      }),
+    });
+    const updated = await app.request("http://remii.test/agent-1", {
+      method: "PATCH",
+      body: JSON.stringify({
+        ...validInput,
+        auth: { header: "Authorization", value: "Bearer leaked" },
+      }),
+    });
+
+    // Refused rather than ignored: an old build that sent either would believe it had pointed a
+    // Bot at an address of its own, which is exactly the belief this route exists to remove.
+    expect(created.status).toBe(400);
+    expect(updated.status).toBe(400);
+    expect(store.calls.filter(([op]) => op === "create" || op === "update")).toEqual(
+      [],
+    );
   });
 
   test("projects exact DTO fields and computes permissions for the authenticated actor", async () => {
@@ -342,7 +391,7 @@ describe("agent lifecycle routes", () => {
       },
     });
 
-    const response = await appFor(store).request("http://openbot.test/");
+    const response = await appFor(store).request("http://remii.test/");
 
     expect(await json(response)).toEqual({
       agents: [
@@ -357,7 +406,6 @@ describe("agent lifecycle routes", () => {
           systemOwned: false,
           canManage: true,
           mine: true,
-          builtIn: false,
         },
         {
           id: "agent-2",
@@ -370,7 +418,6 @@ describe("agent lifecycle routes", () => {
           systemOwned: false,
           canManage: false,
           mine: false,
-          builtIn: false,
         },
         {
           id: "system-agent",
@@ -383,19 +430,31 @@ describe("agent lifecycle routes", () => {
           systemOwned: true,
           canManage: false,
           mine: false,
-          builtIn: false,
         },
       ],
     });
   });
 
-  test("separates ownership from permission for an administrator", async () => {
+  test("separates ownership from permission, and neither is another person's to claim", async () => {
+    /*
+     * WAS "separates ownership from permission for an administrator", and it asserted
+     * `canManage: true` on somebody ELSE's coworker. There is no administrator override left:
+     * `canManageAgent` is `agent.ownerUserId === actor.id` and nothing else, which is why
+     * `RemiiRole` is the literal type `"user"` — an admin bypass is unrepresentable rather than
+     * merely unused.
+     *
+     * The distinction this test exists for survives that change, and it is worth more now: a store
+     * whose `list()` did not filter would hand back a row belonging to somebody else, and the ONLY
+     * thing standing between that and the screen is the flag on the row. So both are asserted for
+     * both rows — `mine` false and `canManage` false for the other person's, and both true for the
+     * caller's own. A roster that conflated them would be right again the moment a store regressed.
+     */
     const administrator: AuthenticatedActor = {
       id: "admin-1",
-      email: "admin@openbot.test",
-      role: "admin",
+      email: "admin@remii.test",
+      role: "user",
     };
-    const requireAdministrator: MiddlewareHandler<{
+    const asAdministrator: MiddlewareHandler<{
       Variables: AppVariables;
     }> = async (context, next) => {
       context.set("actor", administrator);
@@ -411,14 +470,67 @@ describe("agent lifecycle routes", () => {
     });
 
     const body = (await json(
-      await appFor(store, requireAdministrator).request("http://openbot.test/"),
+      await appFor(store, asAdministrator).request("http://remii.test/"),
     )) as { agents: { id: string; canManage: boolean; mine: boolean }[] };
 
-    // An administrator may manage everybody's coworkers but only created their own. A roster that
-    // split on `canManage` would file somebody else's private coworker under theirs.
     expect(body.agents).toEqual([
-      expect.objectContaining({ id: "theirs", canManage: true, mine: false }),
+      expect.objectContaining({ id: "theirs", canManage: false, mine: false }),
       expect.objectContaining({ id: "ours", canManage: true, mine: true }),
+    ]);
+  });
+
+  test("a system template is reachable but not manageable, by anybody", async () => {
+    /*
+     * The one case where the two flags genuinely differ, and the reason they are separate fields.
+     * A `systemOwned` row is a DEFINITION the deployment ships — there is no single owner to manage,
+     * so `canManage` is false even to the person whose id happens to match — while `canAccess` is
+     * true, so using one is what a template is for.
+     */
+    const owner: AuthenticatedActor = {
+      id: "user-1",
+      email: "user@remii.test",
+      role: "user",
+    };
+    const asOwner: MiddlewareHandler<{ Variables: AppVariables }> = async (
+      context,
+      next,
+    ) => {
+      context.set("actor", owner);
+      await next();
+    };
+    const store = fakeStore({
+      async list() {
+        return [
+          profile({ id: "template", ownerUserId: owner.id, systemOwned: true }),
+          profile({ id: "personal", ownerUserId: owner.id }),
+        ];
+      },
+    });
+
+    const body = (await json(
+      await appFor(store, asOwner).request("http://remii.test/"),
+    )) as {
+      agents: {
+        id: string;
+        canManage: boolean;
+        mine: boolean;
+        systemOwned: boolean;
+      }[];
+    };
+
+    expect(body.agents).toEqual([
+      expect.objectContaining({
+        id: "template",
+        systemOwned: true,
+        canManage: false,
+        mine: true,
+      }),
+      expect.objectContaining({
+        id: "personal",
+        systemOwned: false,
+        canManage: true,
+        mine: true,
+      }),
     ]);
   });
 
@@ -435,15 +547,13 @@ describe("agent lifecycle routes", () => {
       avatarSeed: "forged-avatar",
       deletedAt: "now",
       systemOwned: true,
-      // A real field now, not a forged one; the rest of this list still is.
-      endpoint: "https://agents.example.com/ag-ui",
     };
 
     for (const [path, method] of [
       ["/", "POST"],
       ["/agent-1", "PATCH"],
     ] as const) {
-      const response = await app.request(`http://openbot.test${path}`, {
+      const response = await app.request(`http://remii.test${path}`, {
         method,
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -451,14 +561,9 @@ describe("agent lifecycle routes", () => {
       expect(response.status).toBe(method === "POST" ? 201 : 200);
     }
 
-    // The endpoint reaches the store because it is a real field; everything else forged does not.
-    const expected = {
-      ...validInput,
-      endpoint: "https://agents.example.com/ag-ui",
-    };
     expect(store.calls).toEqual([
-      ["create", actor, expected],
-      ["update", actor, "agent-1", expected],
+      ["create", actor, { ...validInput, systemPrompt: validInput.roleDescription }],
+      ["update", actor, "agent-1", validInput],
     ]);
   });
 
@@ -468,12 +573,12 @@ describe("agent lifecycle routes", () => {
   ])("requires a valid full JSON object for %s %s", async (method, path) => {
     const store = fakeStore();
     const app = appFor(store);
-    const malformed = await app.request(`http://openbot.test${path}`, {
+    const malformed = await app.request(`http://remii.test${path}`, {
       method,
       headers: { "content-type": "application/json" },
       body: "{",
     });
-    const partial = await app.request(`http://openbot.test${path}`, {
+    const partial = await app.request(`http://remii.test${path}`, {
       method,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: "Only a name" }),
@@ -493,7 +598,7 @@ describe("agent lifecycle routes", () => {
   test("returns 404 when get returns null", async () => {
     const store = fakeStore({ get: async () => null });
 
-    const response = await appFor(store).request("http://openbot.test/missing");
+    const response = await appFor(store).request("http://remii.test/missing");
 
     expect(response.status).toBe(404);
     expect(await json(response)).toEqual({ error: "Agent not found." });
@@ -519,7 +624,7 @@ describe("agent lifecycle routes", () => {
     });
 
     const response = await appFor(store).request(
-      "http://openbot.test/agent-1",
+      "http://remii.test/agent-1",
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -543,7 +648,7 @@ describe("agent lifecycle routes", () => {
     );
 
     const response = await app.request(
-      "http://openbot.test/agent-1/duplicate",
+      "http://remii.test/agent-1/duplicate",
       {
         method: "POST",
       },
@@ -560,34 +665,21 @@ describe("agent route composition", () => {
     let session: {
       user: { id: string; email: string; name: string; image: string };
     } | null = null;
-    const app = createApp(
-      loadConfig(testEnvironment()),
-      {
-        handler: () => new Response(null, { status: 204 }),
-        api: { getSession: async () => session },
-      },
-      { rolesForUser: async () => ["user"] },
-      /*
-       * Positions 4-9: auditReader, credentialService, packageStatusReader, copilotHandler,
-       * computerGateway, computerPolicy. `store` is position 10, agentProfileStore.
-       *
-       * Six placeholders, down from seven on both sides of the merge that produced this. Each side
-       * had removed one parameter — `connectorService` here, `computerClient` on main — so both runs
-       * were seven long and textually identical, and only the comment conflicted. Taking either
-       * side's run would have left `store` one slot too far along, in `channelEvents`, where nothing
-       * would have complained: every parameter from 4 on is optional, so a misplaced argument is a
-       * silent pass and the assertions below would fail for no visible reason.
-       */
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      store,
-    );
+    /*
+     * The store is NAMED, and the session is a FUNCTION.
+     *
+     * Both because of what this test is about. It signs out, asks, signs in, and asks again — so the
+     * auth service has to be read per request, which a fixed person cannot express. And the store used
+     * to be placed by counting six `undefined` down to position 10; every parameter from the fourth
+     * onwards is optional, so a count that drifts is a silent `tsc` pass and a 404 at runtime for a
+     * reason that names nothing. `support/app.ts` fills the holes from the signature instead.
+     */
+    const app = createTestApp({
+      session: () => session,
+      parts: { agentProfileStore: store },
+    });
 
-    const unauthenticated = await app.request("http://openbot.test/api/agents");
+    const unauthenticated = await app.request("http://remii.test/api/agents");
     expect(unauthenticated.status).toBe(401);
     expect(store.calls).toEqual([]);
 
@@ -595,11 +687,11 @@ describe("agent route composition", () => {
       user: {
         id: actor.id,
         email: actor.email,
-        name: "OpenBot Member",
+        name: "Remii Member",
         image: "https://example.test/member.png",
       },
     };
-    const authenticated = await app.request("http://openbot.test/api/agents");
+    const authenticated = await app.request("http://remii.test/api/agents");
 
     expect(authenticated.status).toBe(200);
     expect(store.calls).toEqual([
@@ -607,7 +699,7 @@ describe("agent route composition", () => {
         "list",
         {
           ...actor,
-          name: "OpenBot Member",
+          name: "Remii Member",
           image: "https://example.test/member.png",
         },
         false,
@@ -616,9 +708,9 @@ describe("agent route composition", () => {
   });
 
   test("leaves agent routes unmounted when createApp has no store", async () => {
-    const app = createApp(loadConfig(testEnvironment()));
+    const app = createTestApp();
 
-    const response = await app.request("http://openbot.test/api/agents");
+    const response = await app.request("http://remii.test/api/agents");
 
     expect(response.status).toBe(404);
   });
@@ -632,7 +724,7 @@ describe("agent route composition", () => {
 describe("which Bots a Bot may hand work to", () => {
   const admin = {
     id: "admin-1",
-    email: "a@openbot.test",
+    email: "a@remii.test",
     role: "admin",
   } as const;
 
@@ -650,19 +742,12 @@ describe("which Bots a Bot may hand work to", () => {
     };
     app.route(
       "/",
-      createAgentRoutes(
-        fakeStore(),
-        asWho,
-        false,
-        undefined,
-        new Set(),
-        handoff,
-      ),
+      createAgentRoutes(fakeStore(), asWho, undefined, handoff),
     );
     return app;
   }
 
-  test("reports the grants and that an administrator may change them", async () => {
+  test("reports the grants, and lets the owner change them", async () => {
     const app = appWith({
       enabled: true,
       reachableFrom: async () => ["knowledge"],
@@ -683,7 +768,22 @@ describe("which Bots a Bot may hand work to", () => {
     });
   });
 
-  test("somebody who is not an administrator may read it and not change it", async () => {
+  test("granting is the Bot's own, so every signed-in person may grant", async () => {
+    /*
+     * WAS "somebody who is not an administrator may read it and not change it", asserting
+     * `canGrant: false` for a plain user. There is no administrator to be: `RemiiRole` is the
+     * literal type `"user"`, so the flag used to be a constant that always said `false` to everybody,
+     * and the route now answers `true` with the reason written beside it — "Granting is the owner's:
+     * nobody may wire another person's Bot into their own."
+     *
+     * That is the right answer for this product rather than a loosened one: the Bot in question was
+     * fetched through `store.get(actor, agentId)`, so a caller who cannot see it already got a 404
+     * above this line. What is left to decide is whether the caller may WIRE IT, and a person wiring
+     * their own coworker into their own conversation is the feature, not an escalation.
+     *
+     * So the test now pins the property that is actually load-bearing — a Bot somebody else owns is
+     * not reachable here — rather than a permission tier that no longer exists.
+     */
     const app = appWith(
       { enabled: true, reachableFrom: async () => ["knowledge"] },
       actor,
@@ -692,10 +792,50 @@ describe("which Bots a Bot may hand work to", () => {
     const body = (await json(
       await app.request("/general-assistant/handoff"),
     )) as {
-      handoff: { canGrant: boolean };
+      handoff: { canGrant: boolean; enabled: boolean; reachable: string[] };
     };
 
-    expect(body.handoff.canGrant).toBe(false);
+    expect(body.handoff.canGrant).toBe(true);
+    // The two things that still decide what the screen offers.
+    expect(body.handoff.enabled).toBe(true);
+    expect(body.handoff.reachable).toEqual(["knowledge"]);
+  });
+
+  test("a Bot the caller cannot see is not found, so granting cannot reach it", async () => {
+    /*
+     * The store says no, so the route answers 404 rather than a handoff object. This is the check
+     * that replaced the permission tier: `store.get(context.var.actor, agentId)` is asked about
+     * somebody's Bot by the person asking, and a row that is not theirs comes back absent — which is
+     * the same answer as a Bot that does not exist.
+     */
+    const app = new Hono<{ Variables: AppVariables }>();
+    const asWho: MiddlewareHandler<{ Variables: AppVariables }> = async (
+      context,
+      next,
+    ) => {
+      context.set("actor", { ...actor, role: "user" });
+      await next();
+    };
+    app.route(
+      "/",
+      createAgentRoutes(
+        fakeStore({
+          // Asked for a Bot that is not this person's, so the store declines to describe it.
+          async get() {
+            return null;
+          },
+        }),
+        asWho,
+        undefined,
+        { enabled: true, reachableFrom: async () => ["knowledge"] },
+      ),
+    );
+
+    const response = await app.request("/somebody-elses/handoff");
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({
+      error: "Agent not found.",
+    });
   });
 
   /*
@@ -727,9 +867,7 @@ describe("which Bots a Bot may hand work to", () => {
           },
         }),
         requireUser,
-        false,
         undefined,
-        new Set(),
         { enabled: true, reachableFrom: async () => ["knowledge"] },
       ),
     );

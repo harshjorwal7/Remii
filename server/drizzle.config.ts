@@ -18,11 +18,19 @@ export default defineConfig({
    * the schema file.
    */
   schema: [
+    "./src/db/schema/activity.ts",
+    "./src/db/schema/billing.ts",
+    "./src/db/schema/budget.ts",
     "./src/db/schema/core.ts",
     "./src/db/schema/computer.ts",
     "./src/db/schema/coworker.ts",
+    "./src/db/schema/credits.ts",
     "./src/db/schema/components.ts",
     "./src/db/schema/plugins.ts",
+    "./src/db/schema/remi.ts",
+    "./src/db/schema/threads.ts",
+    "./src/db/schema/usage.ts",
+    "./src/db/schema/vault.ts",
     "./src/db/schema/work.ts",
   ],
   out: "./drizzle",

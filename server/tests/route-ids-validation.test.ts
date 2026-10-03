@@ -15,7 +15,7 @@ const requireUser: MiddlewareHandler<{ Variables: AppVariables }> = async (
 ) => {
   context.set("actor", {
     id: "user-1",
-    email: "user@openbot.test",
+    email: "user@remii.test",
     role: "admin",
   });
   await next();
@@ -47,7 +47,7 @@ describe("routine ids", () => {
   test("refuses a whitespace id on PUT /:id/enabled", async () => {
     const calls: unknown[] = [];
     const response = await app(calls).request(
-      "http://openbot.test/%20%20%20/enabled",
+      "http://remii.test/%20%20%20/enabled",
       {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -60,7 +60,7 @@ describe("routine ids", () => {
 
   test("refuses a whitespace id on DELETE /:id", async () => {
     const calls: unknown[] = [];
-    const response = await app(calls).request("http://openbot.test/%20%20", {
+    const response = await app(calls).request("http://remii.test/%20%20", {
       method: "DELETE",
     });
     expect(response.status).toBe(400);
@@ -86,7 +86,7 @@ describe("host-access ids", () => {
   }
 
   test("refuses a whitespace botId on POST /grants", async () => {
-    const response = await app().request("http://openbot.test/grants", {
+    const response = await app().request("http://remii.test/grants", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ botId: "   " }),
@@ -96,7 +96,7 @@ describe("host-access ids", () => {
 
   test("refuses a whitespace id on DELETE /grants/:id", async () => {
     const response = await app().request(
-      "http://openbot.test/grants/%20%20%20",
+      "http://remii.test/grants/%20%20%20",
       { method: "DELETE" },
     );
     expect(response.status).toBe(400);
@@ -124,10 +124,10 @@ describe("agent ids", () => {
   }
 
   test.each([
-    ["GET", "http://openbot.test/%20%20%20", "GET"],
-    ["duplicate", "http://openbot.test/%20%20%20/duplicate", "POST"],
-    ["delete", "http://openbot.test/%20%20%20", "DELETE"],
-    ["handoff", "http://openbot.test/%20%20%20/handoff", "GET"],
+    ["GET", "http://remii.test/%20%20%20", "GET"],
+    ["duplicate", "http://remii.test/%20%20%20/duplicate", "POST"],
+    ["delete", "http://remii.test/%20%20%20", "DELETE"],
+    ["handoff", "http://remii.test/%20%20%20/handoff", "GET"],
   ])("refuses a whitespace id on %s with 400", async (_n, url, method) => {
     const calls: unknown[] = [];
     const response = await app(calls).request(url, { method });
@@ -154,7 +154,7 @@ describe("channel ids", () => {
   test("refuses a whitespace id on POST /:channelId/activity", async () => {
     const calls: unknown[] = [];
     const response = await app(calls).request(
-      "http://openbot.test/%20%20/activity",
+      "http://remii.test/%20%20/activity",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -175,7 +175,7 @@ describe("channel ids", () => {
   test("refuses a whitespace id on POST /:channelId/busy", async () => {
     const calls: unknown[] = [];
     const response = await app(calls).request(
-      "http://openbot.test/%20%20/busy",
+      "http://remii.test/%20%20/busy",
       {
         method: "POST",
         headers: { "content-type": "application/json" },

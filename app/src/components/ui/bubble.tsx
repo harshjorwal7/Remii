@@ -1,7 +1,7 @@
-import type * as React from "react";
 import { mergeProps } from "@base-ui/react/merge-props";
 import { useRender } from "@base-ui/react/use-render";
 import { cva, type VariantProps } from "class-variance-authority";
+import type * as React from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -72,7 +72,16 @@ function BubbleContent({
     props: mergeProps<"div">(
       {
         className: cn(
-          "w-fit max-w-full min-w-0 overflow-hidden rounded-xl border border-transparent px-3 py-2 text-sm leading-relaxed wrap-break-word group-data-[align=end]/bubble:self-end [button]:text-left [button,a]:transition-colors [button,a]:outline-none [button,a]:focus-visible:border-ring [button,a]:focus-visible:ring-3 [button,a]:focus-visible:ring-ring/50",
+          /*
+           * `overflow-hidden` CLIPS THE FOCUS RING OF ANY INTERACTIVE CHILD.
+           *
+           * `ring-1` is drawn outside the element's box, so a link or button inside a bubble had
+           * its outline cut off against the rounded edge — and in the `ghost` variant, where this
+           * element is `p-0`, it was cut off entirely, leaving a keyboard user with no visible
+           * focus at all. `ring-inset` draws the same ring inside the child's own border, which
+           * `overflow-hidden` cannot clip.
+           */
+          "w-fit max-w-full min-w-0 overflow-hidden rounded-xl border border-transparent px-3 py-2 text-sm leading-relaxed wrap-break-word group-data-[align=end]/bubble:self-end [button]:text-left [button,a]:transition-colors [button,a]:outline-none [button,a]:focus-visible:border-ring [button,a]:focus-visible:ring-1 [button,a]:focus-visible:ring-inset [button,a]:focus-visible:ring-ring/50",
           className,
         ),
       },
@@ -125,4 +134,4 @@ function BubbleReactions({
   );
 }
 
-export { BubbleGroup, Bubble, BubbleContent, BubbleReactions };
+export { Bubble, BubbleContent, BubbleGroup, BubbleReactions };

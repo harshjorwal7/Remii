@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { createApp } from "../src/app";
 import type { AuditEventInput, AuditStore } from "../src/audit";
 import { loadConfig } from "../src/config";
+import { createTestApp } from "./support/app";
 import type { RoutineRunner } from "../src/routines/runner";
 import { testEnvironment } from "./support/environment";
 
@@ -36,40 +36,27 @@ function recordingAuditStore(): {
 }
 
 /**
- * `createApp` is an 18-parameter-and-growing positional function; everything after `config` is
- * optional. Building the argument list explicitly, once, keeps every call site here honest about
- * which slot `routineRunner` (the last one) actually lands in.
+ * The internal door, with the two collaborators this file is about.
+ *
+ * NAMED rather than counted into place. `createApp` is a thirty-five-parameter positional function and
+ * every one after `config` is optional, so building the argument list by hand means a list that has
+ * to be edited every time the signature grows — and this one had drifted: it still carried a
+ * `roleRepository` slot that no longer exists, which pushed `routineRunner` three places along and
+ * left the route unmounted. `support/app.ts` fills the holes from the signature instead.
  */
 function buildApp(
   environment: Record<string, string | undefined>,
   runner: RoutineRunner | undefined,
   auditStore?: AuditStore,
 ) {
-  const args: Parameters<typeof createApp> = [
-    loadConfig(environment),
-    undefined, // auth
-    undefined, // roleRepository
-    undefined, // auditReader
-    undefined, // credentialService
-    undefined, // packageStatusReader
-    undefined, // copilotHandler
-    undefined, // computerGateway
-    undefined, // computerPolicy
-    undefined, // agentProfileStore
-    undefined, // channelStore
-    undefined, // channelEvents
-    auditStore, // auditStore
-    undefined, // componentStore
-    undefined, // pluginStore
-    undefined, // sandboxedStore
-    undefined, // threadIdentity
-    undefined, // peopleStore
-    undefined, // identityProviders
-    undefined, // intentRouter
-    undefined, // pageFrames
-    runner,
-  ];
-  return createApp(...args);
+  return createTestApp({
+    config: loadConfig(environment),
+    // No auth service: this door is reached with a bearer header and no session at all.
+    parts: {
+      routineRunner: runner,
+      ...(auditStore ? { auditStore } : {}),
+    },
+  });
 }
 
 function appWithSecret(runner?: RoutineRunner, auditStore?: AuditStore) {
@@ -92,7 +79,7 @@ async function post(
   app: ReturnType<typeof appWithSecret>,
   init: RequestInit = {},
 ) {
-  return app.request("http://openbot.local/internal/routines/run", {
+  return app.request("http://remii.local/internal/routines/run", {
     method: "POST",
     ...init,
   });

@@ -272,7 +272,7 @@ export function useBrokeredAccount(input: {
    */
   authScheme: string | null;
   /** Which screen the vendor's callback puts somebody down on. */
-  returnTo: "settings" | "admin";
+  returnTo: "settings";
   /**
    * Where this row's failures go: the screen's own banner.
    *
@@ -958,7 +958,7 @@ export function BrokeredAccountRow({
                 </Button>
               </>
             ) : (
-              /* The arrow says this leaves OpenBot for the vendor's consent page. It does. */
+              /* The arrow says this leaves Remii for the vendor's consent page. It does. */
               <Button
                 disabled={account.connecting}
                 onClick={() => {

@@ -48,10 +48,43 @@ export function useStoppedTurn(agentId: string): string | null {
   const [stopped, setStopped] = useState<string | null>(null);
 
   useEffect(() => {
+    /*
+     * `onRunFinishedEvent` IS HERE, AND ITS ABSENCE WAS THE BUG THIS HOOK HAD.
+     *
+     * A run that is cut off partway through a task ends with `RUN_FINISHED` as well as one that
+     * finished. Two server limits do exactly that — the channel's continuous-execution deadline and
+     * the loop breaker's tool-call cap — and both used to complete without a word. A hook watching
+     * only the two failure events therefore saw nothing, and the surface rendered a Bot that had
+     * stopped mid-task as one that had simply finished.
+     *
+     * `onRunErrorEvent` fires first for a limit that announces itself, and this handler is
+     * idempotent through the same "only a newer run clears it" rule as above: the last word about a
+     * turn wins, and both words come from the turn itself.
+     *
+     * A finish that produced a real answer is a finished turn and is left alone. A Bot that was cut
+     * off halfway is exactly the case this hook exists to catch, and its partial answer stays on
+     * screen underneath the sentence — the explanation sits under the transcript, not over it.
+     */
+    const answered = () =>
+      agent.messages.some(
+        (message) =>
+          message.role === "assistant" &&
+          typeof message.content === "string" &&
+          message.content.trim().length > 0,
+      );
+
     const subscription = agent.subscribe?.({
       onRunInitialized: () => setStopped(null),
       onRunErrorEvent: ({ event }) => setStopped(stoppedReason(event?.message)),
       onRunFailed: ({ error }) => setStopped(stoppedReason(error)),
+      onRunFinishedEvent: ({ event }) => {
+        if (answered()) return;
+        const stated =
+          typeof event?.message === "string" ? event.message.trim() : "";
+        setStopped(
+          stated || "This turn ended before the Bot finished answering.",
+        );
+      },
     });
     return () => subscription?.unsubscribe();
   }, [agent]);

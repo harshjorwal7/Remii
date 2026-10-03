@@ -1,6 +1,6 @@
 # Changelog
 
-What changed, for somebody deciding whether to upgrade. Written for the person running OpenBot, not
+What changed, for somebody deciding whether to upgrade. Written for the person running Remii, not
 for the person who wrote the commit: a line belongs here when a deployment behaves differently
 afterwards, and does not when only the code moved.
 
@@ -533,7 +533,7 @@ fact named. The verdict is about the functions named now, or a 400; an absent li
 
 ### Generated interfaces, tables and forms
 
-Generative UI is enabled by default; set `OPENBOT_GENERATIVE_UI=false` or `0` to disable it.
+Generative UI is enabled by default; set `REMII_GENERATIVE_UI=false` or `0` to disable it.
 Bots can render A2UI interfaces, compare records in sortable tables, and collect related answers in
 a form that waits for submission. LangGraph receives the component schemas needed to draw these
 interfaces correctly.
@@ -659,7 +659,7 @@ comes up clean and a Bot that cannot answer, and handing over at that point mean
 later, inside the product, with no idea which of their answers caused it. Setup now ends on a
 question with one checkable answer and waits for it. A run that produces no text is a failure here
 rather than an empty answer, because the framework catches its own 401 and logs it, leaving the whole
-of a refusal in the container's log and nowhere else. The sentence on screen is OpenBot's own and
+of a refusal in the container's log and nowhere else. The sentence on screen is Remii's own and
 names the choice to change, with the harness's log behind a disclosure for the developer half.
 
 ### A subscription picks the Bot that can spend it
@@ -733,12 +733,12 @@ the next run, while the run that saved it worked fine. From the store the creden
 containers and the host processes as environment, which compose resolves before it reads the `.env`,
 so a secret arrives at exactly the services that declare it and is written down nowhere. What an
 earlier version already wrote in plaintext is moved and then purged, or the change would have bought
-nothing for anybody who already had OpenBot.
+nothing for anybody who already had Remii.
 
 ### The credential store is asked once per run, not once per screen
 
 Four Keychain dialogs every time the setup screen mounted, each needing a click before the window
-would go on, and four more for navigating between setup and OpenBot. macOS authorizes every
+would go on, and four more for navigating between setup and Remii. macOS authorizes every
 individual read of a stored password unless the application is signed with an identity the item's ACL
 already trusts; a development build is re-signed on every compile, so its ACL never matches, and the
 wizard reads four secrets to arrive filled in. The store is asked once per name per process now and
@@ -752,7 +752,7 @@ process can: that decision belongs to the operating system and to the signature.
 Compose only acts on a profiled service when the profile is named, so Stop left the one container the
 person actually chose running on their laptop after they had stopped the app, still holding its port.
 The next Start then refused, saying something was already listening on 4206, about a container
-OpenBot itself had started, which the person never saw and could not find, and there was no way
+Remii itself had started, which the person never saw and could not find, and there was no way
 forward from that screen. A port this deployment already publishes is not a stranger on the port, so
 the check reclaims our own and keeps its teeth for somebody else's.
 
@@ -767,12 +767,12 @@ beside the logs when the processes start and Stop reads them, ending each proces
 children, since `bun run serve` starts the real server as a grandchild. A sweep of the ports this
 deployment publishes stays as a second pass for a stack whose pid file is gone. Separately, a
 byte-order mark in front of `package.json`, which `Set-Content -Encoding UTF8` writes freely, made
-the manifest unreadable and was reported as "the deployment is older than this version of OpenBot",
+the manifest unreadable and was reported as "the deployment is older than this version of Remii",
 sending somebody looking for a newer installer over three bytes.
 
 ### The installed app is served without a development server
 
-"Show OpenBot" did nothing on a machine where the stack was up. The window said OpenBot was running,
+"Show Remii" did nothing on a machine where the stack was up. The window said Remii was running,
 the button was there, and clicking it had no effect at all. The app host process was dead: it was
 started through `vite preview` under `bun --bun`, and Vite's proxy calls `socket.destroySoon()` when
 an upstream response ends, which bun's sockets do not implement, so the process died with a TypeError
@@ -782,14 +782,14 @@ served by a small server of its own now: a directory and one forwarded prefix, w
 install needs, with no Node and no Vite at runtime. The websocket upgrade the live screen needs is
 forwarded rather than answered with HTML, a miss under `/assets` is a 404 rather than the page, and
 paths are confined to the directory, since the deployment's `.env` sits two levels above it. The
-button also shows what it was told: the call behind it already answered "OpenBot is not answering on
+button also shows what it was told: the call behind it already answered "Remii is not answering on
 port 3010 yet, so there is nothing to show", and the click handler threw that sentence away, which is
 why a dead process looked like a dead button.
 
 ### A conversation whose history this deployment cannot reach says so
 
 Clicking a conversation in the rail drew the coworker's name and then nothing at all. The rail comes
-from OpenBot's own database, so a channel is listed whatever the history store says, while the
+from Remii's own database, so a channel is listed whatever the history store says, while the
 messages live in the Intelligence project: pointing a deployment at a different project leaves the
 platform answering `THREAD_NOT_FOUND`. That 404 is deliberately read as "no history" and has to stay
 that way, because a thread id is minted before the thread exists, so a brand-new conversation 404s as
@@ -900,7 +900,7 @@ places now check the value before accepting it and say which kind of character i
 character is named; the key never is.
 ### A deployment directory pasted with a stray space goes where it says
 
-The desktop setup screen asks where OpenBot should live, enables Start once that box is not blank
+The desktop setup screen asks where Remii should live, enables Start once that box is not blank
 after trimming, and then sent the untrimmed string — the same trap the API URL, the gateway URL, the
 intelligence key and the model key were taken out of, and this is the one of the five that is a
 place on disk rather than a credential. A path copied with the space the selection picked up, or
@@ -920,7 +920,7 @@ binds whichever one its runtime resolved `localhost` to — Node picks `::1`, Bu
 so an answer at either counts. The refusal in front of it asked only `127.0.0.1`, which meant a port
 held on `::1` alone was reported free and the start went ahead into it. Both addresses are asked
 now, so the two agree on what "in use" means and the person is told which port is taken and what
-OpenBot wanted it for.
+Remii wanted it for.
 ### A request for a secret no longer follows a Bot into tomorrow's conversations
 
 An unanswered ask to take the wheel stops being shown after ten minutes, because control belongs to a
@@ -980,7 +980,7 @@ easiest to miss was the one that mattered: a Bot's computer is made by the super
 compose, so `docker compose down` left a Chromium running per Bot. `bash scripts/stop.sh` stops the
 app, the routine worker, the API server, the compose services and every Bot computer, in that order,
 and is safe to rerun. It kills a port holder only once that process has identified itself as
-OpenBot, so an unrelated process on 3010 is named and left alone rather than killed. Nothing is
+Remii, so an unrelated process on 3010 is named and left alone rather than killed. Nothing is
 deleted: the database, the Bots' files and their browser profiles are volumes. `--keep-computers`
 leaves the browsers signed in.
 ### The trail says when an identity provider was added, not only when one was taken away
@@ -1017,14 +1017,14 @@ single-user desktop profile is already the boundary, so the change is Unix-only.
 
 `env::write` keeps the lines it did not write, and its own header comment is one of them, so each
 start preserved the previous banner and appended another. A deployment started fifty times had fifty
-copies of "Written by OpenBot Desktop" and fifty blank lines stacked above its settings. The banner
+copies of "Written by Remii Desktop" and fifty blank lines stacked above its settings. The banner
 is now recognised and replaced rather than kept, and comments somebody else put in the file are left
 alone exactly as before.
 ### Starting the desktop app again keeps the secrets the first start generated
 
 The shell generated a fresh set of secrets every time Start was pressed, including the
 `KEY_ENCRYPTION_KEY` that encrypts the credential vault. The database survives a stop, so the second
-session of an installed OpenBot met a vault it could no longer read: every stored credential failed
+session of an installed Remii met a vault it could no longer read: every stored credential failed
 to decrypt, with an error that named an operation rather than a cause. It also handed the server a
 `COMPUTER_TOKEN` that no computer created before the restart holds. The secrets an existing `.env`
 already carries are now kept, and only generated when there is nothing usable to keep — a value
@@ -1092,17 +1092,17 @@ host, which is what an ingress terminating TLS on 443 requires and a fixed serve
 
 ## 0.0.8
 
-### A desktop shell that installs OpenBot and then becomes it
+### A desktop shell that installs Remii and then becomes it
 
 One window, on macOS, Windows and Linux. From a machine with nothing on it, one click fetches the
 deployment for this release, pins every image to the digest the release published, generates the
-secrets that are OpenBot's to generate, raises the containers, applies the migrations, installs the
+secrets that are Remii's to generate, raises the containers, applies the migrations, installs the
 dependencies, starts the host processes, waits until both the API and the app answer, and then shows
-OpenBot in the same window. It is not a launcher for a browser tab. Stop takes the stack down, closing
+Remii in the same window. It is not a launcher for a browser tab. Stop takes the stack down, closing
 the window hides it to the tray, a second launch hands over the window that already exists, and
 quitting stops what starting started. Windows is told what it needs before anything else runs: WSL,
 its kernel, virtualisation and administrator rights are each named with the command that fixes them,
-because none of them is something OpenBot can fix on somebody's behalf.
+because none of them is something Remii can fix on somebody's behalf.
 
 ### A title or name that is only spaces is refused rather than stored
 
@@ -1220,7 +1220,7 @@ approved.
 ### A password with a `%` in it says so, instead of failing as `URI error`
 
 `DATABASE_URL` is taken apart before it reaches Bun, and each part is percent-decoded. A part
-holding a `%` that starts no escape -- `postgres://openbot:100%pure@host:5432/openbot`, which a
+holding a `%` that starts no escape -- `postgres://remii:100%pure@host:5432/remii`, which a
 generated password produces often enough -- is a string `new URL` accepts and `decodeURIComponent`
 rejects, so the server stopped with `URIError: URI error` and named neither the variable nor the
 part. It now refuses with the same kind of sentence as every other malformed address: which part is
@@ -1289,7 +1289,7 @@ unless it is set. On rootless Podman on Linux, set it to `$XDG_RUNTIME_DIR/podma
 
 ### A Bot's computer is waited for properly on Podman, and the supervisor can reach the engine there
 
-Two things stopped OpenBot running on Podman, which nothing had tried before.
+Two things stopped Remii running on Podman, which nothing had tried before.
 
 The supervisor could not reach the engine at all: `The supervisor could not reach Docker`. The socket
 is there and the mount is right, but Podman's virtual machine runs SELinux and labels the socket in a
@@ -1315,19 +1315,19 @@ zstd inflates several times faster, which on 2 GB of Chromium is worth more than
 comes from recompressing the layers that arrived from somebody else's registry, where nearly all of
 the bytes are, so the images no longer share layers with a gzip pull of the same base.
 
-This applies to the five `ghcr.io/copilotkit/openbot-<service>` images and not to
-`ghcr.io/copilotkit/openbot`. Reading a zstd layer needs a client that supports it, which Podman and
+This applies to the five `ghcr.io/copilotkit/remii-<service>` images and not to
+`ghcr.io/copilotkit/remii`. Reading a zstd layer needs a client that supports it, which Podman and
 current containerd do; the single image is pulled by deployments running whatever they have, so it
 stays gzip.
 
 ### A release publishes every service's image, not just the one
 
-`ghcr.io/copilotkit/openbot` was the only image a release produced, so anything running the Compose
+`ghcr.io/copilotkit/remii` was the only image a release produced, so anything running the Compose
 stack built `agent-computer`, the supervisor, both Bots and the migration image from source on
 every machine. That needs a toolchain and it needs several minutes, most of them Chromium, and it
 is the difference between a deployment and a laptop being able to start at all.
 
-Each of those is now published beside it, at `ghcr.io/copilotkit/openbot-<service>`, carrying both
+Each of those is now published beside it, at `ghcr.io/copilotkit/remii-<service>`, carrying both
 `linux/amd64` and `linux/arm64` so one reference works on a server and on an arm64 laptop. Every
 image gets its own build provenance attestation, and `container-images.json` on the release pins a
 digest for all of them rather than for one.
@@ -1766,7 +1766,7 @@ Nothing to configure, and no change for a deployment whose database connection n
 ### A Bot can answer with a picture instead of describing one
 
 Ask for a chart and a Bot replied in prose, or handed back a fenced block of HTML for somebody to
-read instead of look at. Set `OPENBOT_GENERATIVE_UI=true` and it may answer with an interface it
+read instead of look at. Set `REMII_GENERATIVE_UI=true` and it may answer with an interface it
 writes itself, drawn in the transcript. Off unless asked for, and deliberately so: it runs code a
 model wrote, so a deployment acquires the capability by choosing it rather than by upgrading.
 
@@ -1821,7 +1821,7 @@ next poll, so an answer's round trip no longer pays up to two seconds per leg.
 ### A Bot's shell can no longer reach the embedded database without a password
 
 In the all-in-one image the cluster was `trust`-auth on loopback, and the Bot's shell runs in the
-same container: it could `psql -h 127.0.0.1 -U openbot` with no password and read the audit trail,
+same container: it could `psql -h 127.0.0.1 -U remii` with no password and read the audit trail,
 the policy store, and the credential vault as the instance owner. The cluster now uses
 `scram-sha-256` with a password generated on first init and kept beside the data, handed to the API
 over the container environment. The shell has no way to learn it, so the connection is refused. An
@@ -1861,7 +1861,7 @@ Mounted at the parent, the mount arrives owned by root, `data` is not in it, and
 build-time `chown` is hidden underneath — so `initdb`, which has already dropped to the `postgres`
 user, cannot create the directory. `postgres-init` now creates and chowns it first, as root, which is
 the only step in a position to. This also fixes the plain
-`docker run -v openbot-data:/var/lib/postgresql` case, which relied entirely on that hidden chown.
+`docker run -v remii-data:/var/lib/postgresql` case, which relied entirely on that hidden chown.
 
 Mounted directly on the data directory, the mount arrives holding a `lost+found`, and `initdb` will
 not initialise into a directory with anything in it. **The documented mount is now the parent,
@@ -2163,7 +2163,7 @@ reader that rewrites what it does not recognise is worse than one that refuses i
 
 ### Run this on Kubernetes
 
-A Helm chart under `charts/openbot`, Bots and all, and the fixes that installing it for real turned
+A Helm chart under `charts/remii`, Bots and all, and the fixes that installing it for real turned
 up. Proven on a real EKS cluster: five workloads, replicas across two nodes, EBS volumes bound, and a
 Bot opening a real page from inside AWS with the decision in the audit trail.
 
@@ -2174,7 +2174,7 @@ no RuntimeClass, a plain Kubernetes Secret, an Ingress. Identity is one `service
 map, which is all IRSA, Workload Identity and AKS workload identity are. Secrets are a plain Secret
 by default and an ExternalSecret against any backend when asked, so Secrets Manager, Secret Manager
 and Key Vault are a values block rather than three code paths. Gateway API is supported beside
-Ingress rather than instead of it. `charts/openbot/ci` holds a values file per target.
+Ingress rather than instead of it. `charts/remii/ci` holds a values file per target.
 
 Two replicas by default, because horizontal is the point and one replica hides every bug that is
 not. A bad install is refused at `helm install`, naming the value to change, rather than discovered
@@ -2441,7 +2441,7 @@ networks**, which is the one place the two are meant to meet.
 The published port is now on loopback, as every other port in that file already was. Taking the
 database off the Bots' network removes the name, not the address: a container's default gateway is
 the host, and a port published on every interface answers there. From inside the computer container,
-the gateway on `5432` accepted a connection and began authenticating as `openbot` on `openbot`, with
+the gateway on `5432` accepted a connection and began authenticating as `remii` on `remii`, with
 the password in the same file. **A deployment that reached the database from another machine over
 this port has to reach it another way**, which is what publishing it on every interface was doing.
 
@@ -2750,7 +2750,7 @@ one they are, so those match too.
 No configuration changes and nothing is stored differently; a deployment that was already on the
 light theme sees no difference at all.
 
-### `start.sh` refuses a port that answers but is not OpenBot
+### `start.sh` refuses a port that answers but is not Remii
 
 The startup checks asked whether a port answered, and treated that as proof the port belonged to this
 stack. Those are not the same claim. Any single-page app serves its index.html for every path it does
@@ -2779,7 +2779,7 @@ wrong, naming it, rather than several steps later on a parse error.
 
 `SUPERVISOR_TOKEN` and `COMPUTER_TOKEN` defaulted to the empty string in `docker-compose.yml`, so
 which stack you got depended on how you brought it up. `scripts/start.sh` resolves both to their
-`openbot-dev-*` defaults and exports them before calling compose. A plain `docker compose up -d` —
+`remii-dev-*` defaults and exports them before calling compose. A plain `docker compose up -d` —
 which this project's own shutdown notes tell you to use — passed an empty string instead.
 
 `agent-computer` refuses to start without one, so that half failed loudly. The supervisor half was
@@ -2907,7 +2907,7 @@ already behaved this way.
 Two configurations now refuse to start:
 
 - A provider configured with no `INITIAL_ADMIN_EMAILS`. Set it to at least one address.
-- No provider at all and no `OPENBOT_SINGLE_USER=true`. Configure a provider, or set that to say you
+- No provider at all and no `REMII_SINGLE_USER=true`. Configure a provider, or set that to say you
   meant a deployment where every visitor is one administrator. This no longer depends on `NODE_ENV`,
   which is unset by default and so let exactly the dangerous case through. A deployment already
   running open needs the line added before it will start again.
@@ -2969,7 +2969,7 @@ Sessions survive and nobody signs in again.
   no second copy of anybody's documents here to keep in step, to secure, or to leave behind when
   somebody is removed. The local index that was being filled — `documents`, `chunks` and
   `document_acls` — and the connector that filled it have both been dropped. Retrieval over
-  a copy of a customer's corpus is not a thing OpenBot does.
+  a copy of a customer's corpus is not a thing Remii does.
 
 ### Added
 - **A skill can say which tools it needs.** `POST /api/plugins/skills` takes a `tools` list of
@@ -3005,7 +3005,7 @@ Sessions survive and nobody signs in again.
   then connects their own account, and there is deliberately no endpoint for an administrator to
   connect one on somebody's behalf. The redirect URI has to match what is registered character for
   character, and the connector page states the exact string to paste, because a mismatch fails at
-  Google with a message that never mentions OpenBot. See
+  Google with a message that never mentions Remii. See
   [docs/plugins/google-drive.md](docs/plugins/google-drive.md) for the whole setup and for what each
   failure means.
 
@@ -3033,7 +3033,7 @@ Sessions survive and nobody signs in again.
   page agreed with it.
 - **Releases are cut by a workflow, not by hand.** `Create release PR` bumps the version and promotes
   `## Unreleased` to a numbered section; merging the pull request it opens is what publishes. Merging
-  builds and pushes one image to `ghcr.io/copilotkit/openbot`, signs a build provenance attestation
+  builds and pushes one image to `ghcr.io/copilotkit/remii`, signs a build provenance attestation
   for its digest, tags the commit and creates the GitHub Release with `container-images.json` so a
   deployment can name an exact digest rather than a tag somebody could move. See
   [docs/releasing.md](docs/releasing.md).
@@ -3335,7 +3335,7 @@ Sessions survive and nobody signs in again.
   removal from anybody else, so a second administrator opened the Identity providers screen, found
   it empty, and registered one that already existed. Worse, the row cascaded from that person's user
   row: deleting the administrator who set sign-in up deleted the company's sign-in with them. What is
-  registered is a fact about the deployment, so reads and removals go through OpenBot's own
+  registered is a fact about the deployment, so reads and removals go through Remii's own
   administrator-only routes against the whole table, and a provider outlives the person who added it.
 - **A customer's client secret was in the clear.** The SSO plugin writes `oidc_config` and
   `saml_config` as plaintext JSON, with the OAuth client secret for that company's directory inside
@@ -3469,9 +3469,9 @@ Sessions survive and nobody signs in again.
   `NODE_ENV=production`, which is exactly backwards: `NODE_ENV` is unset unless somebody sets it, so
   a container on a VM with a hand-written env file and no identity provider served every visitor on
   the internet as an administrator, silently, because nothing looked wrong from the outside. A
-  deployment with no provider now refuses to start unless `OPENBOT_SINGLE_USER=true` says it was
+  deployment with no provider now refuses to start unless `REMII_SINGLE_USER=true` says it was
   meant. `.env.example` ships that line switched on, so a clone still runs with no configuration at
-  all, and the line is greppable in a way a default never was. `OPENBOT_DEV_NO_AUTH` is still
+  all, and the line is greppable in a way a default never was. `REMII_DEV_NO_AUTH` is still
   honoured.
 - **Requires Better Auth 1.7**, which adds an `issuer` to every account. Migrations `0002` and `0003`
   add the column and backfill existing rows with their provider's real issuer, so nobody is asked to

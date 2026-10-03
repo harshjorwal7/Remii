@@ -11,7 +11,7 @@
  * and the memory copy is only updated once it has. A store that answered from the database on every
  * click would put a query on the path of every keystroke a Bot makes.
  *
- * Memory is a cache of a shared record, not a per-process copy of it. OpenBot runs several servers
+ * Memory is a cache of a shared record, not a per-process copy of it. Remii runs several servers
  * behind a load balancer, and an administrator's new rule arrives at exactly one of them. Kept only
  * in that process, the rule applies to roughly one action in N while the admin screen and the audit
  * row both report success, which is the boundary silently not applying: the failure this whole file
@@ -26,9 +26,6 @@ import type { Database } from "../db/client";
 import { actionPolicy } from "../db/schema";
 import type { ActionPolicy } from "./policy";
 
-/** There is one boundary per deployment, so there is one row. */
-const CURRENT = "current";
-
 /**
  * What a server announces on when the boundary changes, and what every server listens to.
  *
@@ -42,28 +39,26 @@ export const ACTION_POLICY_TOPIC = "action_policy_changed";
  * What a deployment allows when it has not said otherwise.
  *
  * Permissive, and written down rather than implied. The policy engine is fail-closed: an absent
- * policy denies, and a broken rule denies. This default is a separate decision, and it is deliberately
- * an explicit `allow` rather than a special "unconfigured" case, because a Bot that can look at a page
- * and touch nothing is not a product, and the first thing a person does is ask it to fill something in.
- *
- * Out of the box, OpenBot lets a Bot act, records every action and gives an administrator somewhere
- * to write the first restriction.
+ * policy denies, and a broken rule denies. This default platform policy is shared by all free/pro users,
+ * while Pro and Power users may define custom deny/allow rules.
  */
-export const DEFAULT_ACTION_POLICY: ActionPolicy = {
+export const DEFAULT_PLATFORM_POLICY: ActionPolicy = {
   mode: "enforce",
   deny: [],
   allow: ["true"],
 };
 
+export const DEFAULT_ACTION_POLICY: ActionPolicy = DEFAULT_PLATFORM_POLICY;
+
 export type PolicyStore = {
   /** Synchronous on purpose: this is asked on every action. */
-  get: () => ActionPolicy;
+  get: (userId?: string) => ActionPolicy;
   /** Persisted before the in-memory copy changes, so a reported success is a saved rule. */
-  set: (policy: ActionPolicy, by?: string) => Promise<void>;
+  set: (policy: ActionPolicy, by?: string, userId?: string) => Promise<void>;
   /** Back to what configuration says, forgetting the saved one. */
-  reset: () => Promise<void>;
+  reset: (userId?: string) => Promise<void>;
   /** Read the saved policy at boot. Returns where the live policy came from. */
-  load: () => Promise<"the database" | "configuration">;
+  load: (userId?: string) => Promise<"the database" | "configuration">;
   /**
    * Re-read because another server changed it.
    *
@@ -74,31 +69,35 @@ export type PolicyStore = {
 };
 
 export function createPolicyStore(
-  initial: ActionPolicy,
+  initial: ActionPolicy = DEFAULT_PLATFORM_POLICY,
   /** Absent keeps everything in memory, which is what a test without a database wants. */
   database?: Database,
 ): PolicyStore {
   const configured = clone(initial);
-  let current = clone(initial);
+  let defaultPolicy = clone(initial);
+  const userPolicies = new Map<string, ActionPolicy>();
 
   return {
-    get: () => current,
+    get: (userId?: string) => {
+      if (userId) {
+        const custom = userPolicies.get(userId);
+        if (custom) return custom;
+      }
+      return defaultPolicy;
+    },
 
-    set: async (policy, by) => {
+    set: async (policy, by, userId) => {
       const next = clone(policy);
+      const targetUserId = userId ?? by ?? "default";
       if (database) {
         // Written before it is enforced. If the write fails this throws and the caller reports a
         // failure, which is the honest outcome: an administrator who is told a rule was saved must
         // not be enforcing a rule that will disappear at the next restart.
-        //
-        // The announcement goes in the same transaction, so it is delivered on commit: a write that
-        // rolls back announces nothing, and there is no window where the row has changed and the
-        // other servers have not been told. Same shape as `channels/routes.ts`.
         await database.transaction(async (transaction) => {
           await transaction
             .insert(actionPolicy)
             .values({
-              id: CURRENT,
+              userId: targetUserId,
               mode: next.mode,
               deny: next.deny,
               allow: next.allow,
@@ -106,7 +105,7 @@ export function createPolicyStore(
               updatedAt: new Date(),
             })
             .onConflictDoUpdate({
-              target: actionPolicy.id,
+              target: actionPolicy.userId,
               set: {
                 mode: next.mode,
                 deny: next.deny,
@@ -121,59 +120,74 @@ export function createPolicyStore(
           await announce(transaction);
         });
       }
-      current = next;
+      if (userId) {
+        userPolicies.set(userId, next);
+      } else {
+        defaultPolicy = next;
+        userPolicies.set(targetUserId, next);
+      }
     },
 
-    reset: async () => {
-      // The saved policy is removed rather than overwritten with the configured one, so "reset" means
-      // this deployment has no boundary of its own again, and changing what configuration says then
-      // changes what it enforces, which is what an operator expects of a reset.
+    reset: async (userId?: string) => {
       if (database) {
         await database.transaction(async (transaction) => {
-          await transaction
-            .delete(actionPolicy)
-            .where(eq(actionPolicy.id, CURRENT));
+          if (userId) {
+            await transaction
+              .delete(actionPolicy)
+              .where(eq(actionPolicy.userId, userId));
+          } else {
+            await transaction.delete(actionPolicy);
+          }
           await announce(transaction);
         });
       }
-      current = clone(configured);
+      if (userId) {
+        userPolicies.delete(userId);
+      } else {
+        userPolicies.clear();
+        defaultPolicy = clone(configured);
+      }
     },
 
-    load: async () => {
+    load: async (_userId?: string) => {
       if (!database) return "configuration";
-      const [row] = await database
-        .select()
-        .from(actionPolicy)
-        .where(eq(actionPolicy.id, CURRENT))
-        .limit(1);
-      if (!row) return "configuration";
+      const rows = await database.select().from(actionPolicy);
+      if (rows.length === 0) return "configuration";
 
-      current = {
-        mode: row.mode as ActionPolicy["mode"],
-        deny: [...row.deny],
-        allow: [...row.allow],
-      };
+      userPolicies.clear();
+      let hasDefault = false;
+      for (const row of rows) {
+        const policy = {
+          mode: row.mode as ActionPolicy["mode"],
+          deny: [...row.deny],
+          allow: [...row.allow],
+        };
+        if (row.userId === "default") {
+          defaultPolicy = policy;
+          hasDefault = true;
+        } else userPolicies.set(row.userId, policy);
+      }
+      if (!hasDefault) defaultPolicy = clone(configured);
       return "the database";
     },
 
     refresh: async () => {
       if (!database) return;
-      const [row] = await database
-        .select()
-        .from(actionPolicy)
-        .where(eq(actionPolicy.id, CURRENT))
-        .limit(1);
-
-      // No row means somebody reset it, and reset means this deployment goes back to what
-      // configuration says. Leaving the last saved rules in memory here would make a reset apply on
-      // the server that served it and nowhere else, which is the bug this function exists to fix.
-      current = row
-        ? {
-            mode: row.mode as ActionPolicy["mode"],
-            deny: [...row.deny],
-            allow: [...row.allow],
-          }
-        : clone(configured);
+      const rows = await database.select().from(actionPolicy);
+      userPolicies.clear();
+      let hasDefault = false;
+      for (const row of rows) {
+        const policy = {
+          mode: row.mode as ActionPolicy["mode"],
+          deny: [...row.deny],
+          allow: [...row.allow],
+        };
+        if (row.userId === "default") {
+          defaultPolicy = policy;
+          hasDefault = true;
+        } else userPolicies.set(row.userId, policy);
+      }
+      if (!hasDefault) defaultPolicy = clone(configured);
     },
   };
 }

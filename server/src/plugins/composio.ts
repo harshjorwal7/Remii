@@ -490,6 +490,58 @@ function stagesAFile(schema: unknown, depth = 0): FileVerdict {
 }
 
 /**
+ * Sanitize an action schema: if an action has optional file-staging properties (such as an optional
+ * email attachment), prune those properties from the schema so the primary action is offered and callable
+ * by the model. Only actions that strictly require file uploads (or consist exclusively of file uploads)
+ * are marked with verdict = true (to be dropped).
+ */
+export function sanitizeFileStagingSchema(schema: unknown): {
+  schema: Record<string, unknown> | undefined;
+  verdict: FileVerdict;
+} {
+  const node = schemaNode(schema);
+  if (!node) return { schema: undefined, verdict: false };
+  const verdict = stagesAFile(node);
+  if (typeof verdict === "string") return { schema: undefined, verdict };
+  if (verdict === false) return { schema: node, verdict: false };
+
+  const props = schemaNode(node.properties);
+  if (!props) return { schema: undefined, verdict: true };
+
+  const required = new Set(Array.isArray(node.required) ? node.required : []);
+  const cleanedProps: Record<string, unknown> = {};
+  let hadFileProp = false;
+
+  for (const [key, prop] of Object.entries(props)) {
+    const propVerdict = stagesAFile(prop);
+    if (typeof propVerdict === "string") {
+      return { schema: undefined, verdict: propVerdict };
+    }
+    if (propVerdict === true) {
+      if (required.has(key)) {
+        // Required file property - action cannot be called without staging a file
+        return { schema: undefined, verdict: true };
+      }
+      hadFileProp = true;
+      continue;
+    }
+    cleanedProps[key] = prop;
+  }
+
+  // If every property was a file staging property, the action was purely a file-upload action
+  if (hadFileProp && Object.keys(cleanedProps).length === 0) {
+    return { schema: undefined, verdict: true };
+  }
+
+  const cleanedNode = { ...node, properties: cleanedProps };
+  const finalVerdict = stagesAFile(cleanedNode);
+  return {
+    schema: finalVerdict === false ? cleanedNode : undefined,
+    verdict: finalVerdict,
+  };
+}
+
+/**
  * Whether an action published under this schema would be refused if it were called with no arguments.
  *
  * WHO ASKS, AND WHAT A WRONG ANSWER COSTS. `probeActionFor` in `store.ts` picks the read action a
@@ -596,7 +648,7 @@ export async function listTools(connection: {
   const toolkit = toolkitOf(connection.url);
   if (!toolkit) {
     throw new Error(
-      `${connection.url} does not name a Composio app, so nothing was asked what it offers. A row reached through this transport is one whose provenance says composio, and its url has to be composio:// followed by an app slug; correct the url on the Plugins page.`,
+      `${connection.url} does not name a Composio app, so nothing was asked what it offers. A row reached through this transport is one whose provenance says composio, and its url has to be composio:// followed by an app slug; correct the url on App connections.`,
     );
   }
   if (!installed) {
@@ -707,21 +759,26 @@ export async function listTools(connection: {
    * that IS offered is still a total refusal, for the reasons each of them gives, because that one
    * really does reach the map.
    */
-  const read = actions.map((action, position) => ({
-    action,
-    /*
-     * NAMED BY ITS SLUG WHERE THERE IS ONE AND BY ITS PLACE WHERE THERE IS NOT, because this runs
-     * ABOVE the slug guard and has to — see the paragraph above for why a file-staging action with
-     * a broken field must not take the app's refresh down. The three guards below can write
-     * `action.slug.trim()` unconditionally; this one cannot, and "action 4 of the listing" is still
-     * a row an operator can find in a dashboard.
-     */
-    named:
-      typeof action.slug === "string" && action.slug.trim() !== ""
-        ? action.slug.trim()
-        : `action ${position + 1} of the listing`,
-    verdict: stagesAFile(action.inputParameters),
-  }));
+  const read = actions.map((action, position) => {
+    const sanitized = sanitizeFileStagingSchema(action.inputParameters);
+    return {
+      action: sanitized.schema
+        ? { ...action, inputParameters: sanitized.schema }
+        : action,
+      /*
+       * NAMED BY ITS SLUG WHERE THERE IS ONE AND BY ITS PLACE WHERE THERE IS NOT, because this runs
+       * ABOVE the slug guard and has to — see the paragraph above for why a file-staging action with
+       * a broken field must not take the app's refresh down. The three guards below can write
+       * `action.slug.trim()` unconditionally; this one cannot, and "action 4 of the listing" is still
+       * a row an operator can find in a dashboard.
+       */
+      named:
+        typeof action.slug === "string" && action.slug.trim() !== ""
+          ? action.slug.trim()
+          : `action ${position + 1} of the listing`,
+      verdict: sanitized.verdict,
+    };
+  });
 
   /*
    * A SCHEMA THIS DEPLOYMENT COULD NOT READ TO THE BOTTOM IS A REFUSAL, NOT AN ACTION OFFERED.
@@ -1068,7 +1125,7 @@ export async function listTools(connection: {
  * and takes nothing else, because the alternative is somebody's request id in a model's context and
  * an audit row the size of a response dump.
  *
- * openbot already had this lesson from Drive, where a generic message cost a round of probing and the
+ * remii already had this lesson from Drive, where a generic message cost a round of probing and the
  * vendor's own "The caller does not have permission" named the problem immediately.
  *
  * Null when there is no such sentence, which leaves the caller to choose a fallback rather than
@@ -1126,7 +1183,7 @@ export function vendorSentence(error: unknown): string | null {
  *
  * EVERY READER OF A CANDIDATE SENTENCE IN THIS MODULE ASKS THROUGH HERE, and that is the whole
  * point of it rather than a tidiness. There are four places a string is picked up and handed to a
- * model, to an administrator reading `lastError` off the Plugins page, or to `store.ts`'s audit
+ * model, to an administrator reading `lastError` off App connections, or to `store.ts`'s audit
  * row: the two depths {@link vendorSentence} reaches, the message a failure was THROWN with, the
  * `error` field of a resolved envelope, and the reason a serialization failed. Each of them used to
  * make this judgement itself, and the judgement then drifted — which is not a hypothesis. A first
@@ -1210,7 +1267,7 @@ function thrownSentence(error: unknown): string | null {
  * is a person's own two-click fix on the page named here.
  */
 export function unexplained(toolName: string): string {
-  return `${toolName} failed and Composio did not say why. Check that this app is still connected on its Plugins page, then try again.`;
+  return `${toolName} failed and Composio did not say why. Check that this app is still connected on App connections, then try again.`;
 }
 
 /**
@@ -1577,7 +1634,12 @@ function reportedFailure(
  * classifies a failure twice. See {@link ActionAnswer} for what reading `isError` as a verdict cost.
  */
 export async function callTool(
-  connection: { url: string; actorId?: string; accountId?: string | null },
+  connection: {
+    url: string;
+    actorId?: string;
+    accountId?: string | null;
+    signal?: AbortSignal;
+  },
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<McpCallResult> {
@@ -1630,7 +1692,12 @@ export type ActionAnswer = {
  * being sorted into a kind afterwards by matching on the sentence it happens to carry.
  */
 export async function askAction(
-  connection: { url: string; actorId?: string; accountId?: string | null },
+  connection: {
+    url: string;
+    actorId?: string;
+    accountId?: string | null;
+    signal?: AbortSignal;
+  },
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<ActionAnswer> {
@@ -1644,6 +1711,7 @@ export async function askAction(
     answered: false,
   });
 
+  connection.signal?.throwIfAborted();
   const userId = connection.actorId?.trim();
   if (!userId) {
     return unreached(
@@ -1679,7 +1747,7 @@ export async function askAction(
      * condition under which it helps, which is the part nobody in this deployment controls.
      */
     return unreached(
-      `${toolName} has no recorded version, so it cannot be called: Composio requires a specific one and rejects "latest", so there is nothing to fall back on. Refreshing this app's tools on its Plugins page recovers it only if Composio publishes a version for this action. Where Composio publishes none, no refresh will make it callable.`,
+      `${toolName} has no recorded version, so it cannot be called: Composio requires a specific one and rejects "latest", so there is nothing to fall back on. Refreshing this app's tools on App connections recovers it only if Composio publishes a version for this action. Where Composio publishes none, no refresh will make it callable.`,
     );
   }
 
@@ -1739,7 +1807,9 @@ export async function askAction(
       },
       rest,
     );
+    connection.signal?.throwIfAborted();
   } catch (error) {
+    if (connection.signal?.aborted) throw error;
     /*
      * A SENTENCE THIS DEPLOYMENT AUTHORED BEATS ANYTHING THE VENDOR SAID, and the order was
      * inverted here against the one `routes.ts` uses on the identical class of error.

@@ -1,5 +1,5 @@
 //! Owner approval is collected by native dialogs, never by an app/tool-provided answer.
-use openbot_desktop_lib::host_access::{
+use remii_desktop_lib::host_access::{
     ApprovedFolder, ChooseFolderPrompt, CommandPrompt, HostAccessError, HostAccessResult,
     HostApprovalUi, WritePrompt,
 };
@@ -34,7 +34,7 @@ impl<R: tauri::Runtime> NativeApproval<R> {
         let window = self
             .0
             .get_webview_window("main")
-            .ok_or_else(|| refused("The local OpenBot window is closed."))?;
+            .ok_or_else(|| refused("The local Remii window is closed."))?;
         window.show().map_err(|error| refused(error.to_string()))?;
         window
             .set_focus()
@@ -65,7 +65,7 @@ impl<R: tauri::Runtime> HostApprovalUi for NativeApproval<R> {
         let window = self
             .0
             .get_webview_window("main")
-            .ok_or_else(|| refused("The local OpenBot window is closed."))?;
+            .ok_or_else(|| refused("The local Remii window is closed."))?;
         window.show().map_err(|error| refused(error.to_string()))?;
         window
             .set_focus()
@@ -82,7 +82,7 @@ impl<R: tauri::Runtime> HostApprovalUi for NativeApproval<R> {
             .into_path()
             .map_err(|error| refused(error.to_string()))?;
         self.confirm("Allow folder access?", format!(
-            "Bot: {bot}\nRequested by: {}\n\nFolder: {}\n\nAllow this Bot to read this folder for this OpenBot session? Each edit and command asks separately. You can revoke access in Computers.",
+            "Bot: {bot}\nRequested by: {}\n\nFolder: {}\n\nAllow this Bot to read this folder for this Remii session? Each edit and command asks separately. You can revoke access in Computers.",
             request.actor_id, root.display()
         ))?;
         Ok(ApprovedFolder { root })
@@ -92,7 +92,7 @@ impl<R: tauri::Runtime> HostApprovalUi for NativeApproval<R> {
         reviewable(&request.content)?;
         let bot = bot_label(request.bot_name.as_deref(), &request.bot_id);
         self.confirm("Allow this file change?", format!(
-            "Bot: {bot}\nFolder: {}\nFile: {}\n\nNew content:\n{}\n\nAllow this exact change once? OpenBot keeps the previous contents when replacing a file.",
+            "Bot: {bot}\nFolder: {}\nFile: {}\n\nNew content:\n{}\n\nAllow this exact change once? Remii keeps the previous contents when replacing a file.",
             request.root.display(), request.relative_path, request.content
         ))
     }

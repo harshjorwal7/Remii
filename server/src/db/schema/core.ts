@@ -25,7 +25,6 @@ const createdAt = () =>
 const updatedAt = () =>
   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
 
-export const role = pgEnum("role", ["admin", "user"]);
 export const agentType = pgEnum("agent_type", [
   "built_in",
   "remote_ag_ui",
@@ -67,6 +66,12 @@ export const users = pgTable("users", {
   image: text("image"),
   emailVerified: boolean("email_verified").notNull().default(false),
   /**
+   * Optional login name (Remi auth). Null means the person signs in with email only.
+   * Unique where present; several people without one coexist because nulls never collide.
+   */
+  username: text("username").unique(),
+  displayUsername: text("display_username"),
+  /**
    * The person's groups, for a group-based rule to be evaluated against.
    *
    * Empty on every row: no sign-in path, claim mapping or admin screen writes this, and nothing
@@ -86,6 +91,10 @@ export const users = pgTable("users", {
     withTimezone: true,
   }),
   lastSignedInAt: timestamp("last_signed_in_at", { withTimezone: true }),
+  stripeCustomerId: text("stripe_customer_id"),
+  dodoCustomerId: text("dodo_customer_id"),
+  creditBalance: integer("credit_balance").notNull().default(50),
+  isBanned: boolean("is_banned").notNull().default(false),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -159,18 +168,6 @@ export const verifications = pgTable("verifications", {
   updatedAt: updatedAt(),
 });
 
-export const userRoles = pgTable(
-  "user_roles",
-  {
-    userId: text("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    role: role("role").notNull(),
-    createdAt: createdAt(),
-  },
-  (table) => [primaryKey({ columns: [table.userId, table.role] })],
-);
-
 /**
  * One person's standing instructions, applied to every built-in coworker they run.
  *
@@ -194,6 +191,24 @@ export const userInstructions = pgTable("user_instructions", {
     .primaryKey()
     .references(() => users.id, { onDelete: "cascade" }),
   instructions: text("instructions").notNull(),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
+/**
+ * One person's own switches: how their coworkers act for them.
+ *
+ * The user id IS the primary key, like `user_instructions`: exactly one preference row per
+ * person, and absence means "deployment default" rather than a row saying nothing. A null
+ * `executionMode` inherits `BOT_EXECUTION_MODE`; a set one overrides it for that person only.
+ * General settings reads and writes this; every built-in run resolves it before composing the
+ * prompt.
+ */
+export const userPreferences = pgTable("user_preferences", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  executionMode: text("execution_mode"),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -235,24 +250,10 @@ export const ssoProviders = pgTable("sso_providers", {
 });
 
 /**
- * People an administrator has removed, by email address.
- *
- * Keyed on the address rather than the user id, because deleting the user row is not removal: the
- * next sign-in through the identity provider creates it again, with a fresh id and no memory of
- * having been removed. The address is the only thing that survives that.
- *
- * Lower-cased on the way in, since a provider is free to return whatever case it likes and two rows
- * differing only in case would be one person with one of them enforced.
+ * Retired `revoked_access`: revocation needed an administrator to do the
+ * removing, and individual-user SaaS has none — every account that can
+ * authenticate may sign in. Dropped in migration 0058.
  */
-export const revokedAccess = pgTable("revoked_access", {
-  email: text("email").primaryKey(),
-  revokedAt: timestamp("revoked_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  /** Who did it, for the trail. Not a foreign key: an administrator may later be removed too. */
-  revokedBy: text("revoked_by").notNull(),
-});
-
 export const deploymentPackages = pgTable("deployment_packages", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: text("tenant_id").notNull().unique(),
@@ -265,6 +266,10 @@ export const deploymentPackages = pgTable("deployment_packages", {
 
 export const agents = pgTable("agents", {
   id: text("id").primaryKey(),
+  ownerUserId: text("owner_user_id").references(() => users.id, {
+    onDelete: "cascade",
+  }),
+  isSystemTemplate: boolean("is_system_template").default(false),
   name: text("name").notNull(),
   type: agentType("type").notNull(),
   configuration: jsonb("configuration").notNull(),
@@ -402,6 +407,9 @@ export const credentials = pgTable(
   "credentials",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    userId: text("user_id").references(() => users.id, {
+      onDelete: "cascade",
+    }),
     kind: credentialKind("kind").notNull(),
     provider: text("provider").notNull(),
     encryptedValue: text("encrypted_value").notNull(),
@@ -412,11 +420,18 @@ export const credentials = pgTable(
     updatedAt: updatedAt(),
   },
   (table) => [
-    // At most one live credential per (kind, provider, key_id). Revoked rows are
-    // excluded so history is preserved, and two replicas racing to rotate the
-    // same secret cannot both insert a live row.
+    // At most one live credential per (owner, kind, provider, key_id).
+    // Ownerless rows (deployment secrets) coalesce to one sentinel, so the
+    // old global uniqueness still holds for them: two live deployment rows
+    // for one key are refused exactly as before. A user id can never be the
+    // sentinel, which is what keeps an owner from colliding with it.
     uniqueIndex("credentials_active_key_idx")
-      .on(table.kind, table.provider, table.keyId)
+      .on(
+        sql`coalesce(${table.userId}, '~deployment')`,
+        table.kind,
+        table.provider,
+        table.keyId,
+      )
       .where(sql`${table.revokedAt} IS NULL`),
   ],
 );

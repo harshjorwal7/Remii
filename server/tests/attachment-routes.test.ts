@@ -9,7 +9,7 @@ import {
   MAX_FILE_BYTES,
   MAX_IMAGE_BYTES,
 } from "../../shared/attachments";
-import { createApp, UPLOAD_BODY_LIMIT_BYTES } from "../src/app";
+import { UPLOAD_BODY_LIMIT_BYTES } from "../src/app";
 import type { AppVariables } from "../src/auth/guards";
 import { resolveAttachmentParts } from "../src/channels/attachment-parts";
 import {
@@ -30,6 +30,7 @@ import {
   intelligenceChannelMappings,
   users,
 } from "../src/db/schema";
+import { createTestApp } from "./support/app";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
 import { testEnvironment } from "./support/environment";
 
@@ -161,7 +162,7 @@ function attachmentApp(
  * query rejects in about 2ms.
  */
 const unreachableDatabase = createDatabase(
-  "postgres://openbot:openbot@127.0.0.1:1/openbot",
+  "postgres://remii:remii@127.0.0.1:1/remii",
   { max: 1 },
 );
 
@@ -590,17 +591,54 @@ describe("POST /:channelId/attachments", () => {
     expect(body.error.length).toBeGreaterThan(0);
   });
 
-  test("an unsupported non-image type is refused, naming the type", async () => {
-    const { app, channelId } = await harness();
+  test("a ZIP is stored whole and served as a download, not as a document", async () => {
+    /*
+     * WAS "an unsupported non-image type is refused, naming the type", which uploaded the same four
+     * bytes and expected a 415. It is accepted now, and deliberately: `sniffMimeType` names
+     * `application/zip` from the `PK\x03\x04` signature, `classifyAttachment` calls that `binary`,
+     * and a `binary` is stored and handed back whole.
+     *
+     * The change is the sniffing layer doing what its own note says — it "must not pretend" to read a
+     * member, so it stores the container rather than refusing it — and it is why an OOXML file is not
+     * called a `.docx` on a browser's word. What matters for this test is the KIND: binary, which
+     * downloads. It must not become `document`, because a document is served inline from a different
+     * origin and a ZIP is bytes this server cannot read at all.
+     */
+    const { app, database: db, channelId, member } = await harness();
     const file = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], "a.zip", {
       type: "application/zip",
     });
 
     const response = await upload(app, channelId, file);
 
-    expect(response.status).toBe(415);
-    const body = (await response.json()) as { error: string };
-    expect(body.error).toContain("application/zip");
+    // The route answers with the inserted row itself, not wrapped — `context.json(outcome.inserted,
+    // 201)`.
+    expect(response.status).toBe(201);
+    const inserted = (await response.json()) as {
+      id: string;
+      mimeType: string;
+    };
+    const id = inserted.id;
+    expect(id).toBeString();
+
+    const [stored] = await db
+      .select({ mimeType: attachments.mimeType })
+      .from(attachments)
+      .where(eq(attachments.id, id!));
+    // Named from the bytes, not from the filename and not from the browser's claim.
+    expect(stored?.mimeType).toBe("application/zip");
+
+    // Fetched through the `/:id` router, which is a different app: `harness`'s app is the
+    // channel-scoped one and has no GET on this path.
+    const fetched = await attachmentApp(db, member).request(
+      `http://test/${id}`,
+    );
+    expect(fetched.status).toBe(200);
+    // Binary, so it downloads — and never `document`, which would be served inline from a different
+    // origin for a container this server cannot read a single member of.
+    expect(fetched.headers.get("Content-Disposition")).toStartWith(
+      "attachment;",
+    );
   });
 
   test("the ninth staged attachment in one upload group is refused", async () => {
@@ -720,7 +758,7 @@ describe("POST /:channelId/attachments", () => {
      * It used to end "anything still unsent is cleared within a day", which is a promise about
      * `attachments.culler.olderThanHours` — an operator's value, defaulting to 24 and documented as
      * raisable — made on a deployment that may also have set `attachments.culler.enabled: false`,
-     * which charts/openbot/README.md offers as the way to "keep every staged row for ever". On such
+     * which charts/remii/README.md offers as the way to "keep every staged row for ever". On such
      * a deployment the sentence was a flat lie told to the one person who could not act on it: some
      * of these rows are in channels they can no longer open, so withdrawing them is not available
      * either.
@@ -1558,7 +1596,10 @@ describe("GET /:id", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toBe("image/png");
     expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
-    expect(response.headers.get("Content-Disposition")).toBe("inline");
+    // Inline, and named. See the text-file test below for why the filename is part of the deal.
+    expect(response.headers.get("Content-Disposition")).toBe(
+      "inline; filename=\"photo.png\"; filename*=UTF-8''photo.png",
+    );
     expect(response.headers.get("Cache-Control")).toBe("private, no-cache");
   });
 
@@ -1736,7 +1777,19 @@ describe("GET /:id", () => {
     ).toBe(404);
   });
 
-  test("a text file is served attachment, never inline", async () => {
+  test("a text file is served inline, with the name the uploader chose", async () => {
+    /*
+     * WAS "a text file is served attachment, never inline", and it asserted the opposite on purpose.
+     * `INLINE_KINDS` is now `image`, `text`, `audio` and `video` — the four kinds whose media type
+     * this server earned from the bytes and which no browser executes. Text is on that list because
+     * the transcript draws it: a note somebody sent is prose, and downloading it to read it would be
+     * the wrong answer.
+     *
+     * What is NOT allowed is unchanged, and is what this test now pins. A text file is not served
+     * inline WITHOUT its filename: `Content-Disposition` carries both parameters, because an inline
+     * response with no name gives a browser nothing to save the file under when the person decides to
+     * keep it, and it invents one. So the assertion is on the pair.
+     */
     const { database: db, channelId, memberId, member } = await harness();
     const id = await uploadText(db, {
       channelId,
@@ -1750,9 +1803,9 @@ describe("GET /:id", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toBe("text/plain");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
     const disposition = response.headers.get("Content-Disposition");
-    expect(disposition).not.toBe("inline");
-    expect(disposition).toContain("attachment");
+    expect(disposition).toStartWith("inline; ");
     expect(disposition).toContain('filename="notes.txt"');
   });
 
@@ -1770,7 +1823,10 @@ describe("GET /:id", () => {
 
     expect(response.status).toBe(200);
     const disposition = response.headers.get("Content-Disposition");
-    expect(disposition).toContain("attachment");
+    // The quoted parameter is the ASCII-folded fallback and the extended one carries the name intact,
+    // which is the whole point of sending both. `inline` rather than `attachment` because this is a
+    // text file — see the text-file test above.
+    expect(disposition).toStartWith("inline; ");
     expect(disposition).toContain('filename="__.txt"');
     expect(disposition).toContain("filename*=UTF-8''%E3%83%A1%E3%83%A2.txt");
   });
@@ -1792,7 +1848,10 @@ describe("GET /:id", () => {
 
     expect(response.status).toBe(200);
     const disposition = response.headers.get("Content-Disposition") ?? "";
-    expect(disposition).toContain("attachment");
+    expect(disposition).toStartWith("inline; ");
+    // The control characters are gone from BOTH parameters, and not merely percent-encoded: the
+    // serializer builds each one from the same neutralised name, so the fallback and the extended form
+    // can never disagree about what the file is called.
     expect(disposition).toContain('filename="report__.txt"');
     // Percent-encoding turns a control character into something a header CAN carry (`%0B`), so the
     // extended parameter is checked for the folded name rather than merely for header-safety.
@@ -1801,15 +1860,21 @@ describe("GET /:id", () => {
   });
 
   test("an SVG body uploaded as text/plain is stored, and served so it cannot run", async () => {
-    // A known and deliberate limit of `sniffMimeType`: an SVG is valid UTF-8,
-    // so a text claim over SVG bytes is corroborated and accepted. No
-    // "does this look like XML" sniff is attempted, because that is brittle
-    // and would refuse legitimate text. What makes it safe is not the sniff
-    // but this response, so the response is what gets pinned: the stored type
-    // is served verbatim (`text/plain`, never `image/svg+xml`), `nosniff`
-    // stops the browser upgrading that guess for itself, and the disposition
-    // is `attachment`, so nothing renders in a document on this origin. Any
-    // one of the three would do; all three have to hold.
+    /*
+     * A known and deliberate limit of `sniffMimeType`: an SVG is valid UTF-8, so a text claim over SVG
+     * bytes is corroborated and accepted. No "does this look like XML" sniff is attempted, because that
+     * is brittle and would refuse legitimate text.
+     *
+     * WHAT MAKES IT SAFE IS THIS RESPONSE, so the response is what gets pinned — and that is the half
+     * that has to be right, because the disposition alone no longer carries it.
+     *
+     * It used to be three legs: the stored type served verbatim as `text/plain` (never
+     * `image/svg+xml`), `nosniff`, and `attachment`. Text is now an inline kind, so the third leg is
+     * gone and the first two are the whole of it — which is sound, because a browser given
+     * `Content-Type: text/plain` with `nosniff` renders the bytes as text and never parses them as
+     * markup. There is no third leg needed and no third leg available; `nosniff` is what stops the
+     * browser doing for itself the upgrade the sniffer declined to do.
+     */
     const { app, channelId, database: db, member } = await harness();
     const svg =
       "<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>";
@@ -1825,10 +1890,13 @@ describe("GET /:id", () => {
     const served = await attachmentApp(db, member).request(`http://test/${id}`);
 
     expect(served.status).toBe(200);
+    // Never `image/svg+xml`, whatever the bytes are and whatever the uploader claimed.
     expect(served.headers.get("Content-Type")).toBe("text/plain");
+    // The leg the whole safety argument rests on now that the disposition cannot carry it.
     expect(served.headers.get("X-Content-Type-Options")).toBe("nosniff");
-    expect(served.headers.get("Content-Disposition")).toContain("attachment");
-    expect(served.headers.get("Content-Disposition")).not.toBe("inline");
+    expect(served.headers.get("Content-Disposition")).not.toContain(
+      "image/svg",
+    );
   });
 
   test("a non-UUID id is refused with a 404, not a 500", async () => {
@@ -2386,42 +2454,13 @@ describe("attachment route composition", () => {
     let session: {
       user: { id: string; email: string; name: string; image: string };
     } | null = null;
-    const app = createApp(
-      loadConfig(testEnvironment()),
-      {
-        handler: () => new Response(null, { status: 204 }),
-        api: { getSession: async () => session },
-      },
-      { rolesForUser: async () => ["user"] },
-      // Positions 4-25, ending at userInstructions. `attachmentDatabase` is position 26, the same
-      // gap channel-routes.test.ts leaves for channelStore at position 11.
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      db,
-    );
+    const app = createTestApp({
+      session: () => session,
+      parts: { attachmentDatabase: db },
+    });
 
     const unauthenticated = await app.request(
-      `http://openbot.test/api/attachments/${id}`,
+      `http://remii.test/api/attachments/${id}`,
     );
     expect(unauthenticated.status).toBe(401);
 
@@ -2429,13 +2468,13 @@ describe("attachment route composition", () => {
       user: {
         id: memberId,
         email: `${memberId}@example.test`,
-        name: "OpenBot Member",
+        name: "Remii Member",
         image: "https://example.test/member.png",
       },
     };
 
     const authenticated = await app.request(
-      `http://openbot.test/api/attachments/${id}`,
+      `http://remii.test/api/attachments/${id}`,
     );
     expect(authenticated.status).toBe(200);
 
@@ -2452,22 +2491,22 @@ describe("attachment route composition", () => {
       ),
     );
     const uploadResponse = await app.request(
-      `http://openbot.test/api/channels/${channelId}/attachments`,
+      `http://remii.test/api/channels/${channelId}/attachments`,
       { method: "POST", body: uploadFormData },
     );
     expect(uploadResponse.status).toBe(201);
   });
 
   test("leaves both routers unmounted when createApp has no database", async () => {
-    const app = createApp(loadConfig(testEnvironment()));
+    const app = createTestApp();
 
     const fetchResponse = await app.request(
-      "http://openbot.test/api/attachments/not-a-uuid",
+      "http://remii.test/api/attachments/not-a-uuid",
     );
     expect(fetchResponse.status).toBe(404);
 
     const uploadResponse = await app.request(
-      "http://openbot.test/api/channels/some-channel/attachments",
+      "http://remii.test/api/channels/some-channel/attachments",
       { method: "POST" },
     );
     expect(uploadResponse.status).toBe(404);
@@ -2502,40 +2541,23 @@ describe("attachment route composition", () => {
 describe("the upload route's body limit", () => {
   /** The app the two tests below share: no auth service, so nothing below the door can answer 2xx. */
   function appWithNoAuth(db: Database) {
-    return createApp(
-      loadConfig(testEnvironment()),
-      // Positions 2-25: no auth needed, since the body limit runs ahead of every route below it,
-      // including `requireUser`. `attachmentDatabase` is position 26.
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      db,
-    );
+    /*
+     * The database is NAMED, not reached by counting `undefined` down to it. `createApp` takes
+     * thirty-five positional parameters and every one from the second onwards is optional, so a
+     * hand-counted list passes `tsc` at any length and lands the database in a neighbouring slot at
+     * runtime. See `support/app.ts`.
+     *
+     * No auth service, so nothing below the door can answer 2xx — which is what lets these tests tell
+     * the body limit's own refusal apart from every other 4xx.
+     */
+    return createTestApp({
+      signedOut: true,
+      parts: { attachmentDatabase: db },
+    });
   }
 
   function postBytes(
-    app: ReturnType<typeof createApp>,
+    app: ReturnType<typeof createTestApp>,
     channelId: string,
     byteLength: number,
   ) {
@@ -2545,7 +2567,7 @@ describe("the upload route's body limit", () => {
       new File([new Uint8Array(byteLength)], "huge.png", { type: "image/png" }),
     );
     return app.request(
-      `http://openbot.test/api/channels/${channelId}/attachments`,
+      `http://remii.test/api/channels/${channelId}/attachments`,
       { method: "POST", body: formData },
     );
   }

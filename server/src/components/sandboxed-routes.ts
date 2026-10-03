@@ -1,7 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import type { AppVariables } from "../auth/guards";
-import { requireAdmin } from "../auth/guards";
 import {
   SandboxedNameRefusedError,
   SandboxedNotFoundError,
@@ -29,12 +28,14 @@ export function createSandboxedRoutes(
   const actorEmail = (context: { var: AppVariables }) =>
     context.var.actor?.email ?? "unknown";
 
-  /** Everything the playground edits. Admin-only: this is the source of what Bots draw. */
+  /**
+   * Everything this person's playground edits: their own components plus
+   * legacy shared rows. Nothing of anybody else's.
+   */
   routes.get("/", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
-    return context.json({ components: await store.list() });
+    return context.json({
+      components: await store.list(context.var.actor.id),
+    });
   });
 
   /**
@@ -45,13 +46,12 @@ export function createSandboxedRoutes(
    * theirs to read.
    */
   routes.get("/published", requireUser, async (context) =>
-    context.json({ components: await store.published() }),
+    context.json({
+      components: await store.published(context.var.actor.id),
+    }),
   );
 
   routes.post("/", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     const body = (await context.req.json().catch(() => null)) as {
       slug?: unknown;
       title?: unknown;
@@ -137,6 +137,10 @@ export function createSandboxedRoutes(
         argumentSchema,
         sampleArguments,
         by: actorEmail(context),
+        // Stamped on create: a playground save with nobody behind it has no
+        // sandbox to belong to, and a name somebody else owns is refused
+        // rather than overwritten.
+        ownerId: context.var.actor.id,
       });
       return context.json({ component });
     } catch (error) {
@@ -148,13 +152,11 @@ export function createSandboxedRoutes(
   });
 
   routes.post("/:name/publish", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     try {
       const component = await store.publish(
         context.req.param("name"),
         actorEmail(context),
+        context.var.actor.id,
       );
       return context.json({ component });
     } catch (error) {
@@ -166,15 +168,16 @@ export function createSandboxedRoutes(
   });
 
   routes.delete("/:name", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     // Answered like `publish`, because it is the same question: this surface owns the components it
     // authored, and a name with no draft behind it is not one of them. Reporting that as "not found"
     // rather than as success also stops a caller reading `{ ok: true }` as "the thing you named is
     // gone", which it was not.
     try {
-      await store.remove(context.req.param("name"), actorEmail(context));
+      await store.remove(
+        context.req.param("name"),
+        actorEmail(context),
+        context.var.actor.id,
+      );
       return context.json({ ok: true });
     } catch (error) {
       if (error instanceof SandboxedNotFoundError) {

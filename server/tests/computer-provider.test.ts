@@ -1,71 +1,89 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   createComputerProvider,
-  createSharedComputerProvider,
   describeComputerIsolation,
-  ProviderError,
+  describeHostedIsolation,
+  isScopedComputerKey,
+  parseScopedComputerKey,
+  scopeComputerKey,
 } from "../src/computer/provider";
+import type { ComputerProvider } from "../src/computer/provider";
 import type { ComputerConfig } from "../src/config";
 
-const servers: { stop(closeActiveConnections?: boolean): void }[] = [];
+/**
+ * The per-Bot provider seam, and what is left of it.
+ *
+ * This file used to test four providers — the Docker supervisor, the shared local browser, the
+ * Kubernetes sandbox and the E2B sandbox — by standing up a fake `agent-computer` over HTTP and
+ * asserting request paths, headers and inventory mapping. All four are gone. `createComputerProvider`
+ * now throws on purpose, because the only computer this deployment has is a E2B desktop.
+ *
+ * Thirteen of its cases failed with `createSharedComputerProvider is not defined`, which is the
+ * correct outcome for a test whose subject was removed. What that left uncovered was everything the
+ * module still exports and the rest of the tree still imports, so that is what this file holds now.
+ *
+ * The two things asserted below are the two that matter, and neither is about a machine:
+ *
+ *  - The factory refuses. A provider that is constructible is a provider that can be reached, and
+ *    reaching one is how a deployment ends up paying for a computer no database row claims.
+ *  - The isolation description reports the truth. It is written to the boot audit trail on every
+ *    start, so a deployment that reported "the computer feature is off" while running a working,
+ *    billing E2B desktop would be recorded as misconfigured in its own history.
+ */
 
-afterEach(() => {
-  for (const server of servers.splice(0)) server.stop(true);
-});
-
-function serve(handler: (request: Request) => Response | Promise<Response>) {
-  const server = Bun.serve({ port: 0, fetch: handler });
-  servers.push(server);
-  return `http://127.0.0.1:${server.port}`;
+/** A provider is not constructible, whatever the configuration asks for. */
+function providerConfigFor(
+  provider: NonNullable<ComputerConfig["provider"]>,
+): ComputerConfig {
+  if (provider === "e2b") {
+    return {
+      provider: "e2b",
+      apiUrl: "https://app.e2b.io/api",
+      apiKey: "key",
+      computerPort: 6080,
+      volumeName: "workspace",
+      workspaceMountPath: "/workspace",
+    } as ComputerConfig;
+  }
+  if (provider === "shared") {
+    return {
+      provider: "shared",
+      baseUrl: "http://computer:4100",
+      token: "computer-secret",
+      allowPrivateHosts: false,
+    } as ComputerConfig;
+  }
+  return {
+    provider,
+    baseUrl: "http://supervisor:4300",
+    supervisorToken: "supervisor-secret",
+    token: "computer-secret",
+    allowPrivateHosts: false,
+  } as ComputerConfig;
 }
 
-type FakeAgentComputerHandler = {
-  health?: (request: Request) => Response | Promise<Response>;
-  computers?: (request: Request) => Response | Promise<Response>;
-  stop?: (request: Request) => Response | Promise<Response>;
-  reset?: (request: Request) => Response | Promise<Response>;
-};
+describe("the legacy per-Bot provider factory", () => {
+  test.each(["docker", "shared", "sandbox", "e2b", "e2b"] as const)(
+    "refuses %s rather than returning a provider",
+    (provider) => {
+      expect(() => createComputerProvider(providerConfigFor(provider))).toThrow(
+        /no per-Bot computer/i,
+      );
+    },
+  );
 
-function serveAgentComputer(
-  handlers: FakeAgentComputerHandler = {},
-  options?: { token?: string },
-) {
-  return serve(async (request) => {
-    const url = new URL(request.url);
-    const token = request.headers.get("x-openbot-computer-token");
-
-    if (
-      options?.token &&
-      url.pathname !== "/health" &&
-      token !== options.token
-    ) {
-      return Response.json({ error: "Not authorised." }, { status: 401 });
+  test("the refusal names where the computer actually is", () => {
+    // An operator who set COMPUTER_PROVIDER=shared and read this sentence should know what to do.
+    let message = "";
+    try {
+      createComputerProvider(providerConfigFor("shared"));
+    } catch (error) {
+      message = error instanceof Error ? error.message : "";
     }
-
-    if (url.pathname === "/health" && request.method === "GET") {
-      if (handlers.health) return handlers.health(request);
-      return Response.json({ status: "ok", browser: true });
-    }
-
-    if (url.pathname === "/computers" && request.method === "GET") {
-      if (handlers.computers) return handlers.computers(request);
-      return Response.json({ computers: [] });
-    }
-
-    if (url.pathname === "/computers/stop" && request.method === "POST") {
-      if (handlers.stop) return handlers.stop(request);
-      return Response.json({ stopped: true, wasRunning: true });
-    }
-
-    if (url.pathname === "/computers/reset" && request.method === "POST") {
-      if (handlers.reset) return handlers.reset(request);
-      const botId = request.headers.get("x-openbot-bot-id") ?? "shared";
-      return Response.json({ reset: true, botId });
-    }
-
-    return Response.json({ error: "Not found." }, { status: 404 });
+    expect(message).toMatch(/hosted desktop/);
+    expect(message).toMatch(/provisioner/i);
   });
-}
+});
 
 describe("computer isolation description", () => {
   test("describes the computer feature as off when no provider is configured", () => {
@@ -76,271 +94,136 @@ describe("computer isolation description", () => {
     expect(description.note.toLowerCase()).not.toContain("browser");
   });
 
-  test("describes provider machine isolation when configured", () => {
-    const provider = createSharedComputerProvider({
-      baseUrl: "http://computer:4100/",
-    });
+  test("describes a per-Bot provider's machine isolation", () => {
+    const provider = {
+      isolation: "per-bot",
+      name: "any",
+    } as unknown as ComputerProvider;
+    expect(describeComputerIsolation(provider).isolation).toBe(
+      "one computer per Bot",
+    );
+  });
 
-    expect(provider.name).toBe("shared");
-    expect(provider.isolation).toBe("shared");
+  test("describes a per-user provider as one computer per person, not per Bot", () => {
+    // One per PERSON is a different boundary from one per Bot, and the sentence says so: two Bots of
+    // the same owner share a machine and a memory ceiling, while two people never meet.
+    const provider = {
+      isolation: "per-user",
+      name: "any",
+    } as unknown as ComputerProvider;
+    const description = describeComputerIsolation(provider);
+    expect(description.isolation).toBe("one computer per user");
+    expect(description.note).toMatch(/person/i);
+  });
+
+  test("keeps a warning on a shared provider", () => {
+    const provider = {
+      isolation: "shared",
+      name: "any",
+    } as unknown as ComputerProvider;
     expect(describeComputerIsolation(provider).isolation).toBe(
       "one shared computer",
     );
+    expect(describeComputerIsolation(provider).warning).toBeTruthy();
   });
 });
 
-describe("shared computer provider", () => {
-  test("locates the shared computer address", async () => {
-    const provider = createSharedComputerProvider({
-      baseUrl: "http://computer:4100/",
-    });
-    expect(await provider.locate("sales")).toBe("http://computer:4100/");
+describe("the E2B desktop isolation description", () => {
+  test("never claims the computer feature is off", () => {
+    /*
+     * The bug this guards. A E2B desktop is not a `ComputerProvider`, so it used to arrive here
+     * as `undefined` and be described as "The computer feature is off" — on a deployment with a
+     * working, billing desktop. Both scopes must avoid that sentence.
+     */
+    for (const scope of ["per-bot", "per-person"] as const) {
+      const description = describeHostedIsolation(scope);
+      expect(description.isolation).not.toBe("off");
+      expect(description.note).not.toMatch(/feature is off/i);
+    }
   });
 
-  test("reports a healthy shared computer as ready", async () => {
-    const paths: string[] = [];
-    const baseUrl = serveAgentComputer({
-      health: (request) => {
-        paths.push(new URL(request.url).pathname);
-        return Response.json({ status: "ok" });
-      },
-    });
-    const provider = createSharedComputerProvider({ baseUrl });
-
-    expect(await provider.status("sales")).toEqual({
-      botId: "sales",
-      state: "ready",
-    });
-    expect(paths).toEqual(["/health"]);
-  });
-
-  test("reports the HTTP failure when the shared computer is not healthy", async () => {
-    const baseUrl = serveAgentComputer({
-      health: () => new Response("not ready", { status: 503 }),
-    });
-    const provider = createSharedComputerProvider({ baseUrl });
-
-    expect(await provider.status("sales")).toEqual({
-      botId: "sales",
-      state: "unreachable",
-      reason: "The shared computer answered 503.",
-    });
-  });
-
-  test("posts /computers/stop with identity and token and returns wasRunning", async () => {
-    const requests: {
-      path: string;
-      method: string;
-      botId: string | null;
-      token: string | null;
-    }[] = [];
-    const baseUrl = serveAgentComputer(
-      {
-        stop: (request) => {
-          const botId = request.headers.get("x-openbot-bot-id");
-          requests.push({
-            path: new URL(request.url).pathname,
-            method: request.method,
-            botId,
-            token: request.headers.get("x-openbot-computer-token"),
-          });
-          const wasRunning = botId === "running-bot";
-          return Response.json({ stopped: true, wasRunning });
-        },
-      },
-      { token: "computer-secret" },
+  test("says what each scope separates", () => {
+    expect(describeHostedIsolation("per-bot").isolation).toBe(
+      "one computer per Bot",
     );
-    const provider = createSharedComputerProvider({
-      baseUrl,
-      token: "computer-secret",
-    });
-
-    const runningResult = await provider.stop("running-bot");
-    expect(runningResult).toEqual({ wasRunning: true });
-
-    const idleResult = await provider.stop("idle-bot");
-    expect(idleResult).toEqual({ wasRunning: false });
-
-    expect(requests).toEqual([
-      {
-        path: "/computers/stop",
-        method: "POST",
-        botId: "running-bot",
-        token: "computer-secret",
-      },
-      {
-        path: "/computers/stop",
-        method: "POST",
-        botId: "idle-bot",
-        token: "computer-secret",
-      },
-    ]);
-  });
-
-  test("posts /computers/reset with identity and token and returns cleared", async () => {
-    const requests: {
-      path: string;
-      method: string;
-      botId: string | null;
-      token: string | null;
-    }[] = [];
-    const baseUrl = serveAgentComputer(
-      {
-        reset: (request) => {
-          const botId = request.headers.get("x-openbot-bot-id");
-          requests.push({
-            path: new URL(request.url).pathname,
-            method: request.method,
-            botId,
-            token: request.headers.get("x-openbot-computer-token"),
-          });
-          return Response.json({ reset: true, botId });
-        },
-      },
-      { token: "computer-secret" },
+    expect(describeHostedIsolation("per-person").isolation).toBe(
+      "one computer per user",
     );
-    const provider = createSharedComputerProvider({
-      baseUrl,
-      token: "computer-secret",
-    });
-
-    const resetResult = await provider.reset("sales");
-    expect(resetResult).toEqual({ cleared: true });
-
-    expect(requests).toEqual([
-      {
-        path: "/computers/reset",
-        method: "POST",
-        botId: "sales",
-        token: "computer-secret",
-      },
-    ]);
   });
 
-  test("maps the shared computer inventory to provider locations preserving egress and status", async () => {
-    const baseUrl = serveAgentComputer({
-      computers: () =>
-        Response.json({
-          computers: [
-            {
-              botId: "sales",
-              running: true,
-              startedAt: "2026-08-20T12:00:00.000Z",
-              egress: null,
-            },
-            {
-              botId: "support",
-              running: false,
-              startedAt: null,
-              egress: "us-east-egress",
-            },
-            {
-              botId: "analytics",
-              status: "running",
-              egress: null,
-            },
-          ],
-        }),
-    });
-    const provider = createSharedComputerProvider({ baseUrl });
-
-    expect(await provider.list()).toEqual([
-      {
-        botId: "sales",
-        status: "running",
-        url: baseUrl,
-        startedAt: "2026-08-20T12:00:00.000Z",
-        egress: null,
-      },
-      {
-        botId: "support",
-        status: "stopped",
-        url: baseUrl,
-        egress: "us-east-egress",
-      },
-      {
-        botId: "analytics",
-        status: "running",
-        url: baseUrl,
-        egress: null,
-      },
-    ]);
-  });
-
-  test("aborts fetch that never settles with configurable timeoutMs and throws ProviderError", async () => {
-    const baseUrl = serve(() => new Promise<Response>(() => {}));
-    const provider = createSharedComputerProvider({
-      baseUrl,
-      timeoutMs: 25,
-    });
-
-    await expect(provider.stop("sales")).rejects.toThrow(ProviderError);
+  test("the per-person note admits that the Bots share one screen", () => {
+    // The honest part: with one desktop per person, a person watching one Bot is watching the machine
+    // every one of their Bots acts on. Saying otherwise is how somebody concludes their Bots are
+    // isolated from each other.
+    expect(describeHostedIsolation("per-person").note).toMatch(
+      /same screen|screen/i,
+    );
   });
 });
 
-describe("computer provider factory", () => {
-  test("selects the Docker supervisor adapter", () => {
-    const config: ComputerConfig = {
-      provider: "docker",
-      baseUrl: "http://supervisor:4300",
-      supervisorToken: "supervisor-secret",
-      token: "computer-secret",
-      allowPrivateHosts: false,
-    };
-
-    expect(createComputerProvider(config).name).toBe("Docker supervisor");
+describe("the scoped computer key", () => {
+  test("is recognised as scoped and round-trips its slugs", () => {
+    const key = scopeComputerKey("user-1234", "bot-5678");
+    expect(isScopedComputerKey(key)).toBe(true);
+    expect(parseScopedComputerKey(key)).toEqual({
+      ownerSlug: "user-1234",
+      botSlug: "bot-5678",
+    });
   });
 
-  test("selects the shared computer adapter", () => {
-    const config: ComputerConfig = {
-      provider: "shared",
-      baseUrl: "http://computer:4100",
-      token: "computer-secret",
-      allowPrivateHosts: false,
-    };
-
-    expect(createComputerProvider(config).name).toBe("shared");
+  test("keeps two users of the same Bot apart", () => {
+    expect(scopeComputerKey("alice", "bot-1")).not.toBe(
+      scopeComputerKey("bob", "bot-1"),
+    );
   });
-});
 
-/**
- * A transient failure must not become a permanent one.
- *
- * The provider is built once behind a promise, and `??=` remembers whatever that first call
- * produced. A rejected promise is something: one unreadable token file at the wrong moment and every
- * computer request for the rest of the pod's life failed with the same stale error, while the pod
- * served happily and no probe noticed.
- */
-describe("building the sandbox provider", () => {
-  test("a failed first attempt is not remembered", async () => {
-    const original = process.env.KUBERNETES_SERVICE_HOST;
-    delete process.env.KUBERNETES_SERVICE_HOST;
+  test("keeps two Bots of the same user apart", () => {
+    expect(scopeComputerKey("alice", "bot-1")).not.toBe(
+      scopeComputerKey("alice", "bot-2"),
+    );
+  });
 
-    try {
-      const provider = createComputerProvider({
-        provider: "sandbox",
-        namespace: "openbot",
-        idleAfterMs: 60_000,
-        templateFile: "/nowhere/sandbox-template.json",
-      });
+  test("separates pairs that slug alike but are not the same", () => {
+    // Punctuation and case collapse under the slugger, so the trailing pair hash is what stops
+    // "Team Bot" and "team-bot" landing on one computer.
+    expect(scopeComputerKey("alice", "Team Bot")).not.toBe(
+      scopeComputerKey("alice", "team-bot"),
+    );
+  });
 
-      const first = await provider.status("bot-1").catch((e: unknown) => e);
-      const second = await provider.status("bot-1").catch((e: unknown) => e);
+  test("is stable, because it is recomputed on every lookup", () => {
+    expect(scopeComputerKey("alice", "bot-1")).toBe(
+      scopeComputerKey("alice", "bot-1"),
+    );
+  });
 
-      expect(first).toBeInstanceOf(Error);
-      expect(second).toBeInstanceOf(Error);
-      /*
-       * DIFFERENT OBJECTS, which is the whole assertion.
-       *
-       * A memo holding the rejected promise hands back the identical Error every time, because
-       * nothing runs again. Two distinct instances mean the second call re-entered the build, so a
-       * deployment whose token file was briefly unreadable recovers on the next request instead of
-       * needing a restart.
-       */
-      expect(second).not.toBe(first);
-    } finally {
-      if (original === undefined) delete process.env.KUBERNETES_SERVICE_HOST;
-      else process.env.KUBERNETES_SERVICE_HOST = original;
+  test("carries a full owner slug, so a user's disk is not stranded by truncation", () => {
+    const longOwner = "a".repeat(40);
+    expect(
+      parseScopedComputerKey(scopeComputerKey(longOwner, "bot-1")),
+    ).toEqual({ ownerSlug: longOwner, botSlug: "bot-1" });
+  });
+
+  test("refuses a legacy key rather than inventing slugs for it", () => {
+    expect(isScopedComputerKey("bot-1")).toBe(false);
+    expect(parseScopedComputerKey("bot-1")).toBeNull();
+  });
+
+  test("carries only characters a Docker, Kubernetes and E2B name all accept", () => {
+    // The supervisor accepted ^[A-Za-z0-9][A-Za-z0-9_-]*$, and E2B and Kubernetes agree; the key
+    // starts with a letter and never emits a double underscore inside a slug.
+    for (const owner of [
+      "alice",
+      "a b",
+      "A/B",
+      "user@example.com",
+      "x".repeat(80),
+    ]) {
+      for (const bot of ["bot-1", "Bot Two", "b"]) {
+        const key = scopeComputerKey(owner, bot);
+        expect(key).toMatch(/^[a-z0-9][a-z0-9_-]*$/);
+        expect(key.split("__")).toHaveLength(3);
+      }
     }
   });
 });

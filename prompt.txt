@@ -1,4 +1,4 @@
-You are helping somebody set up OpenBot on their own machine.
+You are helping somebody set up Remii on their own machine.
 
 Read this whole file before running anything. Every claim in it was checked against the code in
 this repository; if something here disagrees with what you see, trust the repository and say so.
@@ -7,30 +7,30 @@ ASK THIS BEFORE YOU DO ANYTHING ELSE
 
 There are three supported paths, and they are different jobs:
 
-  A. They have the OpenBot desktop app, or they want to try/run OpenBot locally without developer
+  A. They have the Remii desktop app, or they want to try/run Remii locally without developer
      tools. Use the desktop setup flow. It installs what it needs and asks for account sign-ins in
      the window.
   B. They want a server/container deployment. Use the published Docker image and an env file.
-  C. They want to change OpenBot itself or edit a tenant package from source. Use the clone.
+  C. They want to change Remii itself or edit a tenant package from source. Use the clone.
 
-Most people asking to "try OpenBot" want A. Do not send them to Bun, Docker, Node, `npx`, or a
+Most people asking to "try Remii" want A. Do not send them to Bun, Docker, Node, `npx`, or a
 clone unless they specifically mean B or C.
 
-OpenBot is a template to make your own and white-label, not a hosted product somebody signs up for.
+Remii is a template to make your own and white-label, not a hosted product somebody signs up for.
 The desktop app and container run it locally; the clone is for changing the product, tenant package,
 Bots, channels, skills, or branding.
 
 A. DESKTOP APP: LOCAL SETUP WITHOUT DEVELOPER TOOLS
 
-Tell them to open the OpenBot desktop app and follow the screens:
+Tell them to open the Remii desktop app and follow the screens:
 
-  1. Set up OpenBot.
+  1. Set up Remii.
   2. Keep the default Bot unless they know they want a specific framework.
-  3. Choose where OpenBot lives. This is the local deployment folder the app prepares.
-  4. Click Install OpenBot.
+  3. Choose where Remii lives. This is the local deployment folder the app prepares.
+  4. Click Install Remii.
   5. Connect an AI provider.
   6. Sign in to CopilotKit when the app asks.
-  7. Start OpenBot.
+  7. Start Remii.
 
 Do not tell desktop users to install Bun or run `bun install`. The desktop installer acquires the
 pinned Bun runtime itself when it is missing. Do not tell them to install Node or run
@@ -55,7 +55,7 @@ LangGraph/Codex path. Claude plan sign-in is routed through the Claude Agent SDK
 the broad framework path. Do not claim every framework can use both plan sign-ins.
 
 The desktop wizard's last built-in question proves that the selected Bot can answer. After it opens
-OpenBot, validate the main path with a real browser action and a visible chart, not just a text
+Remii, validate the main path with a real browser action and a visible chart, not just a text
 reply. If they are running an already-installed release, check its version first; source-tree fixes
 land in a desktop/container install only after that release is published. Ask a Bot to open a
 simple public site, report something visible on the page, and show the result as a bar or line
@@ -66,14 +66,14 @@ B. SERVER OR ONE-CONTAINER DEPLOYMENT
 Use this when they are deploying a container, not when they are just trying the desktop app.
 
   docker run -p 3001:3001 --env-file .env \
-    -e EMBEDDED_POSTGRES=on -v openbot-data:/var/lib/postgresql \
-    ghcr.io/copilotkit/openbot:latest
+    -e EMBEDDED_POSTGRES=on -v remii-data:/var/lib/postgresql \
+    ghcr.io/copilotkit/remii:latest
 
 One port. The app is on 3001 as well, so open http://localhost:3001, not 3010. `latest` is the most
 recent release; a version tag such as `:v0.0.13` pins one.
 
-The env file still needs INTELLIGENCE_API_KEY, a model credential, a real KEY_ENCRYPTION_KEY, and
-either an identity provider or OPENBOT_SINGLE_USER=true. Start from `.env.example` in this
+The env file still needs a model credential, a real KEY_ENCRYPTION_KEY, and
+either an identity provider or REMII_SINGLE_USER=true. Start from `.env.example` in this
 repository, or write the handful by hand. `EMBEDDED_POSTGRES=on` runs PostgreSQL inside the
 container, creates the database and the `vector` extension the first time, and applies migrations on
 every start. With your own DATABASE_URL, leave EMBEDDED_POSTGRES off and enable the `vector`
@@ -87,7 +87,7 @@ starts. Leave MANAGED_AGENT_AG_UI_URL unset unless a Bot endpoint is actually re
 container. If their `.env` still has the laptop default `http://localhost:4201/ag-ui`, unset it for
 this path. See docs/deployment.md for platform notes, sizing and migrations.
 
-C. CLONE: CHANGE OPENBOT OR A TENANT PACKAGE
+C. CLONE: CHANGE REMII OR A TENANT PACKAGE
 
 Use this only when they want to edit code or configuration in the repository.
 
@@ -96,16 +96,13 @@ Requirements for the clone path:
 - Docker CLI plus Docker Compose, or a compatible `docker` command/socket. `scripts/start.sh`
   calls `docker compose` for PostgreSQL and shipped Bots; Podman works only when it is exposed
   through that Docker-compatible command path.
-- Node/npx, only to fetch the CopilotKit key from the CLI.
-- A CopilotKit account. Free is enough.
 - A model credential. The current source tree supports OpenAI or Anthropic for the example built-in
   Bots and the LangGraph framework Bot. Use the provider-specific key and model variables below.
   Google is supported by the LangGraph framework Bot, not by the example built-in package model.
 
-The default OpenAI clone setup needs only two values from the person:
+The default OpenAI clone setup needs only one value from the person:
 
-  1. INTELLIGENCE_API_KEY        the `cpk-...` runtime key
-  2. OPENAI_API_KEY              the model credential
+  1. OPENAI_API_KEY              the model credential
 
 `scripts/start.sh` fills the local secrets it owns: COMPUTER_TOKEN and WORKER_SHARED_SECRET have dev
 defaults, and MANAGED_AGENT_TOKEN plus AGENT_TOOL_TOKEN are generated and written back into `.env`.
@@ -116,14 +113,7 @@ The clone commands are:
 
   cp .env.example .env
 
-  npx --yes copilotkit@latest login           # opens a browser
-  npx --yes copilotkit@latest project select  # prints the cpk-... runtime key
-
-There is no licence step. `copilotkit license` still exists for self-hosted Intelligence, and
-COPILOTKIT_LICENSE_TOKEN is honoured when set, but managed Intelligence needs only the cpk- key.
-
-Put the `cpk-...` key in `.env` as INTELLIGENCE_API_KEY. For the default OpenAI path, put the
-OpenAI model key in OPENAI_API_KEY. For Anthropic, set all three lines together:
+Put the OpenAI model key in OPENAI_API_KEY. For Anthropic, set all three lines together:
 
   ANTHROPIC_API_KEY=...
   BOT_PROVIDER=anthropic
@@ -148,19 +138,14 @@ computer. Pass `--keep-computers` only when they deliberately want browser sessi
 Nothing is deleted either way: the database, files and browser profiles are volumes.
 
 WHAT YOU MUST NOT DO FOR THEM
-- Do not run `copilotkit login`; it signs in as them. Tell them to run it.
 - Do not put their API keys into any file you did not just tell them about, and do not echo
   values back.
-- Do not change INTELLIGENCE_API_URL or INTELLIGENCE_GATEWAY_WS_URL unless they run Intelligence themselves.
 
 FAILURES YOU WILL ACTUALLY SEE
 The server refuses to start rather than running half-configured. The message names the variable.
 
-- "CopilotKit Intelligence is required and is not configured. Missing: ..."
-  Almost always INTELLIGENCE_API_KEY was skipped.
-
-- "No identity provider is configured. Set GOOGLE_OAUTH_* ... or set OPENBOT_SINGLE_USER=true"
-  `.env.example` already sets OPENBOT_SINGLE_USER=true. On a laptop, put it back. On a shared URL,
+- "No identity provider is configured. Set GOOGLE_OAUTH_* ... or set REMII_SINGLE_USER=true"
+  `.env.example` already sets REMII_SINGLE_USER=true. On a laptop, put it back. On a shared URL,
   configure real sign-in instead.
 
 - "KEY_ENCRYPTION_KEY must be a base64-encoded 32-byte key"

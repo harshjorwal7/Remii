@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { retireReplacedKey } from "../src/agents/auth-header";
+
 import { createAgentRoutes } from "../src/agents/routes";
 import type { AuditEventInput, AuditStore } from "../src/audit";
 import type { AppVariables } from "../src/auth/guards";
@@ -17,7 +17,7 @@ import type { AppVariables } from "../src/auth/guards";
  * first question asked in an incident and the trail could not answer it.
  */
 
-const ACTOR = { id: "u1", email: "admin@openbot.test", role: "admin" } as const;
+const ACTOR = { id: "u1", email: "admin@remii.test", role: "admin" } as const;
 
 function app(overrides: Record<string, unknown> = {}) {
   const rows: AuditEventInput[] = [];
@@ -43,18 +43,25 @@ function app(overrides: Record<string, unknown> = {}) {
     await next();
   };
 
-  const routes = createAgentRoutes(store, requireUser, true, auditStore);
+  const routes = createAgentRoutes(store, requireUser, auditStore);
   return { rows, hono: new Hono().route("/api/agents", routes) };
 }
 
 type MiddlewareHandler = Parameters<typeof createAgentRoutes>[1];
 
-/** Everything the input parser insists on, so a test about auditing is not a test about validation. */
+/**
+ * Everything the input parser insists on, so a test about auditing is not a test about validation.
+ *
+ * `private`, not `public`. Public sharing was removed — the parser answers `visibility: "public"`
+ * with a 400 before it reaches the audit store — so every request here was refused at the edge and
+ * `rows` stayed empty. That reads as "nothing is audited" rather than as "the request never got that
+ * far", which is the failure this file exists to catch.
+ */
 const VALID = {
   name: "Sales",
   title: "Sales assistant",
   roleDescription: "Helps with sales questions.",
-  visibility: "public",
+  visibility: "private",
 };
 
 const json = (body: Record<string, unknown>) => ({
@@ -64,31 +71,57 @@ const json = (body: Record<string, unknown>) => ({
 });
 
 describe("what a Bot is, on the trail", () => {
-  test("creating one records the endpoint it was pointed at", async () => {
+  test("creating one records who made it", async () => {
     const { rows, hono } = app();
 
-    await hono.request(
-      "http://t/api/agents",
-      json({ endpoint: "https://partner.example/ag-ui" }),
-    );
+    await hono.request("http://t/api/agents", json({}));
 
     expect(rows[0]?.eventType).toBe("bot.created");
     expect(rows[0]?.targetId).toBe("bot-1");
-    expect(rows[0]?.payload.endpoint).toBe("https://partner.example/ag-ui");
+    expect(rows[0]?.payload.name).toBe(VALID.name);
     expect(rows[0]?.actorUserId).toBe("u1");
   });
 
-  test("repointing one records where to", async () => {
-    // The dangerous edit. It decides which host conversation content is sent to.
+  /*
+   * WAS "creating one records the endpoint it was pointed at" and "repointing one records where to",
+   * the second of which this file called the dangerous edit because it decides which host
+   * conversation content is sent to.
+   *
+   * Both are gone rather than unrecorded: nobody can point a Bot at an address any more. Every
+   * coworker runs on the engine this deployment runs, so there is no host for a create to record and
+   * no repointing for an edit to perform. Asserted as a refusal below, because "the trail stopped
+   * recording it" and "it can no longer happen" look identical from outside.
+   */
+  test.each([
+    ["create", "http://t/api/agents", "POST"],
+    ["edit", "http://t/api/agents/bot-1", "PATCH"],
+  ])(
+    "a %s that names an address is refused, and writes nothing",
+    async (_which, path, method) => {
+      const { rows, hono } = app();
+
+      const response = await hono.request(path, {
+        ...json({ endpoint: "https://partner.example/ag-ui" }),
+        method,
+      });
+
+      expect(response.status).toBe(400);
+      expect(rows).toEqual([]);
+    },
+  );
+
+  test("a create that carries a key is refused, and writes nothing", async () => {
     const { rows, hono } = app();
 
-    await hono.request("http://t/api/agents/bot-1", {
-      ...json({ endpoint: "https://elsewhere.example/ag-ui" }),
-      method: "PATCH",
+    const response = await hono.request("http://t/api/agents", {
+      ...json({
+        auth: { header: "Authorization", value: "Bearer sk-do-not-log-me" },
+      }),
+      method: "POST",
     });
 
-    expect(rows[0]?.eventType).toBe("bot.updated");
-    expect(rows[0]?.payload.endpoint).toBe("https://elsewhere.example/ag-ui");
+    expect(response.status).toBe(400);
+    expect(rows).toEqual([]);
   });
 
   /*
@@ -108,16 +141,25 @@ describe("what a Bot is, on the trail", () => {
     expect(rows[0]?.payload.visibility).toBe("private");
   });
 
-  test("opening one to the whole deployment says so", async () => {
+  test("opening one to the whole deployment is refused, and nothing is written", async () => {
+    /*
+     * WAS "opening one to the whole deployment says so", asserting an audited `bot.updated` with
+     * `visibility: "public"`. Public sharing was removed: the parser refuses `public` before the
+     * audit store is reached, so there is no row to record and — more to the point — no way for this
+     * deployment to make a Bot visible to the whole of it.
+     *
+     * Asserted as a 400 with an empty trail rather than deleted, because "sharing is gone" and
+     * "sharing was quietly re-allowed but stopped being audited" look identical from the outside.
+     */
     const { rows, hono } = app();
 
-    await hono.request("http://t/api/agents/bot-1", {
+    const response = await hono.request("http://t/api/agents/bot-1", {
       ...json({ visibility: "public" }),
       method: "PATCH",
     });
 
-    expect(rows[0]?.eventType).toBe("bot.updated");
-    expect(rows[0]?.payload.visibility).toBe("public");
+    expect(response.status).toBe(400);
+    expect(rows).toEqual([]);
   });
 
   test("an edit that leaves it private says that too", async () => {
@@ -131,21 +173,6 @@ describe("what a Bot is, on the trail", () => {
     });
 
     expect(rows[0]?.payload.visibility).toBe("private");
-  });
-
-  test("a replaced key is noted and never recorded", async () => {
-    const { rows, hono } = app();
-
-    await hono.request("http://t/api/agents/bot-1", {
-      ...json({
-        endpoint: "https://partner.example/ag-ui",
-        auth: { header: "Authorization", value: "Bearer sk-do-not-log-me" },
-      }),
-      method: "PATCH",
-    });
-
-    expect(rows[0]?.payload.keyReplaced).toBe(true);
-    expect(JSON.stringify(rows[0]?.payload)).not.toContain("sk-do-not-log-me");
   });
 
   test("issuing a callback token records that, never the token", async () => {
@@ -183,7 +210,6 @@ describe("what a Bot is, on the trail", () => {
   });
 
   test("duplicating records the copy and names the original", async () => {
-    // A duplicate inherits an endpoint, so a reader needs to know a second Bot now points at it.
     const { rows, hono } = app();
 
     await hono.request("http://t/api/agents/bot-1/duplicate", {
@@ -204,7 +230,7 @@ describe("what a Bot is, on the trail", () => {
     });
 
     await hono.request("http://t/api/agents/bot-1", {
-      ...json({ endpoint: "https://partner.example/ag-ui" }),
+      ...json({ title: "Renamed" }),
       method: "PATCH",
     });
 
@@ -261,7 +287,6 @@ describe("what a Bot is, on the trail", () => {
     const routes = createAgentRoutes(
       { setHidden: async () => undefined } as never,
       requireUser,
-      true,
       failing,
     );
     const hono = new Hono<{ Variables: AppVariables }>().route(
@@ -277,77 +302,11 @@ describe("what a Bot is, on the trail", () => {
   });
 });
 
-/**
- * Rotating a key is the standard answer to a suspected leak, and it only answers it if the old one
- * stops working. Editing a Bot's key wrote a new vault row and repointed the agent at it, leaving
- * the previous one decryptable and still valid with nothing listing it.
+/*
+ * Retiring a replaced key used to live here, and it has gone with the feature rather than with a
+ * rename: a Bot could be registered against an address a person supplied and sit behind a bearer key
+ * of theirs, so rotating that key was the standard answer to a suspected leak and retiring the old
+ * one was what made that answer real. Nobody can supply either now — every coworker runs on the
+ * engine this deployment runs, authenticated with the deployment's own token — so there is no
+ * per-Bot key to rotate and nothing here left to retire.
  */
-describe("retiring the key an edit replaced", () => {
-  function vault() {
-    const revoked: string[] = [];
-    return {
-      revoked,
-      store: { revoke: async (id: string) => void revoked.push(id) },
-    };
-  }
-
-  test("revokes the one that was replaced", async () => {
-    const { revoked, store } = vault();
-
-    await retireReplacedKey(
-      store,
-      { auth: { credentialId: "old-key" } },
-      { auth: { credentialId: "new-key" } },
-    );
-
-    expect(revoked).toEqual(["old-key"]);
-  });
-
-  test("never revokes the one just stored", async () => {
-    // The direction that would be a catastrophe: the Bot would stop working the moment its key was
-    // rotated, and the leaked one would be the survivor.
-    const { revoked, store } = vault();
-
-    await retireReplacedKey(
-      store,
-      { auth: { credentialId: "same-key" } },
-      { auth: { credentialId: "same-key" } },
-    );
-
-    expect(revoked).toEqual([]);
-  });
-
-  test("does nothing when there was no key before", async () => {
-    const { revoked, store } = vault();
-
-    await retireReplacedKey(store, {}, { auth: { credentialId: "new-key" } });
-
-    expect(revoked).toEqual([]);
-  });
-
-  test("retires the key when a Bot is removed entirely", async () => {
-    // Deleting the Bot was the last chance anybody had to retire its credential.
-    const { revoked, store } = vault();
-
-    await retireReplacedKey(store, { auth: { credentialId: "old-key" } }, {});
-
-    expect(revoked).toEqual(["old-key"]);
-  });
-
-  test("a vault that refuses does not fail the edit", async () => {
-    // The new key is stored and the Bot works. This is loud and it is not fatal.
-    const store = {
-      revoke: async () => {
-        throw new Error("the vault is unavailable");
-      },
-    };
-
-    await expect(
-      retireReplacedKey(
-        store,
-        { auth: { credentialId: "old-key" } },
-        { auth: { credentialId: "new-key" } },
-      ),
-    ).resolves.toBeUndefined();
-  });
-});

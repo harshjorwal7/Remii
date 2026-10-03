@@ -1,8 +1,9 @@
+import { createDatabase } from "../../src/db/client";
 /**
  * The database integration suite must never fall back to the developer's application database.
  * `createDatabase` deliberately removes `process.env.DATABASE_URL` after opening a connection so Bun
  * cannot ignore the explicit connection parts on Windows. That means a later test that reads
- * `process.env.DATABASE_URL ?? localhost/openbot` can silently fall into the live development DB.
+ * `process.env.DATABASE_URL ?? localhost/remii` can silently fall into the live development DB.
  * Resolve one explicit test URL before opening a test pool and make the unsafe shape impossible.
  */
 let cachedTestDatabaseUrl: string | undefined;
@@ -27,7 +28,7 @@ export function testDatabaseUrlFrom(
     url = new URL(raw);
   } catch {
     throw new Error(
-      "TEST_DATABASE_URL must be a PostgreSQL URL such as postgres://openbot:openbot@localhost:5432/openbot_test.",
+      "TEST_DATABASE_URL must be a PostgreSQL URL such as postgres://remii:remii@localhost:5432/remii_test.",
     );
   }
   if (!/^postgres(?:ql)?:$/.test(url.protocol)) {
@@ -39,9 +40,9 @@ export function testDatabaseUrlFrom(
   if (!database) {
     throw new Error("TEST_DATABASE_URL must name a database.");
   }
-  if (database === "openbot") {
+  if (database === "remii") {
     throw new Error(
-      "TEST_DATABASE_URL must not point at the live openbot database. Use a dedicated database such as openbot_test.",
+      "TEST_DATABASE_URL must not point at the live remii database. Use a dedicated database such as remii_test.",
     );
   }
   return raw;
@@ -59,3 +60,20 @@ export function testDatabaseUrlFrom(
  * so. A test that wants the deadlock that pinning to one exposes asks for `{ max: 1 }` itself.
  */
 export const TEST_POOL = { max: 2 } as const;
+
+/**
+ * A test pool, one per call.
+ *
+ * A factory and not a cached handle, deliberately. Caching it was tried and it is wrong: the suite
+ * runs in a single process, so every file holds its pool for the whole run, and one shared pool put
+ * 60-odd files' transactions on one set of connections and failed 653 tests. One pool per file keeps
+ * each file's transactions to itself.
+ *
+ * What this does centralise is the URL and the pool size, which is where the two ways of opening a
+ * test database disagreed. The suite opens 58 of them, so `max_connections` has to be high enough
+ * for all of them at once — it is set to 400, because the alternative is a suite that fails
+ * somewhere unrelated every time a file is added.
+ */
+export function testDatabase() {
+  return createDatabase(testDatabaseUrl(), TEST_POOL);
+}

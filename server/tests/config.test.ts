@@ -6,13 +6,13 @@ import { configuredAuthProviders, loadConfig } from "../src/config";
 // case builds on. Leaving it out of the base would make most of this file assert the behaviour of a
 // deployment that is not allowed to exist.
 const baseEnvironment = {
-  DATABASE_URL: "postgres://openbot:openbot@localhost:5432/openbot",
+  DATABASE_URL: "postgres://remii:remii@localhost:5432/remii",
   KEY_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
   GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
   BETTER_AUTH_SECRET: "a-long-enough-local-development-auth-secret",
   BETTER_AUTH_URL: "http://localhost:3001",
-  INITIAL_ADMIN_EMAILS: "admin@openbot.test",
+  INITIAL_ADMIN_EMAILS: "admin@remii.test",
   INTELLIGENCE_API_URL: "http://localhost:7100",
   INTELLIGENCE_GATEWAY_WS_URL: "ws://localhost:7103",
   INTELLIGENCE_API_KEY: "tenant-api-key",
@@ -51,18 +51,19 @@ const {
 } = baseEnvironment;
 
 describe("deployment configuration", () => {
-  test("resolves the Intelligence runtime, which is the only runtime", () => {
+  test("resolves the local runtime, which is the only runtime", () => {
     const config = loadConfig(baseEnvironment);
 
+    /*
+     * `runtime` is now two fields and nothing else. It used to carry an `intelligence` object with
+     * the cloud API url, the gateway socket, the tenant key and the licence token — the contract with
+     * the hosted backend, which no longer exists. The INTELLIGENCE_* variables are still accepted and
+     * IGNORED, so an env file written for the hosted backend still boots rather than failing on
+     * settings nothing reads. See `runtimeCapabilities` in config.ts.
+     */
     expect(config.runtime).toEqual({
-      mode: "intelligence",
+      mode: "local",
       durableHistory: true,
-      intelligence: {
-        apiUrl: "http://localhost:7100",
-        gatewayWsUrl: "ws://localhost:7103",
-        apiKey: "tenant-api-key",
-        licenseToken: "license-token",
-      },
     });
     expect(config.managedAgent).toEqual({
       endpoint: new URL("http://localhost:4200/ag-ui"),
@@ -82,70 +83,60 @@ describe("deployment configuration", () => {
       MANAGED_AGENT_TOKEN: baseEnvironment.MANAGED_AGENT_TOKEN,
       // Explicit, because no provider means every visitor is the administrator and a deployment has
       // to say it meant that. See single-user.test.ts.
-      OPENBOT_SINGLE_USER: "true",
+      REMII_SINGLE_USER: "true",
     });
 
     expect(config.auth).toBeUndefined();
   });
 
-  // The product does not have a mode without Intelligence, so each of these is a refusal to boot
-  // rather than a degraded capability. Named individually because a deployment that sets three of
-  // four is the likeliest real mistake, and the message has to say which one is missing.
+  /*
+   * The INTELLIGENCE_* variables are INERT.
+   *
+   * Three tests used to assert each one's absence refused to boot, and a fourth asserted that a
+   * deployment with none of them refused too — because the hosted backend they configured was
+   * mandatory. It is not any more: the runtime is local, `RuntimeCapabilities` has no field for
+   * them, and `loadConfig` ignores what it finds.
+   *
+   * The behaviour worth pinning is therefore the opposite of what it was: an env file carried over
+   * from the hosted backend boots, and boots IDENTICALLY with and without the variables. A deployment
+   * that has quietly kept them set should get the same server, not a warning and not a failure.
+   */
   test.each([
     "INTELLIGENCE_API_URL",
     "INTELLIGENCE_GATEWAY_WS_URL",
     "INTELLIGENCE_API_KEY",
-  ])("refuses to start when %s is missing", (name) => {
+  ])("ignores %s, which nothing reads any more", (name) => {
     const environment: Record<string, string | undefined> = {
       ...baseEnvironment,
     };
     delete environment[name];
 
-    expect(() => loadConfig(environment)).toThrow(
-      `CopilotKit Intelligence is required and is not configured. Missing: ${name}`,
-    );
-  });
-
-  test("starts without COPILOTKIT_LICENSE_TOKEN, because managed Intelligence no longer issues one", () => {
-    const environment: Record<string, string | undefined> = {
-      ...baseEnvironment,
-    };
-    delete environment.COPILOTKIT_LICENSE_TOKEN;
-
     const config = loadConfig(environment);
-
-    if (config.runtime.mode !== "intelligence") {
-      throw new Error("expected the Intelligence runtime");
-    }
-    expect(config.runtime.intelligence.licenseToken).toBeUndefined();
-    expect(config.runtime.intelligence.apiKey).toBe(
-      baseEnvironment.INTELLIGENCE_API_KEY,
-    );
+    expect(config.runtime).toEqual({ mode: "local", durableHistory: true });
   });
 
-  test("still forwards a licence token when a deployment sets one", () => {
+  test("boots with no INTELLIGENCE_* variables at all", () => {
+    const config = loadConfig({
+      DATABASE_URL: baseEnvironment.DATABASE_URL,
+      KEY_ENCRYPTION_KEY: baseEnvironment.KEY_ENCRYPTION_KEY,
+      MANAGED_AGENT_AG_UI_URL: baseEnvironment.MANAGED_AGENT_AG_UI_URL,
+      MANAGED_AGENT_TOKEN: baseEnvironment.MANAGED_AGENT_TOKEN,
+      REMII_SINGLE_USER: "true",
+    });
+
+    expect(config.runtime).toEqual({ mode: "local", durableHistory: true });
+  });
+
+  test("leaves no trace of the licence token on the config", () => {
+    // It used to be forwarded as `runtime.intelligence.licenseToken`. There is nowhere left to put
+    // it, and the assertion is that the projection cannot grow one back by accident.
     const config = loadConfig({
       ...baseEnvironment,
       COPILOTKIT_LICENSE_TOKEN: "self-hosted-licence",
     });
 
-    if (config.runtime.mode !== "intelligence") {
-      throw new Error("expected the Intelligence runtime");
-    }
-    expect(config.runtime.intelligence.licenseToken).toBe(
-      "self-hosted-licence",
-    );
-  });
-
-  test("refuses to start when Intelligence is absent entirely, rather than degrading", () => {
-    expect(() =>
-      loadConfig({
-        DATABASE_URL: baseEnvironment.DATABASE_URL,
-        KEY_ENCRYPTION_KEY: baseEnvironment.KEY_ENCRYPTION_KEY,
-        MANAGED_AGENT_AG_UI_URL: baseEnvironment.MANAGED_AGENT_AG_UI_URL,
-        MANAGED_AGENT_TOKEN: baseEnvironment.MANAGED_AGENT_TOKEN,
-      }),
-    ).toThrow("CopilotKit Intelligence is required and is not configured");
+    expect(config.runtime).toEqual({ mode: "local", durableHistory: true });
+    expect(JSON.stringify(config)).not.toContain("self-hosted-licence");
   });
 
   test("rejects incomplete OAuth client configuration", () => {
@@ -276,7 +267,7 @@ describe("deployment configuration", () => {
       GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
       BETTER_AUTH_SECRET: "a-long-enough-local-development-auth-secret",
       BETTER_AUTH_URL: "http://localhost:3001",
-      INITIAL_ADMIN_EMAILS: "admin@openbot.test, owner@openbot.test",
+      INITIAL_ADMIN_EMAILS: "admin@remii.test, owner@remii.test",
     });
 
     expect(config.auth).toEqual({
@@ -291,7 +282,14 @@ describe("deployment configuration", () => {
         "http://[::1]:3010",
         "http://localhost:3010",
       ],
-      initialAdminEmails: ["admin@openbot.test", "owner@openbot.test"],
+      /*
+       * No `initialAdminEmails`, even though the environment sets it and always did.
+       *
+       * There are no administrators: every account that can authenticate may sign in and its own data
+       * is the only thing it can reach. `INITIAL_ADMIN_EMAILS` is retired and IGNORED rather than
+       * honoured, because honouring it would silently grant one address power over every other user's
+       * data — which is why `loadConfig` warns about it and why this projection does not carry it.
+       */
     });
   });
 
@@ -306,11 +304,11 @@ describe("deployment configuration", () => {
   const SESSION = {
     BETTER_AUTH_SECRET: "a-long-enough-local-development-auth-secret",
     BETTER_AUTH_URL: "http://localhost:3001",
-    INITIAL_ADMIN_EMAILS: "admin@openbot.test",
+    INITIAL_ADMIN_EMAILS: "admin@remii.test",
   };
 
   /** What a deployment with no provider has to say before it is allowed to come up. */
-  const OPEN = { OPENBOT_SINGLE_USER: "true" };
+  const OPEN = { REMII_SINGLE_USER: "true" };
 
   test("enables Microsoft, and admits any account until told a directory", () => {
     const config = loadConfig({
@@ -409,15 +407,26 @@ describe("deployment configuration", () => {
    * configures sign-in without it admits everybody as a plain user and can never promote anyone.
    * Start-up is the only cheap moment to notice.
    */
-  test("refuses sign-in with nobody named as an administrator", () => {
+  test("does not ask for an administrator, because there are none", () => {
+    /*
+     * WAS "refuses sign-in with nobody named as an administrator", asserting a throw mentioning
+     * `INITIAL_ADMIN_EMAILS`. There is no administrator to name: every account that can authenticate
+     * may sign in, and its own data is the only thing it can reach.
+     *
+     * So a deployment with the variable absent boots exactly as one with it set does. The variable is
+     * retired rather than honoured precisely because honouring it would silently grant one address
+     * power over every other user's data, and `loadConfig` warns when it finds one still set.
+     */
     const { INITIAL_ADMIN_EMAILS: _none, ...withoutAdmins } = baseEnvironment;
-
-    expect(() => loadConfig(withoutAdmins)).toThrow("INITIAL_ADMIN_EMAILS");
+    const config = loadConfig(withoutAdmins);
+    expect(config.auth).toBeDefined();
+    expect(JSON.stringify(config.auth)).not.toContain("initialAdminEmails");
   });
 
   test("asks for no administrator when nothing signs anybody in", () => {
-    // One administrator either way, and no list to write. Requiring one here as well would mean a
-    // deployment had to name an administrator for a mode that has exactly one.
+    // No list to write, and no one to write it for: the single-user mode has exactly one caller and
+    // it is sovereign, so requiring an administrator name here would mean naming something that does
+    // not exist.
     expect(() => loadConfig({ ...withoutSignIn, ...OPEN })).not.toThrow();
   });
 
@@ -579,20 +588,32 @@ describe("deployment configuration", () => {
     });
   });
 
-  test("configures one shared computer", () => {
-    const config = loadConfig({
-      ...baseEnvironment,
-      AGENT_COMPUTER_URL: "http://localhost:4100",
-      COMPUTER_TOKEN: "computer-token",
-    });
+  /*
+   * A shared computer is REFUSED, and the refusal is the behaviour worth pinning.
+   *
+   * This used to assert that `AGENT_COMPUTER_URL` produced a `provider: "shared"` computer, which was
+   * true while the provider existed. Strict per-user sandboxing then removed the provider: one machine
+   * means one /workspace, one shell and one browser process for every user, so one person's files and
+   * logins are another person's. The variable is now refused at boot rather than half-honoured, and
+   * `createComputerProvider` is never handed a `SharedComputerConfig` at all.
+   *
+   * What matters is that the refusal happens BEFORE anything starts and that it names the three ways
+   * out, because the person reading it is looking at an env file they inherited and does not
+   * necessarily know which line is the problem.
+   */
+  test("refuses a shared computer, and names the three ways out", () => {
+    const attempt = () =>
+      loadConfig({
+        ...baseEnvironment,
+        AGENT_COMPUTER_URL: "http://localhost:4100",
+        COMPUTER_TOKEN: "computer-token",
+      });
 
-    expect(config.computer?.provider).toBe("shared");
-    expect(config.computer).toEqual({
-      provider: "shared",
-      baseUrl: "http://localhost:4100",
-      token: "computer-token",
-      allowPrivateHosts: false,
-    });
+    expect(attempt).toThrow("AGENT_COMPUTER_URL");
+    // The three supported providers, so the message is actionable rather than just a refusal.
+    expect(attempt).toThrow("E2B_API_KEY");
+    expect(attempt).toThrow("COMPUTER_SUPERVISOR_URL");
+    expect(attempt).toThrow("COMPUTER_SANDBOX_NAMESPACE");
   });
 
   test("leaves computers off when no provider address is configured", () => {
@@ -604,11 +625,24 @@ describe("deployment configuration", () => {
   // its own network is not forgetting to set something, it is inheriting something. Refused in
   // production for the same reason the example encryption key is: convenient locally, and an opening
   // anywhere else.
+  /*
+   * E2B throughout this block rather than the shared computer these cases used to name.
+   *
+   * `privateHostsAllowed()` is read before any provider is chosen, so the switch means the same thing
+   * to every provider, and these cases are about the switch. They used to reach it through
+   * `AGENT_COMPUTER_URL`, which no longer configures anything.
+   */
+  const privateHostsDeployment = {
+    ...baseEnvironment,
+    E2B_API_KEY: "e2b-key",
+    COMPUTER_TOKEN: "computer-token",
+  };
+
   test("refuses to start when a production deployment allows private hosts", () => {
     expect(() =>
       loadConfig({
         ...productionEnvironment,
-        AGENT_COMPUTER_URL: "http://localhost:4100",
+        E2B_API_KEY: "e2b-key",
         AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS: "true",
       }),
     ).toThrow("AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS");
@@ -622,7 +656,7 @@ describe("deployment configuration", () => {
       loadConfig({
         ...productionEnvironment,
         NODE_ENV: "production ",
-        AGENT_COMPUTER_URL: "http://localhost:4100",
+        E2B_API_KEY: "e2b-key",
         AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS: "true",
       }),
     ).toThrow("AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS");
@@ -634,7 +668,7 @@ describe("deployment configuration", () => {
     const attempt = () =>
       loadConfig({
         ...productionEnvironment,
-        AGENT_COMPUTER_URL: "http://localhost:4100",
+        E2B_API_KEY: "e2b-key",
         AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS: "true",
       });
 
@@ -645,11 +679,7 @@ describe("deployment configuration", () => {
   // The half of the matrix that was always right and has to stay right: absent means off, including
   // in the environment where the new refusal lives.
   test("starts in production when nothing asked for private hosts", () => {
-    const config = loadConfig({
-      ...productionEnvironment,
-      AGENT_COMPUTER_URL: "http://localhost:4100",
-      COMPUTER_TOKEN: "computer-token",
-    });
+    const config = loadConfig({ ...privateHostsDeployment });
 
     expect(config.computer?.allowPrivateHosts).toBe(false);
   });
@@ -666,7 +696,7 @@ describe("deployment configuration", () => {
         const config = loadConfig({
           ...baseEnvironment,
           ...(nodeEnv ? { NODE_ENV: nodeEnv } : {}),
-          AGENT_COMPUTER_URL: "http://localhost:4100",
+          E2B_API_KEY: "e2b-key",
           AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS: "true",
         });
 
@@ -712,7 +742,7 @@ describe("deployment configuration", () => {
     (value) => {
       const config = loadConfig({
         ...productionEnvironment,
-        AGENT_COMPUTER_URL: "http://localhost:4100",
+        E2B_API_KEY: "e2b-key",
         AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS: value,
       });
 
@@ -720,17 +750,21 @@ describe("deployment configuration", () => {
     },
   );
 
-  test.each([
-    ["Docker", "COMPUTER_SUPERVISOR_URL"],
-    ["shared", "AGENT_COMPUTER_URL"],
-  ] as const)("refuses an invalid %s computer provider URL", (_, urlName) => {
-    expect(() =>
-      loadConfig({
-        ...baseEnvironment,
-        [urlName]: "not a URL",
-      }),
-    ).toThrow(`${urlName} must be a valid URL`);
-  });
+  /*
+   * Only the providers that exist. `AGENT_COMPUTER_URL` used to be the second row here; the variable
+   * is refused now rather than parsed into a provider, and the refusal above covers it.
+   */
+  test.each([["Docker", "COMPUTER_SUPERVISOR_URL"]] as const)(
+    "refuses an invalid %s computer provider URL",
+    (_, urlName) => {
+      expect(() =>
+        loadConfig({
+          ...baseEnvironment,
+          [urlName]: "not a URL",
+        }),
+      ).toThrow(`${urlName} must be a valid URL`);
+    },
+  );
 });
 
 describe("accessibility", () => {
@@ -739,12 +773,12 @@ describe("accessibility", () => {
   });
 
   test.each(["true", "1"])(
-    "is off on OPENBOT_ACCESSIBILITY_DISABLED=%p",
+    "is off on REMII_ACCESSIBILITY_DISABLED=%p",
     (value) => {
       expect(
         loadConfig({
           ...baseEnvironment,
-          OPENBOT_ACCESSIBILITY_DISABLED: value,
+          REMII_ACCESSIBILITY_DISABLED: value,
         }).accessibility,
       ).toBe(false);
     },
@@ -754,12 +788,12 @@ describe("accessibility", () => {
   // else has not opted out, and silently treating it as opt-out would be a
   // setting that appears to work and does not.
   test.each(["false", "no", "", "yes"])(
-    "stays on for OPENBOT_ACCESSIBILITY_DISABLED=%p",
+    "stays on for REMII_ACCESSIBILITY_DISABLED=%p",
     (value) => {
       expect(
         loadConfig({
           ...baseEnvironment,
-          OPENBOT_ACCESSIBILITY_DISABLED: value,
+          REMII_ACCESSIBILITY_DISABLED: value,
         }).accessibility,
       ).toBe(true);
     },
@@ -779,25 +813,25 @@ describe("generated interfaces", () => {
     expect(loadConfig(baseEnvironment).generativeUi).toBe(true);
   });
 
-  test.each(["true", "1"])("stay on for OPENBOT_GENERATIVE_UI=%p", (value) => {
+  test.each(["true", "1"])("stay on for REMII_GENERATIVE_UI=%p", (value) => {
     expect(
-      loadConfig({ ...baseEnvironment, OPENBOT_GENERATIVE_UI: value })
+      loadConfig({ ...baseEnvironment, REMII_GENERATIVE_UI: value })
         .generativeUi,
     ).toBe(true);
   });
 
-  test.each(["false", "0"])("are off for OPENBOT_GENERATIVE_UI=%p", (value) => {
+  test.each(["false", "0"])("are off for REMII_GENERATIVE_UI=%p", (value) => {
     expect(
-      loadConfig({ ...baseEnvironment, OPENBOT_GENERATIVE_UI: value })
+      loadConfig({ ...baseEnvironment, REMII_GENERATIVE_UI: value })
         .generativeUi,
     ).toBe(false);
   });
 
   test.each(["no", "", "yes", "TRUE", "on"])(
-    "stay on for OPENBOT_GENERATIVE_UI=%p",
+    "stay on for REMII_GENERATIVE_UI=%p",
     (value) => {
       expect(
-        loadConfig({ ...baseEnvironment, OPENBOT_GENERATIVE_UI: value })
+        loadConfig({ ...baseEnvironment, REMII_GENERATIVE_UI: value })
           .generativeUi,
       ).toBe(true);
     },
@@ -809,78 +843,66 @@ describe("generated interfaces", () => {
     expect(
       loadConfig({
         ...baseEnvironment,
-        OPENBOT_GENERATIVE_UI_DISABLED: "false",
+        REMII_GENERATIVE_UI_DISABLED: "false",
       }).generativeUi,
     ).toBe(true);
   });
 });
 
 /**
- * Naming the private addresses an agent may live at.
+ * The names every deployment already has on disk.
  *
- * The refusal cases matter as much as the parse: a list written as URLs or with a wildcard is a
- * list somebody believed was working, and finding out at the first registration that silently never
- * matches is worse than being told at boot.
+ * `OPENBOT_*` was renamed to `REMII_*`, and a rename that read only the new name would leave every
+ * existing deployment running on built-in defaults without saying so: `REMII_GENERATIVE_UI` unset
+ * means the setting is ON whatever `.env` asked for. These tests are the only thing standing between
+ * that silent reset and a deployment that believes it configured something it did not.
  */
-describe("AGENT_ENDPOINT_ALLOWED_HOSTS", () => {
-  // The suite's own base, so this describes only its subject rather than re-deriving a whole
-  // deployment and failing on whichever requirement it forgot.
-  const base = () => ({ ...baseEnvironment });
-
-  test("unset means none, which is the posture that shipped", () => {
-    expect(loadConfig(base()).agentEndpointAllowedHosts.size).toBe(0);
+describe("the pre-rebrand setting names", () => {
+  test("still switch a setting off, under the old name", () => {
+    expect(
+      loadConfig({ ...baseEnvironment, OPENBOT_GENERATIVE_UI: "false" })
+        .generativeUi,
+    ).toBe(false);
   });
 
-  test("a comma-separated list is parsed, lower-cased and trimmed", () => {
-    const hosts = loadConfig({
-      ...base(),
-      AGENT_ENDPOINT_ALLOWED_HOSTS: " Agents.Internal , 10.0.0.42:9000 ",
-    }).agentEndpointAllowedHosts;
-    expect([...hosts].sort()).toEqual(["10.0.0.42:9000", "agents.internal"]);
+  test("are read when the new name is absent", () => {
+    expect(
+      loadConfig({ ...baseEnvironment, OPENBOT_ACCESSIBILITY_DISABLED: "true" })
+        .accessibility,
+    ).toBe(false);
   });
 
-  test("an IPv6 address is stored the way the endpoint check spells it", () => {
-    // The check compares against `URL.hostname`: compressed, lower-case, in brackets. An entry kept
-    // as the operator wrote it was a line that silently never matched.
-    const hosts = loadConfig({
-      ...base(),
-      AGENT_ENDPOINT_ALLOWED_HOSTS:
-        "[0:0:0:0:0:0:0:1]:8443, [FE80::1], [::1:8443]",
-    }).agentEndpointAllowedHosts;
-    expect([...hosts].sort()).toEqual([
-      "[::1:8443]",
-      "[::1]:8443",
-      "[fe80::1]",
-    ]);
-  });
-
-  test("a bracketed entry that is not an address is refused, naming the entry", () => {
-    expect(() =>
+  test("lose to the new name when both are set", () => {
+    /*
+     * The order is the point. A deployment adding `REMII_*` beside its existing `OPENBOT_*` has to
+     * be able to change its mind, and a fallback that won over the current name would make the
+     * first rename a one-way door.
+     */
+    expect(
       loadConfig({
-        ...base(),
-        AGENT_ENDPOINT_ALLOWED_HOSTS: "[not-an-address]",
-      }),
-    ).toThrow(/must be a host/);
-    expect(() =>
-      loadConfig({ ...base(), AGENT_ENDPOINT_ALLOWED_HOSTS: "[::1]junk" }),
-    ).toThrow(/must be a host/);
-  });
-
-  test("a URL is refused, naming the entry", () => {
-    expect(() =>
+        ...baseEnvironment,
+        OPENBOT_GENERATIVE_UI: "false",
+        REMII_GENERATIVE_UI: "true",
+      }).generativeUi,
+    ).toBe(true);
+    expect(
       loadConfig({
-        ...base(),
-        AGENT_ENDPOINT_ALLOWED_HOSTS: "http://agents.internal/ag-ui",
-      }),
-    ).toThrow(/must be a host/);
+        ...baseEnvironment,
+        OPENBOT_GENERATIVE_UI: "true",
+        REMII_GENERATIVE_UI: "false",
+      }).generativeUi,
+    ).toBe(false);
   });
 
-  test("a wildcard is refused, naming the entry", () => {
-    // A pattern that widens by accident is the usual way a host check fails, so there are no
-    // patterns to get wrong.
-    expect(() =>
-      loadConfig({ ...base(), AGENT_ENDPOINT_ALLOWED_HOSTS: "*.internal" }),
-    ).toThrow(/Patterns are not accepted/);
+  test("count as unset when they are present and empty", () => {
+    // `REMII_FOO=` is a deployment that has not chosen, not one that has chosen the old name's value.
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        REMII_GENERATIVE_UI: "",
+        OPENBOT_GENERATIVE_UI: "",
+      }).generativeUi,
+    ).toBe(true);
   });
 });
 
@@ -890,9 +912,18 @@ describe("AGENT_ENDPOINT_ALLOWED_HOSTS", () => {
  * cap, and find out at the first loop.
  */
 describe("how far a Bot may hand work on", () => {
-  test("defaults to one level and three per run", () => {
+  test("defaults to two levels and three per run", () => {
+    /*
+     * WAS "defaults to one level". At one, the only delegation that worked was a single hop: a chief of
+     * staff handed to a specialist, and the second hop came back "this is already 1 Bot deep" — so a
+     * researcher who was supposed to deliver a report to a mail owner could not. The wiring was correct
+     * and the arithmetic stopped it, which reads from the conversation as the supervisor not supervising.
+     *
+     * Two is the smallest value that lets a report be gathered by one Bot and delivered by another. It
+     * is still a hard bound — it is also what stops A asks B asks C asks A.
+     */
     const config = loadConfig({ ...baseEnvironment });
-    expect(config.handoff).toEqual({ maxDepth: 1, maxPerRun: 3 });
+    expect(config.handoff).toEqual({ maxDepth: 2, maxPerRun: 3 });
   });
 
   test("a deployment can widen or switch it off", () => {
@@ -915,6 +946,152 @@ describe("how far a Bot may hand work on", () => {
     expect(() =>
       loadConfig({ ...baseEnvironment, BOT_HANDOFF_MAX_PER_RUN: "1.5" }),
     ).toThrow("BOT_HANDOFF_MAX_PER_RUN");
+  });
+});
+
+/**
+ * How big one Daytona computer is, which is a money question and therefore not left to a snapshot.
+ *
+ * The default is 2 vCPU and 2GiB because that is what a desktop with a browser on it actually uses,
+ * and because the memory comes out of an organization-wide pool every other person on the
+ * deployment shares. The number this used to get was the snapshot's own — `daytona-large` at 8GiB —
+ * so the second computer in the account failed on memory and the error named nobody.
+ */
+/**
+ * The hosted desktop on E2B: what a deployment configures, and what it gets when it configures nothing.
+ *
+ * There is no size here, and that is worth a test. Daytona's size was a decision this repository had to
+ * make and could get wrong: an unset number was not "no memory" but "whatever the snapshot has", which
+ * was 8GiB out of an organization-wide pool that every computer then competed for. E2B sizes a sandbox
+ * from its template, so there is no vCPU or memory variable to get wrong and none is invented here.
+ *
+ * What IS a decision, and is asserted here, is the template, the volume, the mount path and the idle
+ * window — the four things that change what a person gets when they open their computer.
+ */
+describe("the hosted E2B desktop", () => {
+  const e2b = {
+    ...baseEnvironment,
+    E2B_API_KEY: "e2b-key",
+    COMPUTER_TOKEN: "computer-token",
+  };
+
+  test("is selected by the presence of an E2B key, and nothing else", () => {
+    expect(loadConfig(e2b).computer).toMatchObject({ provider: "e2b" });
+    // No key means no computer, rather than a computer that cannot be reached.
+    expect(loadConfig(baseEnvironment).computer).toBeUndefined();
+  });
+
+  test("builds from the built-in desktop template", () => {
+    /*
+     * `desktop` is E2B's own, and it is the only thing that makes a screen exist: Xvfb, XFCE, x11vnc,
+     * noVNC, xdotool, scrot, ffmpeg, Chrome and Python all come from it. Verified against the live API.
+     *
+     * Worth noting because the account this was built on reports `GET /templates -> []`, which reads
+     * like "no desktop template is available". There is no CUSTOM template; the built-in is not listed
+     * by that endpoint and does not need to be.
+     */
+    expect(loadConfig(e2b).computer).toMatchObject({ template: "desktop" });
+  });
+
+  test("a deployment can name a different template", () => {
+    expect(
+      loadConfig({ ...e2b, E2B_TEMPLATE: "our-desktop" }).computer,
+    ).toMatchObject({
+      template: "our-desktop",
+    });
+    // Empty falls back rather than producing a create call for a template named "".
+    expect(loadConfig({ ...e2b, E2B_TEMPLATE: "  " }).computer).toMatchObject({
+      template: "desktop",
+    });
+  });
+
+  test("puts each person's files on their own volume by default", () => {
+    // ONE volume per person, and this is where the platforms differ: Daytona mounted one shared volume
+    // at a per-user subpath and relied on the FUSE mount being scoped to that prefix. E2B mounts a
+    // volume whole, so a shared volume would put every person's desktop on one directory.
+    expect(loadConfig(e2b).computer).toMatchObject({
+      volumes: true,
+      workspaceMountPath: "/workspace",
+    });
+  });
+
+  test("can turn the volume off, and saying so has to be spelled out", () => {
+    // `false` and unset are DIFFERENT DECISIONS — one means "no persistence beyond the machine" — so
+    // only the explicit string turns it off. Anything else, including a typo, stays on: losing files is
+    // the worse of the two failures.
+    expect(loadConfig({ ...e2b, E2B_VOLUMES: "false" }).computer).toMatchObject(
+      {
+        volumes: false,
+      },
+    );
+    for (const value of ["", "true", "0", "no", "FALSE"]) {
+      expect(loadConfig({ ...e2b, E2B_VOLUMES: value }).computer).toMatchObject(
+        {
+          volumes: true,
+        },
+      );
+    }
+  });
+
+  test("can move where the volume appears", () => {
+    // It has to match what a tool's relative paths resolve against, which is why the two live in one
+    // place in the code; this is the operator's way to disagree with that.
+    expect(
+      loadConfig({ ...e2b, E2B_WORKSPACE_MOUNT: "/data" }).computer,
+    ).toMatchObject({ workspaceMountPath: "/data" });
+  });
+
+  test("pauses after ten idle minutes by default", () => {
+    /*
+     * Ten, where Daytona defaulted to seven. The window got LONGER because a pause is no longer a
+     * cold boot: Daytona's stop was a one-to-two-minute VM boot, so a short window was necessary to
+     * stop the bill. An E2B memory pause restores the desktop as it was and returns in seconds, so a
+     * person who stepped away for ten minutes comes back to their windows instead of waiting.
+     */
+    expect(loadConfig(e2b).computer).toMatchObject({ autoStopMinutes: 10 });
+  });
+
+  test("can keep a desktop always on, and zero is the way to say it", () => {
+    expect(
+      loadConfig({ ...e2b, E2B_AUTOSTOP_MINUTES: "0" }).computer,
+    ).toMatchObject({
+      autoStopMinutes: 0,
+    });
+  });
+
+  test("refuses an idle window that is not a number of minutes", () => {
+    // Refused at boot rather than coerced. A typo that became 0 would read as "keep every desktop on
+    // forever", which is the expensive direction to be wrong in and says nothing in a log.
+    expect(() => loadConfig({ ...e2b, E2B_AUTOSTOP_MINUTES: "ten" })).toThrow(
+      "E2B_AUTOSTOP_MINUTES",
+    );
+    expect(() => loadConfig({ ...e2b, E2B_AUTOSTOP_MINUTES: "-5" })).toThrow(
+      "E2B_AUTOSTOP_MINUTES",
+    );
+  });
+
+  test("no longer carries any of Daytona's sizing variables", () => {
+    /*
+     * Asserted rather than assumed, because a leftover `DAYTONA_VCPU` in a deployment's environment is
+     * silently ignored by the new code — there is no longer a size for it to set — and the honest
+     * outcome is that it stops being read at all rather than half-honoured.
+     */
+    const config = loadConfig({
+      ...e2b,
+      DAYTONA_VCPU: "8",
+      DAYTONA_MEMORY_GB: "32",
+    });
+    expect(config.computer).not.toHaveProperty("vcpu");
+    expect(config.computer).not.toHaveProperty("memoryGb");
+    // And Daytona itself is no longer a provider that can be selected at all.
+    expect(
+      () =>
+        loadConfig({
+          ...baseEnvironment,
+          DAYTONA_API_URL: "https://app.daytona.io/api",
+          DAYTONA_API_KEY: "dtn_key",
+        }).computer?.provider,
+    ).not.toBe("daytona");
   });
 });
 

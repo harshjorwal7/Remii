@@ -13,7 +13,7 @@ export const Route = createFileRoute("/_authed")({
     }
     /*
      * Somebody who has not finished onboarding goes there and nowhere else. Here rather than in
-     * `_app`, so admin and settings are behind the same gate; checked against the destination so
+     * `_app`, so _app and settings are behind the same gate; checked against the destination so
      * the onboarding route itself stays reachable.
      */
     if (needsOnboarding(user) && location.pathname !== "/onboarding") {

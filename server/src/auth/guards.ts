@@ -1,15 +1,27 @@
-import { eq } from "drizzle-orm";
-import type { Context, MiddlewareHandler } from "hono";
-import type { Database } from "../db/client";
-import { userRoles } from "../db/schema";
-import type { OpenBotRole } from "./roles";
+import type { MiddlewareHandler } from "hono";
+
+/**
+ * Individual-user SaaS has no roles: every signed-in person is exactly one
+ * thing, a user, sovereign over their own data. There is no administrator to
+ * be, no override to hold, and no screen that needs one. The field stays on
+ * the actor so every call site keeps compiling, but the only value it can
+ * ever carry is `"user"` — an `"admin"` is unrepresentable, which is what
+ * makes every admin bypass in the codebase dead by construction.
+ */
+export type RemiiRole = "user";
 
 export type AuthenticatedActor = {
   id: string;
   email: string;
   name?: string | null;
   image?: string | null;
-  role: OpenBotRole;
+  role: RemiiRole;
+  /**
+   * Whether the address was verified. Absent means unknown (legacy SSO
+   * actors); gates that need proof (sandbox provisioning) treat absent as
+   * unverified.
+   */
+  emailVerified?: boolean;
 };
 
 export type AuthService = {
@@ -29,30 +41,12 @@ export type AuthService = {
   };
 };
 
-export type RoleRepository = {
-  rolesForUser: (userId: string) => Promise<OpenBotRole[]>;
-};
-
 export type AppVariables = {
   actor: AuthenticatedActor;
 };
 
-export function createRoleRepository(database: Database): RoleRepository {
-  return {
-    rolesForUser: async (userId) => {
-      const records = await database
-        .select({ role: userRoles.role })
-        .from(userRoles)
-        .where(eq(userRoles.userId, userId));
-
-      return records.map((record) => record.role);
-    },
-  };
-}
-
 export function createRequireUser(
   auth: AuthService,
-  roleRepository: RoleRepository,
 ): MiddlewareHandler<{ Variables: AppVariables }> {
   return async (context, next) => {
     const session = await auth.api.getSession({
@@ -64,32 +58,16 @@ export function createRequireUser(
       return context.json({ error: "Authentication required." }, 401);
     }
 
-    const roles = await roleRepository.rolesForUser(session.user.id);
-    const role = roles.includes("admin")
-      ? "admin"
-      : roles.includes("user")
-        ? "user"
-        : undefined;
-
-    if (!role) {
-      return context.json({ error: "Authorization required." }, 403);
-    }
-
+    // Signed in is the whole bar. Authorization is per-row further down:
+    // every query carries the actor's id, so one user can never reach
+    // another's data, and there is no role that overrides it.
     context.set("actor", {
       id: session.user.id,
       email: session.user.email,
       name: session.user.name,
       image: session.user.image,
-      role,
+      role: "user",
     });
     await next();
   };
-}
-
-export function requireAdmin(context: Context<{ Variables: AppVariables }>) {
-  if (context.var.actor.role !== "admin") {
-    return context.json({ error: "Administrator access required." }, 403);
-  }
-
-  return undefined;
 }

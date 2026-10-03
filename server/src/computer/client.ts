@@ -1,3 +1,4 @@
+import { computerBotIdSignature } from "../../../shared/computer-token";
 import type { NavigateResult } from "./schema";
 import { checkNavigationTarget } from "./target";
 
@@ -103,6 +104,14 @@ export interface ComputerTransport {
     caller?: AbortSignal,
     /** Overrides the transport's own deadline for this one call. */
     timeoutMs?: number,
+    /**
+     * The secret for THIS computer, when the provider mints one per
+     * (user, Bot) computer. Strict per-user sandboxing: the deployment-wide
+     * token would open every computer, so the gateway passes the token
+     * derived for the computer it just located. Absent, the transport's own
+     * token is used.
+     */
+    token?: string,
   ): Promise<T>;
   post<T>(
     baseUrl: string,
@@ -112,11 +121,13 @@ export interface ComputerTransport {
     caller?: AbortSignal,
     /** Overrides the transport's own deadline for this one call. */
     timeoutMs?: number,
+    token?: string,
   ): Promise<T>;
   navigate(
     baseUrl: string,
     botId: string,
     url: string,
+    token?: string,
   ): Promise<NavigateResult>;
 }
 
@@ -139,6 +150,7 @@ export function createComputerTransport(
     init?: RequestInit,
     caller?: AbortSignal,
     timeoutMsOverride?: number,
+    tokenOverride?: string,
   ): Promise<T> {
     if (caller?.aborted) {
       throw new ComputerStoppedError("The action was stopped.");
@@ -161,9 +173,23 @@ export function createComputerTransport(
         ...init,
         headers: {
           ...(init?.headers as Record<string, string> | undefined),
-          "x-openbot-bot-id": botId,
+          "x-remii-bot-id": botId,
+          /*
+           * Signed, so a computer holding the DEPLOYMENT token can tell a real Bot id from a
+           * header a caller made up. A computer holding a per-instance token is already scoped to
+           * one Bot and does not need this, but sending it always keeps the two modes on one code
+           * path. See `computerBotIdSignature` for why the header alone was not an identity.
+           */
           ...(options.token
-            ? { "x-openbot-computer-token": options.token }
+            ? {
+                "x-remii-bot-id-signature": computerBotIdSignature(
+                  options.token,
+                  botId,
+                ),
+              }
+            : {}),
+          ...((tokenOverride ?? options.token)
+            ? { "x-remii-computer-token": tokenOverride ?? options.token }
             : {}),
         },
         signal: caller
@@ -207,6 +233,7 @@ export function createComputerTransport(
     payload: unknown,
     caller?: AbortSignal,
     timeoutMs?: number,
+    token?: string,
   ): Promise<T> {
     return call<T>(
       baseUrl,
@@ -219,6 +246,7 @@ export function createComputerTransport(
       },
       caller,
       timeoutMs,
+      token,
     );
   }
 
@@ -226,6 +254,7 @@ export function createComputerTransport(
     baseUrl: string,
     botId: string,
     url: string,
+    token?: string,
   ): Promise<NavigateResult> {
     const verdict = checkNavigationTarget(url, {
       allowPrivateHosts: options.allowPrivateHosts,
@@ -233,9 +262,15 @@ export function createComputerTransport(
     if (!verdict.allowed) {
       throw new NavigationRefusedError(verdict.reason);
     }
-    return post<NavigateResult>(baseUrl, botId, "/navigate", {
-      url: verdict.url,
-    });
+    return post<NavigateResult>(
+      baseUrl,
+      botId,
+      "/navigate",
+      { url: verdict.url },
+      undefined,
+      undefined,
+      token,
+    );
   }
 
   return { call, post, navigate };

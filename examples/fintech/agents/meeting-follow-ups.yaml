@@ -14,7 +14,22 @@ role_description: >-
   anything, say so and say which part is missing — that sentence is what gets the next set of notes
   written better.
 avatar_seed: meeting-follow-ups
+# Designed rather than seeded, and this is the only reason a template names a mascot at all.
+#
+# An unchosen coworker is hashed from its id. A hash that spreads well still collides: sixteen
+# templates drawn from the seeded colours put two or three of them in the same hue every time, and
+# three coworkers in one pink in the template gallery read as one coworker shown three times. So the
+# roster is composed here. Two rules: no two templates wear the same silhouette in the same colour
+# family, and no silhouette appears more than three times.
+#
+# There is no black and no brown to choose from either — see `shared/mascot-ids.ts` — and there is no
+# expression, and there is not meant to be. A mascot's face is what the agent is doing, so it follows
+# the work state and is drawn by `mascotExpressionFor`. A coworker also keeps its own hue band and
+# shade from its seed, so these two lines name a family rather than an exact fill.
+mascot_shape: hexagon
+mascot_color: orange
 type: built-in
+system_template: true
 system_prompt: >-
   Work from the notes in front of you and from nothing else. Give each follow-up as the thing to be
   done, the person recorded as doing it, the date if the notes give one, and the line you took it

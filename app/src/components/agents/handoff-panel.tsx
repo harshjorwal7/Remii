@@ -141,6 +141,7 @@ export function HandoffPanel({ agentId }: { agentId: string }) {
                 <AbstractAvatar
                   name={candidate.name}
                   seed={candidate.avatarSeed}
+                  mascot={candidate.mascot}
                   size={28}
                 />
               </ItemMedia>
@@ -178,7 +179,7 @@ export function HandoffPanel({ agentId }: { agentId: string }) {
 
       {canGrant ? null : (
         <p className="text-muted-foreground text-xs">
-          An administrator decides which Bots may be asked.
+          Select which Bots may be asked.
         </p>
       )}
     </section>

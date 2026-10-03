@@ -4,7 +4,6 @@ import type { BotAccessCheck } from "../agents/profile-policy";
 import type { AuditStore } from "../audit";
 import { recordAuditEvent } from "../audit";
 import type { AppVariables } from "../auth/guards";
-import { requireAdmin } from "../auth/guards";
 import { DATA_FUNCTIONS, dataFunction } from "./functions";
 import { ComponentNotFoundError, type ComponentStore } from "./store";
 
@@ -14,7 +13,7 @@ import { ComponentNotFoundError, type ComponentStore } from "./store";
  * The audit table has a foreign key to that table, so writing this id would fail the constraint and
  * lose the row entirely. Who it was is in the payload either way.
  */
-const DEV_ACTOR_EMAIL = "dev@openbot.local";
+const DEV_ACTOR_EMAIL = "dev@remii.local";
 
 /**
  * Granting, publishing and asking whether a Bot may use a component.
@@ -35,8 +34,8 @@ export function createComponentRoutes(
   auditStore: AuditStore | undefined,
   /**
    * Whether the caller may act as the Bot they named. What a Bot may draw, and the data a drawing
-   * reads, are facts about that Bot; an administrator granting one is a separate question and stays
-   * behind `requireAdmin`.
+   * reads, are facts about that Bot; granting one to it is the owner's decision, checked per
+   * route below, because there is no administrator who could grant it for them.
    */
   canUseBot: BotAccessCheck,
 ) {
@@ -235,7 +234,7 @@ export function createComponentRoutes(
      */
     for (const functionName of functions) {
       if (await store.mayCall(name, functionName)) continue;
-      const reason = `${name} has not been granted the function ${functionName}. An administrator grants each function to each component.`;
+      const reason = `${name} has not been granted the function ${functionName}. Each function is granted to a component one at a time.`;
       await audit(context, "component.function_refused", name, {
         bot: agentId,
         function: functionName,
@@ -328,7 +327,7 @@ export function createComponentRoutes(
 
     if (!(await store.mayCall(name, functionName))) {
       return refuse(
-        `${name} has not been granted the function ${functionName}. An administrator grants each function to each component.`,
+        `${name} has not been granted the function ${functionName}. Each function is granted to a component one at a time.`,
       );
     }
 
@@ -336,6 +335,7 @@ export function createComponentRoutes(
       const data = await store.callFunction(
         functionName,
         (body?.args ?? {}) as Record<string, unknown>,
+        context.var.actor.id,
       );
       await audit(context, "component.function_called", name, {
         bot: agentId,
@@ -358,60 +358,37 @@ export function createComponentRoutes(
     }
   });
 
+  /*
+   * CLOSED in individual-user SaaS: data-function grants are deployment-wide governance, and there is no administrator who
+   * could authorize changing it. It ships with the deployment. Kept as an
+   * explicit refusal rather than an unmounted path so an old screen hears why
+   * instead of 404.
+   */
   routes.post("/:name/functions", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
-    const name = context.req.param("name");
-    const body = (await context.req.json().catch(() => null)) as {
-      function?: unknown;
-    } | null;
-    const functionName =
-      typeof body?.function === "string" ? body.function : "";
-    if (!functionName || !dataFunction(functionName)) {
-      return context.json(
-        { error: "A function this deployment ships is required." },
-        400,
-      );
-    }
-
-    try {
-      await store.grantFunction(name, functionName, context.var.actor.email);
-    } catch (error) {
-      if (error instanceof ComponentNotFoundError) {
-        return context.json({ error: error.message }, 404);
-      }
-      throw error;
-    }
-
-    await audit(context, "component.function_granted", name, {
-      function: functionName,
-    });
-    return context.json({ granted: true });
+    return context.json(
+      {
+        error: "This is managed by the deployment and cannot be changed here.",
+      },
+      410,
+    );
   });
 
+  /*
+   * CLOSED in individual-user SaaS: data-function grants are deployment-wide governance, and there is no administrator who
+   * could authorize changing it. It ships with the deployment. Kept as an
+   * explicit refusal rather than an unmounted path so an old screen hears why
+   * instead of 404.
+   */
   routes.delete("/:name/functions/:function", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
-    const name = context.req.param("name");
-    const functionName = context.req.param("function");
-    // An empty function name would revoke zero rows yet answer `revoked:true` with an audit row
-    // naming nothing. Refused at the edge like the grant path.
-    if (!functionName.trim()) {
-      return context.json({ error: "A function is required." }, 400);
-    }
-    await store.revokeFunction(name, functionName);
-    await audit(context, "component.function_revoked", name, {
-      function: functionName,
-    });
-    return context.json({ revoked: true });
+    return context.json(
+      {
+        error: "This is managed by the deployment and cannot be changed here.",
+      },
+      410,
+    );
   });
 
   routes.post("/:name/grants", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     const name = context.req.param("name");
     const body = (await context.req.json().catch(() => null)) as {
       agentId?: unknown;
@@ -421,6 +398,13 @@ export function createComponentRoutes(
       typeof body?.agentId === "string" ? body.agentId.trim() : "";
     if (!agentId) {
       return context.json({ error: "The Bot is required." }, 400);
+    }
+    // The Bot being wired must be one the asker may act as: a component grant
+    // decides what that Bot may draw, so wiring somebody else's Bot is wiring
+    // somebody else's answers. "No such Bot" rather than forbidden, so the
+    // check cannot become an oracle for other people's private Bots.
+    if (!(await canUseBot(context.var.actor, agentId))) {
+      return context.json({ error: "There is no such Bot." }, 404);
     }
     try {
       await store.grant(name, agentId);
@@ -436,14 +420,14 @@ export function createComponentRoutes(
   });
 
   routes.delete("/:name/grants/:agentId", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     const name = context.req.param("name");
     const agentId = context.req.param("agentId");
     // Revoking `"   "` would delete zero rows yet answer `revoked:true` with an audit row.
     if (!agentId.trim()) {
       return context.json({ error: "The Bot is required." }, 400);
+    }
+    if (!(await canUseBot(context.var.actor, agentId))) {
+      return context.json({ error: "There is no such Bot." }, 404);
     }
     try {
       await store.revoke(name, agentId, context.var.actor.email);
@@ -457,78 +441,38 @@ export function createComponentRoutes(
     return context.json({ revoked: true });
   });
 
+  /*
+   * CLOSED in individual-user SaaS: publication decides what every Bot on the deployment may draw, and there is no administrator who
+   * could authorize changing it. It ships with the deployment. Kept as an
+   * explicit refusal rather than an unmounted path so an old screen hears why
+   * instead of 404.
+   */
   routes.post("/:name/publication", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
-    const name = context.req.param("name");
-    const body = (await context.req.json().catch(() => null)) as {
-      published?: unknown;
-    } | null;
-    /*
-     * A real boolean, not truthiness. This used to read `body?.published !== false`, so an
-     * empty body, invalid JSON, `{}`, `"no"`, `0` and `null` all evaluated to true and
-     * *published* the component with a 200 and a `component.published` audit row. A toggle
-     * that publishes on malformed input fails open on the endpoint that decides what every
-     * Bot may draw, and the sibling toggles (`PUT /routines/:id/enabled`, channel pin/busy)
-     * all answer 400 on non-boolean. Only an explicit true or false moves anything.
-     */
-    if (typeof body?.published !== "boolean") {
-      return context.json({ error: "published must be true or false." }, 400);
-    }
-    const published = body.published;
-
-    try {
-      if (published) {
-        await store.publish(name, context.var.actor.email);
-      } else {
-        await store.unpublish(name, context.var.actor.email);
-      }
-    } catch (error) {
-      if (error instanceof ComponentNotFoundError) {
-        return context.json({ error: error.message }, 404);
-      }
-      throw error;
-    }
-
-    await audit(
-      context,
-      published ? "component.published" : "component.unpublished",
-      name,
-      {},
+    return context.json(
+      {
+        error: "This is managed by the deployment and cannot be changed here.",
+      },
+      410,
     );
-    return context.json({ published });
   });
 
   /**
    * Edit the draft. Changes nothing a model can see until it is published, which is the point of
    * having a draft at all.
    */
+  /*
+   * CLOSED in individual-user SaaS: a compiled component’s description is deployment-wide content, and there is no administrator who
+   * could authorize changing it. It ships with the deployment. Kept as an
+   * explicit refusal rather than an unmounted path so an old screen hears why
+   * instead of 404.
+   */
   routes.put("/:name/draft", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
-    const name = context.req.param("name");
-    const body = (await context.req.json().catch(() => null)) as {
-      description?: unknown;
-    } | null;
-    const description =
-      typeof body?.description === "string" ? body.description.trim() : "";
-    if (!description) {
-      return context.json({ error: "A description is required." }, 400);
-    }
-
-    try {
-      await store.saveDraft(name, description, context.var.actor.email);
-    } catch (error) {
-      if (error instanceof ComponentNotFoundError) {
-        return context.json({ error: error.message }, 404);
-      }
-      throw error;
-    }
-
-    await audit(context, "component.draft_saved", name, {});
-    return context.json({ saved: true });
+    return context.json(
+      {
+        error: "This is managed by the deployment and cannot be changed here.",
+      },
+      410,
+    );
   });
 
   return routes;

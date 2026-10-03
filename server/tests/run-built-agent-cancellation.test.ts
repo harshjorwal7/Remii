@@ -2,7 +2,6 @@ import { expect, spyOn, test } from "bun:test";
 import { EventType, HttpAgent } from "@ag-ui/client";
 import type { AbstractAgent, BaseEvent, RunAgentInput } from "@ag-ui/client";
 import { LLMock } from "@copilotkit/aimock";
-import { BuiltInAgent } from "@copilotkit/runtime/v2";
 import { z } from "zod";
 import {
   buildAgents,
@@ -10,6 +9,7 @@ import {
   type RuntimeModel,
   type ToolSelection,
 } from "../src/copilot";
+import { RemiLoopAgent } from "../src/remi/loop-agent";
 import type { GrantedTool } from "../src/plugins/tools";
 import { createModelCompleter } from "../src/routing/model";
 
@@ -291,7 +291,11 @@ test("Stop after the build still aborts the inner agent and its model HTTP conne
   await using endpoint = await selectorEndpoint(f.llm, "final");
   process.env.OPENAI_BASE_URL = endpoint.url;
   const agent = await f.agent(undefined, async () => []);
-  const abort = spyOn(BuiltInAgent.prototype, "abortRun");
+  // Spied on the loop, not on the CopilotKit `BuiltInAgent` this used to name. That wrapper is
+  // gone — the Remi loop replaced it — so the spy sat on a class no run ever built, which is why
+  // this assertion reported zero calls on a cancellation that demonstrably happened. A test that
+  // watches the wrong prototype fails silently in the direction that looks like a product bug.
+  const abort = spyOn(RemiLoopAgent.prototype, "abortRun");
   const run = observe(agent);
   try {
     await bounded(endpoint.entered.promise, "request arrival");

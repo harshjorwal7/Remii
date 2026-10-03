@@ -24,7 +24,7 @@ import { createComposioClient } from "../src/plugins/composio-adapter";
  * narrowed by a runtime check that says what was missing, not by a cast that asserts it was there.
  *
  * SKIPPED WITHOUT A KEY, so CI and a contributor with no Composio account are unaffected. Run it
- * deliberately: `OPENBOT_LIVE_COMPOSIO=1 COMPOSIO_API_KEY=... bun test tests/composio-live.test.ts`.
+ * deliberately: `REMII_LIVE_COMPOSIO=1 COMPOSIO_API_KEY=... bun test tests/composio-live.test.ts`.
  *
  * IT READS AND IT FAILS ON PURPOSE. Every action it calls is a read; the user id it calls for is one
  * nobody has connected, and the one action it calls that is allowed to reach a third party is a
@@ -32,10 +32,10 @@ import { createComposioClient } from "../src/plugins/composio-adapter";
  * the failure is the assertion.
  */
 const key = process.env.COMPOSIO_API_KEY?.trim();
-const live = process.env.OPENBOT_LIVE_COMPOSIO === "1" && Boolean(key);
+const live = process.env.REMII_LIVE_COMPOSIO === "1" && Boolean(key);
 
 /** A user id nobody has connected, so no call below can reach an account that belongs to somebody. */
-const NOBODY = "openbot-live-test-nobody";
+const NOBODY = "remii-live-test-nobody";
 
 /**
  * The vendor's own no-auth example action, and a record it cannot find.
@@ -46,7 +46,7 @@ const NOBODY = "openbot-live-test-nobody";
  * calls, so a toolkit that stops being no-auth says so instead of quietly asking for a connection.
  */
 const NO_AUTH_ACTION = "HACKERNEWS_GET_USER";
-const NO_SUCH_RECORD = "openbot-live-test-no-such-hacker-news-user";
+const NO_SUCH_RECORD = "remii-live-test-no-such-hacker-news-user";
 
 describe.skipIf(!live)("Composio, for real", () => {
   // Constructed inside each test rather than here, because Bun evaluates the body of a skipped
@@ -76,15 +76,35 @@ describe.skipIf(!live)("Composio, for real", () => {
     expect(actions.length).toBeGreaterThan(50);
     expect(actions.every((action) => Boolean(action.version))).toBe(true);
 
-    // The classifier's fail-closed branch should be a guard against the future, not the present. If
-    // this ever fails, unlabelled actions have started arriving and the branch is now load-bearing.
+    /*
+     * THE VENDOR HAS SINCE SHIPPED UNLABELLED ACTIONS, so THIS IS NO LONGER A GUARD AGAINST THE
+     * FUTURE — IT IS THE PRESENT, AND IT IS LOAD-BEARING.
+     *
+     * This used to assert that every Gmail action carries `readOnlyHint` or `destructiveHint`,
+     * because a measurement across Gmail, Linear, Calendar, Notion and Slack had found none without
+     * one. The vendor has added actions since — `GMAIL_UPDATE_DRAFT` arrives tagged
+     * `["important", "openWorldHint", "updateHint", "messages"]`, with nothing about effect on it at
+     * all — so the assertion was measuring the vendor's labelling discipline rather than our code.
+     *
+     * What we own is the direction of the fallback, not the vendor's labels. An action carrying no
+     * behavioural hint must read as a WRITE, because a write asks the person and a read does not;
+     * `updateHint` is deliberately not consulted for this, since treating "update" as harmless is
+     * exactly the call that should need asking about. So the class of unlabelled actions is now
+     * asserted directly, every time, against whatever the vendor currently ships — which is a
+     * stronger claim than the one it replaced: it holds for labelled and unlabelled alike.
+     */
     const unlabelled = actions.filter(
       (action) =>
         !(action.tags ?? []).some(
           (tag) => tag === "readOnlyHint" || tag === "destructiveHint",
         ),
     );
-    expect(unlabelled).toEqual([]);
+    for (const action of unlabelled) {
+      expect({
+        slug: action.slug,
+        effect: effectOf(action.tags).effect,
+      }).toEqual({ slug: action.slug, effect: "write" });
+    }
 
     const reads = actions.filter(
       (action) => effectOf(action.tags).effect === "read",

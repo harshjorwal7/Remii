@@ -2,24 +2,16 @@
 
 ## Setup
 
-Install Docker, [Bun](https://bun.sh) 1.3+, `lsof`, `python3`, `openssl`, and `curl`. The
-Intelligence provisioning below also needs `npx` (Node); `scripts/start.sh` uses `openssl` to mint
-the generated secrets on a first run.
+Install Docker, [Bun](https://bun.sh) 1.3+, `lsof`, `python3`, `openssl`, and `curl`.
+`scripts/start.sh` uses `openssl` to mint the generated secrets on a first run.
 
 ```sh
 cp .env.example .env
 bun install
 ```
 
-Provision CopilotKit Intelligence after `.env` exists:
-
-```sh
-npx --yes copilotkit@latest login
-npx --yes copilotkit@latest project select
-```
-
-Put the `cpk-...` runtime key from `project select` in `.env` as
-`INTELLIGENCE_API_KEY`. There is no licence step. Then add `OPENAI_API_KEY`.
+Add `OPENAI_API_KEY` (or the provider you configured) to `.env`. Threads live in
+PostgreSQL — there is no cloud service to provision and no key to fetch.
 
 Start the stack:
 
@@ -31,19 +23,33 @@ bash scripts/start.sh
 
 Use `bash scripts/start.sh` for the full local stack. It starts Docker services, applies migrations, starts the API server, the app, and the routine worker, and verifies health routes.
 
-Use `bash scripts/stop.sh` to take it down: the app, the routine worker, the API server, the Docker services, and each Bot's computer, which the supervisor makes rather than compose and which therefore outlives `docker compose down`. Pass `--keep-computers` to leave those browsers signed in. Nothing is deleted either way.
+Use `bash scripts/stop.sh` to take it down: the app, the routine worker, the API server and the Docker services. Nobody's computer is stopped, because nobody's computer is here — a computer is an E2B sandbox and the API server's idle sweep stops it. Nothing is deleted either way.
 
-Use `bun run dev` only when you want the app and API server without starting the Docker Bots and computers.
+### Talking to a computer while you work on it
+
+`server/scripts/probe-e2b-desktop.ts` builds one sandbox with the provisioner's own parameters,
+asks Computer Use for its status, stops it, wakes it, screenshots it again, and deletes it. It prints
+`RESULT: the desktop works` or does not. Run it with `E2B_API_KEY` in the environment:
+
+```sh
+bun --env-file=.env server/scripts/probe-e2b-desktop.ts
+```
+
+It costs a sandbox for a minute or two, so it belongs to a change that touched the computer, not to a
+routine check. Note the second half: a desktop that creates and screenshots cleanly and then cannot
+be woken is the failure that matters most, and it is invisible to anything that only creates one.
+
+Use `bun run dev` only when you want the app and API server without starting the Docker Bots.
 
 | Service           | Port                       |
 | ----------------- | -------------------------- |
 | `app`             | 3010                       |
 | `server`          | 3001                       |
-| `agent-computer`  | 4100                       |
 | `agent-bot`       | 4200                       |
 | `agent-langgraph` | 4201                       |
-| `supervisor`      | 4500 host / 4300 container |
 | PostgreSQL        | 5432                       |
+
+A computer is an E2B sandbox and has no port on this host.
 
 `start.sh` leaves existing matching services alone and reports when a port is held by another process.
 
@@ -113,9 +119,9 @@ bun run test
 bun run build
 ```
 
-Integration tests expect a PostgreSQL database with pgvector. Point `TEST_DATABASE_URL` at a dedicated database such as `postgres://openbot:openbot@localhost:5432/openbot_test` before running them.
+Integration tests expect a PostgreSQL database with pgvector. Point `TEST_DATABASE_URL` at a dedicated database such as `postgres://remii:remii@localhost:5432/remii_test` before running them.
 
-They refuse to use the application `openbot` database. `DATABASE_URL` is still the application setting, and the database client removes it from the process environment after opening a connection to preserve the Windows Bun connection fix, so tests use `TEST_DATABASE_URL` as their immutable fixture address. Running them against a deployment you are using puts test Bots in its audit trail and its activity reports, so create a separate database and migrate that before running the integration suite.
+They refuse to use the application `remii` database. `DATABASE_URL` is still the application setting, and the database client removes it from the process environment after opening a connection to preserve the Windows Bun connection fix, so tests use `TEST_DATABASE_URL` as their immutable fixture address. Running them against a deployment you are using puts test Bots in its audit trail and its activity reports, so create a separate database and migrate that before running the integration suite.
 
 CI uses `bun run test:ci` to verify the expected test count in addition to normal tests.
 
@@ -123,13 +129,13 @@ CI uses `bun run test:ci` to verify the expected test count in addition to norma
 
 ```sh
 bash scripts/start.sh
-export OPENBOT_SMOKE_COOKIE='better-auth.session_token=...'
+export REMII_SMOKE_COOKIE='better-auth.session_token=...'
 bun run test:smoke
 ```
 
 It drives one journey over HTTP against the running stack, so it covers the joins the rest of the
-suite cannot reach: server to supervisor to computer, the gateway deciding before the browser acts,
-and the audit row landing. Point it elsewhere with `OPENBOT_API_URL`. Without a deployment it is
+suite cannot reach: server to a real computer, the gateway deciding before the browser acts, and the
+audit row landing. Point it elsewhere with `REMII_API_URL`. Without a deployment it is
 skipped by `bun run test` and says what to start when asked for by name.
 
 The session is not optional and not a convenience. Every route the journey proves is behind
@@ -139,21 +145,19 @@ deployment under test, from DevTools under Application, Cookies. It is a credent
 person's reach: it belongs in the environment of the run, not in a file or a pull request comment.
 Asked for without it, the run stops before the first test and names the variable.
 
-`bun run test:live-screen` is separate for a related reason and needs no deployment, only this
-directory's own dependencies:
+### There is no `test:live-screen`
 
-```sh
-cd agent-computer && bun install
-cd .. && bun run test:live-screen
-```
+It used to be here, and it drove a real Chromium through `agent-computer/src/index.ts`: a socket
+closing mid-launch, a second connection taking the screen, the wheel refusing input from the socket
+that did not own it. All of that was Playwright inside a container, and all of it went with the
+browser service.
 
-It drives the live screen against the real computer process with a real Chromium: a socket closing
-while the browser is still starting, a second connection taking the screen from the first, the wheel
-refusing input from the socket that owns it, and a browser closing by request or by the idle sweep.
-Those need `agent-computer/src/index.ts`, which imports Playwright at module scope, and `playwright`
-is declared only in `agent-computer/package.json`, which `bun install` at the root does not reach. So
-without `OPENBOT_LIVE_SCREEN=1` the files skip before importing anything, which is what keeps
-`bun run test` and CI working where that dependency was never installed.
+What replaced it is `server/tests/e2b-resume.test.ts` plus the probe script above, and the
+difference in what they can see is worth stating plainly: the unit suite proves the provisioner takes
+the right branch against a stub, and the probe proves E2B agrees. Neither can prove that a
+WebSocket behaves when a browser is half-loaded, because there is no longer a server process here
+holding that socket — the frames are sampled from E2B's remote screenshot API instead, and a bug in
+that path would show up as a blank frame rather than a dropped connection.
 
 ## Contribution checklist
 

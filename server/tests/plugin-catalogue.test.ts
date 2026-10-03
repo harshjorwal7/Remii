@@ -323,7 +323,7 @@ describe("what a tool does", () => {
   });
 });
 
-describe("a URL an administrator typed", () => {
+describe("a URL somebody typed", () => {
   test("an ordinary vendor URL is accepted", () => {
     expect(customUrlRefusal("https://mcp.example.com/mcp")).toBeNull();
   });

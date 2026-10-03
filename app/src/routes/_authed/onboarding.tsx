@@ -1,6 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
-import Avatar from "boring-avatars";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import * as React from "react";
 import useMeasure from "react-use-measure";
@@ -13,7 +12,9 @@ import { type AgentProfile, agentListQueryOptions } from "@/lib/agents/queries";
 import { currentUserQueryOptions, needsOnboarding } from "@/lib/auth/queries";
 import { appConfig } from "@/lib/generated/application-config";
 import { completeOnboardingMutationOptions } from "@/lib/onboarding/mutations";
+import { MascotAvatar } from "@/mascot/mascot-avatar";
 import { queryClient } from "@/query-client";
+import type { MascotChoice } from "../../../../shared/mascot-ids";
 
 export const Route = createFileRoute("/_authed/onboarding")({
   beforeLoad: async ({ context }) => {
@@ -51,7 +52,7 @@ function WelcomeStep() {
        * wrapper does not need to change to be safe. Taking `pointer-events-none` off to "fix" the
        * drop would turn the poster back into a live composer with nowhere to upload to.
        */}
-      <div className="max-w-md w-full mx-auto pointer-events-none mt-10">
+      <div className="mx-auto mt-10 w-full max-w-md origin-top pointer-events-none">
         <Composer
           compact
           className="scale-90"
@@ -79,10 +80,15 @@ function ComputerUseStep() {
 }
 
 /** What a roster card needs — placeholders carry these three fields and nothing more. */
-type RosterCard = Pick<AgentProfile, "id" | "name" | "avatarSeed">;
+type RosterCard = Pick<AgentProfile, "id" | "name" | "avatarSeed"> & {
+  /**
+   * The chosen mascot. Absent for the invented placeholders below, which seed from their own ids.
+   */
+  mascot?: Partial<MascotChoice> | null;
+};
 
 /**
- * Stand-ins for a deployment that has fewer than three public agents to show. Invented names on
+ * Stand-ins for a deployment that has fewer than three agents to show. Invented names on
  * purpose: they illustrate what a roster looks like without claiming any of these exist here.
  */
 const AGENTS_PLACEHOLDER: RosterCard[] = [
@@ -101,9 +107,10 @@ const AGENTS_PLACEHOLDER: RosterCard[] = [
 
 function RosterStep() {
   const { data: agents } = useQuery(agentListQueryOptions());
-  const explore =
-    agents?.filter((a) => !a.mine && a.visibility === "public") ?? [];
-  // Always three cards: real public agents first, placeholders topping up a sparse deployment.
+  // Strict per-user SaaS sandbox: no shared/public roster. Show the user's
+  // own coworkers (own + deployment templates), never another person's.
+  const explore = agents?.filter((a) => a.mine || a.isSystemTemplate) ?? [];
+  // Always three cards: real agents first, placeholders topping up a sparse deployment.
   // slice past the end is just [], so a roster of three or more takes no placeholders at all.
   const roster: Array<RosterCard & { example?: boolean }> = [
     ...explore.slice(0, 3),
@@ -127,7 +134,18 @@ function RosterStep() {
               // Dimmed and labelled, so an invented name never reads as a Bot this deployment has.
               className={`bg-card p-4 rounded-lg flex flex-row gap-4 items-center ${a.example ? "opacity-70" : ""}`}
             >
-              <Avatar name={a.avatarSeed} size={40} />
+              {/*
+               * Static on this screen, and not for economy. A person is being shown what a roster
+               * looks like, and three live mascots blinking at them is a second thing to look at
+               * while they are trying to read the names.
+               */}
+              <MascotAvatar
+                name={a.name}
+                seed={a.avatarSeed}
+                choice={a.mascot}
+                size={40}
+                animated={false}
+              />
               <div className="flex min-w-0 flex-col">
                 <h3 className="line-clamp-1 text-base font-medium tracking-tight">
                   {a.name}
@@ -186,9 +204,15 @@ function RouteComponent() {
     // The fade runs only after the completion is saved, so a failed save never fades a page the
     // person still needs — and navigation waits for the fade, so the home screen never pops in
     // over a half-faded wizard.
+    // `overflow-y-auto`, NOT `overflow-hidden`.
+    //
+    // `justify-center` on a column taller than its container pushes content off BOTH ends, and
+    // `overflow-hidden` then clipped that content with no way to reach it — on a short window the
+    // wizard's buttons were simply not on screen. `py-10` gives the centred state room to breathe
+    // and `auto` lets a tall step scroll instead of being cut.
     <motion.div
       animate={{ opacity: leaving ? 0 : 1 }}
-      className={`min-h-svh overflow-hidden flex flex-col items-center justify-center w-full ${leaving ? "pointer-events-none" : ""}`}
+      className={`flex min-h-svh w-full flex-col items-center justify-center overflow-y-auto px-4 py-10 ${leaving ? "pointer-events-none" : ""}`}
       initial={false}
       onAnimationComplete={() => {
         if (leaving) {
@@ -197,7 +221,7 @@ function RouteComponent() {
       }}
       transition={{ duration: 0.5, ease: "easeInOut" }}
     >
-      <div className="mx-auto w-full max-w-2xl px-4">
+      <div className="mx-auto w-full max-w-2xl">
         <MotionConfig transition={{ duration: 0.5, type: "spring", bounce: 0 }}>
           {/* The frame follows each pane's height, so the buttons glide instead of jumping. */}
           <motion.div

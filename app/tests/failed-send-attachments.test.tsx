@@ -14,8 +14,8 @@ import { type InfiniteData, QueryClientProvider } from "@tanstack/react-query";
 import {
   cleanup,
   fireEvent,
-  render,
   type RenderResult,
+  render,
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -65,6 +65,7 @@ const channel: AgentChannel = {
   id: "failed-send-channel",
   name: "Failed send",
   agentIds: ["failed-send-bot"],
+  mascots: {},
   threadId: "failed-send-thread",
   active: true,
   lastMessageAt: "2026-09-09T00:00:00.000Z",

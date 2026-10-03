@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Button } from "@/components/ui/button";
 import {
   type ControlState,
   readControl,
@@ -8,12 +9,13 @@ import {
   takeControl,
 } from "@/lib/computers/control";
 import {
+  openDesktopStream,
   readPageFrame,
   readScreenshot,
   type Screenshot,
 } from "@/lib/computers/screen";
 import { ChannelAvatar } from "../channels/avatar";
-import { LiveScreen } from "./live-screen";
+import { LiveScreen, type WarmedSession } from "./live-screen";
 import { useElementVisible, usePageVisible } from "./preview-visibility";
 
 /** Explicit blank-browser URLs use placeholder artwork; missing URL fields are treated as real pages. */
@@ -152,16 +154,20 @@ function NothingToSee({
           )}
         </>
       ) : problem ? (
-        <>
-          <span className="font-medium">
-            You cannot see the screen right now
-          </span>
-          <span>{problem}</span>
-          <span>
-            The assistant may still be working. An administrator can check
-            whether its computer is running.
-          </span>
-        </>
+        /*
+         * ONE SENTENCE, and it is the one that was written for this exact moment.
+         *
+         * `problem` arrives as a finished, specific sentence from whoever set it — "This computer is
+         * not running.", "The live screen could not be reached." — and every branch here is a single
+         * line saying the thing once. This one wrapped it in a headline and a footer as well, which
+         * did not merely repeat itself but said the opposite twice over: a person whose desktop had
+         * stopped read "This computer is not running." and then, underneath, "Check whether its
+         * computer is running." Three sentences, one fact, and the last one undoing the middle.
+         *
+         * So the reason is shown as written. If it needs a heading above it, the sentence that sets
+         * it is where that belongs — the server knows what went wrong, and this card does not.
+         */
+        <span>{problem}</span>
       ) : blankBrowser ? (
         <span>The assistant has not opened a page yet.</span>
       ) : (
@@ -207,6 +213,28 @@ type Props = {
    * side panel is not a turn and has nothing to remember.
    */
   toolCallId?: string;
+  /**
+   * Whether a run is going right now, for a panel that is watching rather than replaying.
+   *
+   * THIS IS THE WHOLE OF "the small screen is stuck on one frame".
+   *
+   * The watch panel is not a turn. It has no `toolCallId`, so `settled` is false for as long as it is
+   * open, and `showLiveScreen` therefore came down to `showScreen` — which requires a still frame to have
+   * arrived. Until one did, the panel drew nothing; once one did, it drew THAT one, forever. The panel
+   * was showing a screenshot captured at some arbitrary moment and polling the shared desktop at 1 Hz,
+   * which is a picture of a screen rather than the screen: it lagged behind what the Bot was doing by up
+   * to a second, it could not show a drag or a scroll mid-gesture, and it was labelled with the Bot's
+   * name while actually depicting whatever the person's one shared desktop was showing.
+   *
+   * With this, a watching panel shows the LIVE STREAM while a run is going — noVNC over RFB, the same
+   * surface the full-size view uses and the same one a person drives — and falls back to the still poll
+   * when nothing is. That is what "it should move according to what the Bot is working on" means in
+   * practice: the panel is not sampling the desktop, it is attached to it.
+   *
+   * Distinct from `active`, deliberately. `active` means "keep polling", which a panel always wants; this
+   * means "something is happening right now", which it has to be told and which changes what is drawn.
+   */
+  followingRun?: boolean;
 };
 
 export function ComputerView({
@@ -220,9 +248,29 @@ export function ComputerView({
   page,
   finished,
   toolCallId,
+  followingRun = false,
 }: Props) {
   const [shot, setShot] = useState<Screenshot | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  /*
+   * TWO problems, not one, and they used to be one.
+   *
+   * The still-frame poll and the live screen are independent: one reads a screenshot every few seconds,
+   * the other opens a noVNC stream. Either can fail while the other works, and when they shared a
+   * `problem` the LAST writer won — so a healthy screenshot arriving after the live screen reported a
+   * failure wiped it, and a person who pressed "Take control", got nothing, and was shown no reason for
+   * it. The race decided it, and it decided it differently depending on which request came back first.
+   *
+   * Kept apart so each surface's own state can only clear itself. {@link problem} is what is drawn: the
+   * live screen's reason first, because it is the more specific of the two and the one the person acted
+   * on, and the still frame's below it.
+   */
+  const [frameProblem, setFrameProblem] = useState<string | null>(null);
+  const [liveProblem, setLiveProblem] = useState<string | null>(null);
+  const problem = liveProblem ?? frameProblem;
+  /** A screen session fetched ahead of the person asking for it. See the warming effect below. */
+  const [warmedSession, setWarmedSession] = useState<WarmedSession | null>(
+    null,
+  );
   const [expanded, setExpanded] = useState(false);
   const [control, setControl] = useState<ControlState | null>(null);
   /** Held only until it is sent. Never lifted into a URL, a log, or anything that outlives this form. */
@@ -281,6 +329,58 @@ export function ComputerView({
 
   const settled = !active && (finished || Boolean(knownPage));
   const visualVisible = pageVisible && (expanded || previewIntersecting);
+  /**
+   * Whether this person demonstrably HAS a computer, as opposed to never having asked for one.
+   *
+   * The gate for warming the screen below, and it is a real gate: without it, scrolling past a
+   * transcript would create a machine for every Bot with a computer tile in it — a bill for something
+   * nobody looked at.
+   */
+  const computerExists = shot !== null;
+
+  /*
+   * THE SESSION IS FETCHED BEFORE IT IS NEEDED, because "take control" should be instant.
+   *
+   * Opening the screen is a round trip to a remote machine, and on a desktop that has gone to sleep it
+   * is a RESUME — several seconds of blank panel between a person clicking and seeing anything. That
+   * reads as a broken product rather than a slow one, and it lands on the one gesture that is supposed
+   * to feel like taking hold of something.
+   *
+   * So it is fetched while the person is still reading and handed to the screen when it mounts.
+   * Deliberately gated on three things:
+   *
+   *  - a turn is actually RUNNING, because that is the only state where the still-frame poll runs and so
+   *    the only state where this process knows a computer exists. Warming on a finished turn would mean
+   *    asking the server whether one exists, and a turn that never asked for a computer would be handed
+   *    one by the act of somebody scrolling past it;
+   *  - the tile is actually visible, so an off-screen tile costs nothing;
+   *  - the person is not already driving, because opening a screen is a request to USE the computer and
+   *    a tile nobody is watching should not be the thing that switches it on.
+   *
+   * The gap this leaves is the one that matters least: a person who has never run a turn on their
+   * computer and takes the wheel on a finished tile waits the round trip once, which is the honest cost
+   * of starting a machine for the first time. Everyone else — the Bot is working, the screen has been
+   * open before — is already warm.
+   *
+   * Failures are SILENT here on purpose. This is an optimisation; the screen reports properly when it
+   * fetches for real, and reporting here would paint an error over a transcript for a failure nobody
+   * asked about.
+   */
+  useEffect(() => {
+    // `settled` first: it is the cheapest statement of "there is a running turn", and it is the state
+    // in which the still-frame poll — the only thing that can tell us a computer exists — is running.
+    if (driving || settled || !computerExists || !visualVisible) return;
+    let live = true;
+    void openDesktopStream()
+      .then((opened) => {
+        if (live)
+          setWarmedSession({ url: opened.url, authKey: opened.authKey });
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [driving, settled, computerExists, visualVisible]);
 
   /*
    * The frame this turn's page was showing, fetched once and then kept.
@@ -331,6 +431,22 @@ export function ComputerView({
 
     /** Continue while active, human-driven, secret-pending, or not yet visually settled. */
     const shouldContinue = () => {
+      /*
+       * `active` IS "KEEP POLLING", AND TWO MOUNTS RELY ON IT BEING EXACTLY THAT.
+       *
+       * The Settings preview has no run to ask about — its whole claim is "this is your computer, right
+       * now" — so `active` is the only thing that keeps its still current. Collapsing `active` into
+       * "the Bot is working" would quietly turn that page into a single unchanging capture.
+       *
+       * WHICH IS WHY THE WATCH PANEL NO LONGER SETS IT, and the distinction is the point. The panel's
+       * `active` was doing two unrelated jobs at once: keeping the CONTROL poll alive, which it genuinely
+       * needs (a Bot that goes to sleep between turns must still be noticed asking for a credential), and
+       * keeping the SCREENSHOT poll alive, which is a full-resolution capture of a shared machine once a
+       * second for as long as a person watches an idle conversation. Only the first is needed. The route
+       * therefore passes `followingRun` and leaves `active` off, so the still is fetched once and the
+       * live stream carries everything that actually moves.
+       */
+      if (followingRun) return true;
       if (active) return true;
       if (drivingRef.current) return true;
       if (secretPendingRef.current) return true;
@@ -346,7 +462,7 @@ export function ComputerView({
         if (generation.current !== mine) return;
 
         if (!frame) {
-          setProblem(error ?? "The screen is not available right now.");
+          setFrameProblem(error ?? "The screen is not available right now.");
         } else {
           // Exact byte comparison is the settling signal.
           unchanged = frame.base64 === lastFrame ? unchanged + 1 : 0;
@@ -355,7 +471,10 @@ export function ComputerView({
           await preloadFrame(frame.base64);
           if (generation.current !== mine) return;
           setShot(frame);
-          setProblem(null);
+          // Clears the FRAME's problem only. Clearing the shared one also erased whatever the live
+          // screen had reported, which is how a refusal from the stream could be erased by an
+          // unrelated success arriving a moment later.
+          setFrameProblem(null);
         }
       } finally {
         if (generation.current === mine && shouldContinue()) {
@@ -369,7 +488,15 @@ export function ComputerView({
       generation.current++;
       clearTimeout(timer);
     };
-  }, [computerId, active, intervalMs, secretPending, settled, visualVisible]);
+  }, [
+    computerId,
+    active,
+    followingRun,
+    intervalMs,
+    secretPending,
+    settled,
+    visualVisible,
+  ]);
 
   /** Poll control state independently from screenshot polling so help/secret prompts surface. */
   useEffect(() => {
@@ -427,24 +554,111 @@ export function ComputerView({
       : null;
   /** Whether there is a page to draw. A blank browser and an unreadable screen are both "no". */
   const showScreen = drawn !== null && !blankBrowser;
-  /**
-   * Whether the full-size view has a stream worth opening.
+  /*
+   * DRIVING ALWAYS MEANS LIVE, AND THAT IS THE WHOLE OF "take control does nothing".
    *
-   * Nothing to draw, and it says so in the same words the card does — but somebody holding the wheel
-   * gets the live socket whatever is on it, because once a person is driving the stream is the truth
-   * about the page and a placeholder over it would be the view arguing with them.
+   * `settled` means this turn is a RECORD — it says what the desktop looked like when the Bot was
+   * doing that piece of work. Control is not about the record. The wheel belongs to the person and the
+   * desktop outlives every conversation, so "I have control" is a claim about the machine in front of
+   * them NOW.
+   *
+   * This used to be `!settled && (showScreen || driving)`, and that expression made the two halves of
+   * the feature unreachable at once on any finished turn: no live screen, and — further down — no Take
+   * control button either. So a person who did find the button, took the wheel, and watched nothing
+   * happen was not imagining it. `driving` was true, the server recorded them as the holder, the Bot
+   * began refusing its own actions with "a person has control", and the picture stayed a frozen
+   * JPEG of a page from an hour earlier. Every signal said it worked and no pixel moved.
+   *
+   * Driving now wins, always. A record is what you look at while the Bot works; the moment you take
+   * the wheel you are looking at the live desktop, which is the only thing you can actually type at.
    */
-  const showLiveScreen = !settled && (showScreen || driving);
-  /**
+  /*
+   * DRIVING ALWAYS MEANS LIVE, AND A WATCHING PANEL MEANS LIVE WHILE THE BOT WORKS.
+   *
+   * `settled` means this turn is a RECORD — it says what the desktop looked like when the Bot was
+   * doing that piece of work. Control is not about the record. The wheel belongs to the person and the
+   * desktop outlives every conversation, so "I have control" is a claim about the machine in front of
+   * them NOW.
+   *
+   * This used to be `!settled && (showScreen || driving)`, and that expression made the two halves of
+   * the feature unreachable at once on any finished turn: no live screen, and — further down — no Take
+   * control button either. So a person who did find the button, took the wheel, and watched nothing
+   * happen was not imagining it. `driving` was true, the server recorded them as the holder, the Bot
+   * began refusing its own actions with "a person has control", and the picture stayed a frozen
+   * JPEG of a page from an hour earlier. Every signal said it worked and no pixel moved.
+   *
+   * Driving now wins, always. A record is what you look at while the Bot works; the moment you take
+   * the wheel you are looking at the live desktop, which is the only thing you can actually type at.
+   *
+   * AND `followingRun` WINS OVER `showScreen`, which is the other half of "the small screen is stuck".
+   * A watching panel has no `toolCallId`, so it is never `settled`, and `showScreen` then decided
+   * everything on whether a still frame happened to have arrived — so the panel drew no screen until one
+   * did and then drew that same one indefinitely. `followingRun` is an actual answer to "is the Bot
+   * working right now", and when the answer is yes the panel is attached to the desktop over the live
+   * stream rather than sampling a JPEG of it once a second.
+   *
+   * The still is kept for everything else: a panel nobody is running anything in, and the settled record
+   * a finished turn leaves behind. Those want a picture, not a stream, and neither wants to keep a
+   * connection open to a machine that is doing nothing.
+   */
+  /*
+   * THE LIVE DESKTOP, OR A PICTURE OF IT.
+   *
+   * `driving` always wins, and has to: taking the wheel is a claim about the machine in front of this
+   * person NOW, so the surface they can type at is the only honest thing to show, whatever else is true.
+   *
+   * `followingRun` is the watch panel's answer to "is the Bot working right now", and it is what moved
+   * that panel off a single frozen frame. It is consulted BEFORE `!settled && showScreen` rather than
+   * added to it, and the reason is the difference between the two kinds of tile. A transcript tile is
+   * never `settled` exactly while its turn is live, so for that tile `!settled` already means "live" and
+   * adding a second signal would be redundant. The panel is never `settled` at all — it has no turn, no
+   * `toolCallId`, and no end — so there `!settled` says nothing whatsoever, and letting it decide meant
+   * the panel showed a live stream whenever a still happened to exist and a frozen JPEG whenever one did
+   * not. Same expression, opposite behaviour, decided by which kind of thing is asking.
+   *
+   * So a tile that is following a run trusts `followingRun` alone, and only falls back to the old
+   * inference when nothing told it either way. `settled` still wins underneath both: a finished turn is a
+   * record and keeps its kept frame, which is what makes it worth having.
+   */
+  /*
+   * The live screen is the DEFAULTSURFACE rather than something that waits for a run.
+   *
+   * Before: the panel silently worked live only while the Bot was driving in-view (`driving`) or
+   * while the page could tell a run was in flight (`followingRun`). The gap between those and the
+   * wall time a Bot spends inside computer tools — when the wire run briefly ENDS before the browser
+   * starts it again — is most of that wall time, so the panel spent it there showing
+   * a stale settled still and a problem overlay, even though the machine was up.
+   *
+   * Now: any surface that is not settled history shows the live noVNC stream. Settled tiles in the
+   * transcript keep their kept frame. If there is no desktop yet, the stream route is the thing that
+   * starts one, which is the one behaviour the person pressing into that screen expected anyway.
+   */
+  const showLiveScreen = driving ? true : (followingRun ?? !settled);
+  /*
+   * A LIVE FAILURE IS ABOUT THE LIVE SCREEN, AND ONLY THE LIVE SCREEN MAY CLEAR IT.
+   *
+   * `problem` prefers `liveProblem`, so a reason left over from a stream that failed while the Bot was
+   * driving outlived the stream: the panel went on saying "This computer is not running" underneath a
+   * still frame that was arriving perfectly well, because the surface that failed was no longer the
+   * surface being drawn. Clearing it when the live screen stops being drawn is the honest rule — the
+   * statement "the live stream failed" has no subject once nothing is showing a live stream.
+   *
+   * Deliberately NOT cleared by a successful still, which is the mirror of the bug this split was
+   * written to fix: a healthy screenshot must not be able to erase a refusal from the surface the person
+   * actually acted on.
+   */
+  useEffect(() => {
+    if (!showLiveScreen) setLiveProblem(null);
+  }, [showLiveScreen]);
+  /*
    * Whether the wheel in somebody's hands is the wheel THIS tile is showing.
    *
-   * A person can take control mid-navigation, and the turn then settles under them. `driving` stays
-   * true, because it is true: they are driving the browser. It is just not the browser in this
-   * picture any more. Left ungated, the frozen tile asserted "You have control" over a page from an
-   * hour ago, with the hand-back footer already gone and the backdrop refusing to close because it
-   * believed somebody was driving it.
+   * No longer gated on `!settled`. It used to be, to stop a frozen tile claiming "You have control"
+   * over a page from an hour ago — a real concern, and it was answered by hiding the screen instead of
+   * by showing the right one. Now that driving renders the live desktop, the thing being described and
+   * the thing being shown are the same machine, so the claim is true and there is nothing to suppress.
    */
-  const wheelHere = driving && !settled;
+  const wheelHere = driving;
 
   const polledScreen = showScreen ? (
     <img
@@ -453,6 +667,40 @@ export function ComputerView({
       // Keep unexpected screenshot dimensions inside the reserved frame.
       className="absolute inset-0 h-full w-full object-contain opacity-100 transition-opacity duration-300 starting:opacity-0"
     />
+  ) : null;
+
+  /*
+   * THE INLINE CARD CAN SHOW THE LIVE DESKTOP, AND UNTIL IT DID IT COULD NOT FOLLOW ANYTHING.
+   *
+   * `showLiveScreen` was consulted in exactly one place — the full-size dialog — so the inline card always
+   * drew `polledScreen` and nothing else. Which is why the watch panel, which IS the inline card, sat on a
+   * single sampled frame for as long as it was open: not because the poll was too slow, but because the
+   * surface that could move was never mounted at that size. No interval fixes that.
+   *
+   * So the live surface is rendered here too, under the same condition, and the still is what remains for
+   * everything else: a panel nobody is working in, and the settled record a finished turn leaves behind.
+   *
+   * NOT NESTED INSIDE THE `<img>` AND NOT INSTEAD OF THE CLICK TARGET. The button around both opens the
+   * full-size view and has to keep doing so — a person watching a Bot work should be able to click the
+   * small picture to get a big one, which is the whole reason this card is a button.
+   */
+  const inlineLiveScreen = showLiveScreen ? (
+    <div className="absolute inset-0">
+      <LiveScreen
+        computerId={computerId}
+        driving={driving}
+        session={warmedSession}
+        onProblem={setLiveProblem}
+        /*
+         * The overlay's way out, wired to the same pair of calls the panel's own Take control button
+         * uses. Supplied here as well because the overlay is what a person meets FIRST when the Bot is
+         * driving — a read-only screen with no way to take the wheel would be a worse answer than the
+         * one it replaced.
+         */
+        takeControl={() => takeControl(computerId)}
+        onControl={(state) => setControl(state)}
+      />
+    </div>
   ) : null;
 
   return (
@@ -473,7 +721,13 @@ export function ComputerView({
           style={frameStyle}
           aria-label="Open the assistant's screen full size"
         >
-          {polledScreen}
+          {/*
+           * The live desktop, in the small frame, while the Bot is working — and never at the same time
+           * as the still, which is the picture of a screen rather than the screen. Mutually exclusive on
+           * purpose: drawing both would put a frozen JPEG over a moving desktop, and which one won would
+           * depend on paint order rather than on anything a person could see.
+           */}
+          {showLiveScreen ? inlineLiveScreen : polledScreen}
 
           {/* Whose computer this is — and whose hands are on it — said on the picture itself. */}
           {name || wheelHere ? (
@@ -492,7 +746,30 @@ export function ComputerView({
             </span>
           ) : null}
 
-          {showScreen ? null : (
+          {/*
+            THE INLINE CARD DOES NOT SPEAK WHILE THE FULL-SIZE VIEW IS OPEN.
+            
+            Both are mounted at once: expanding draws the same surface over this one rather than
+            replacing it, so this card kept rendering its own explanation underneath. The result on
+            screen was the same sentence twice — a person whose desktop had stopped read "The screen
+            is not available right now." and, immediately below it, "The screen is not available right
+            now." Two identical lines with no difference between them, which reads as the card failing
+            to understand rather than as a report of anything.
+
+            The expanded view says it once, in the place the person is actually looking, and this card
+            is behind the backdrop. The badges above are left alone: they label the computer and say
+            who has their hands on it, they are not a report about the screen, and they are the one
+            part of the card worth seeing through a translucent backdrop.
+          */}
+          {/*
+           * "There is nothing here" has to account for the live screen too.
+           *
+           * It tested `showScreen`, which is about the STILL. With the live desktop now mounted in this
+           * same frame, a card that was streaming the Bot's actual screen and simultaneously explaining
+           * that it was "waiting for the assistant's screen" would be describing a surface it was already
+           * showing — and the sentence is drawn on top of it.
+           */}
+          {showScreen || showLiveScreen || expanded ? null : (
             <NothingToSee
               blankBrowser={blankBrowser}
               page={knownPage}
@@ -513,22 +790,26 @@ export function ComputerView({
          * from here opens that view, because driving is what they are being asked to do.
          */}
         {!driving && !settled && control?.requested ? (
-          <div className="flex items-start justify-between gap-3 border-t bg-amber-500/10 px-3 py-2 text-sm">
+          <div className="flex items-start justify-between gap-3 border-t bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-200">
             <span>
               <strong className="font-medium">The assistant needs you.</strong>{" "}
               {control.reason}
             </span>
-            <button
-              type="button"
+            {/* The primitive, not a hand-copied button: this copy had no focus ring
+              and no `active` press, so it was the one control in this bar a keyboard
+              user could not see they were on. `size="sm"` is the scale's own 28px. */}
+            <Button
+              className="shrink-0 text-xs"
               onClick={async () => {
                 const state = await takeControl(computerId);
                 if (state) setControl(state);
                 setExpanded(true);
               }}
-              className="shrink-0 rounded-md bg-primary px-3 py-1 font-medium text-primary-foreground text-xs"
+              size="sm"
+              type="button"
             >
               Take control
-            </button>
+            </Button>
           </div>
         ) : null}
 
@@ -553,13 +834,13 @@ export function ComputerView({
               if (state) setControl(state);
             }}
           >
-            <label className="block" htmlFor="openbot-secret">
+            <label className="block" htmlFor="remii-secret">
               <span className="font-medium">The assistant needs </span>
               <span>{control.secretWanted}</span>
             </label>
             <div className="mt-1.5 flex gap-2">
               <input
-                id="openbot-secret"
+                id="remii-secret"
                 type="password"
                 value={secret}
                 onChange={(event) => setSecret(event.target.value)}
@@ -628,14 +909,42 @@ export function ComputerView({
                 <div
                   className={`relative max-h-[75vh] min-h-0 overflow-auto rounded-xl ${showLiveScreen ? "bg-black" : "bg-muted"}`}
                 >
-                  {settled && drawn ? (
+                  {/*
+                    THE LIVE SCREEN FIRST, AND THAT IS THE POINT.
+ *
+ * While the Bot is working this is the live desktop, and so is the record underneath it — a person
+ * looking at a finished turn sees the picture that turn produced. What changed is that taking the
+ * wheel now switches this to the live desktop REGARDLESS of whether the turn is over.
+ *
+ * It used to check the record first, so on any finished turn a person who had taken control was shown
+ * a frozen JPEG while the server recorded them as the holder and the Bot started refusing its own
+ * actions. Everything said it had worked and nothing on screen moved. That ordering — record before
+ * live — was what made "take control" appear broken.
+ */}
+                  {showLiveScreen ? (
+                    <div className="relative w-full" style={{ aspectRatio }}>
+                      <LiveScreen
+                        computerId={computerId}
+                        driving={driving}
+                        session={warmedSession}
+                        onProblem={setLiveProblem}
+                        takeControl={() => takeControl(computerId)}
+                        onControl={(state) => setControl(state)}
+                      />
+                      {liveProblem ? (
+                        <div className="absolute inset-0 flex items-center justify-center bg-background/85 p-4 text-center text-sm text-muted-foreground">
+                          <span>{liveProblem}</span>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : settled && drawn ? (
                     /*
-                     * A record, opened larger. Not a window on the browser.
+                     * A record, opened larger. Not a window on the desktop.
                      *
-                     * Zooming a past turn used to mount the live stream and offer Take control, so
-                     * the one gesture for looking closer at what a turn did was also the one that
-                     * replaced it with whatever the Bot has open now. The kept frame exists to stop
-                     * exactly that; its own zoom control was undoing it.
+                     * The one gesture for looking closer at what a turn did used to also be the one
+                     * that replaced it with whatever the Bot had open at that moment. The kept frame
+                     * exists to stop that; taking the wheel is now the separate, explicit way to get
+                     * the live one.
                      */
                     <div className="relative w-full" style={{ aspectRatio }}>
                       <img
@@ -643,25 +952,6 @@ export function ComputerView({
                         className="absolute inset-0 h-full w-full object-contain"
                         src={`data:image/png;base64,${drawn.base64}`}
                       />
-                    </div>
-                  ) : showLiveScreen ? (
-                    <div className="relative w-full" style={{ aspectRatio }}>
-                      <LiveScreen
-                        computerId={computerId}
-                        driving={driving}
-                        onProblem={setProblem}
-                      />
-                      {/*
-                        A live screen that ends reports why through `onProblem`, and this is the
-                        branch that is mounted when it does. Without drawing it here the message
-                        landed in `problem`, which only the sibling `NothingToSee` reads, so the
-                        screen ended with the stale last frame frozen on the canvas and nothing said.
-                      */}
-                      {problem ? (
-                        <div className="absolute inset-0 flex items-center justify-center bg-background/85 p-4 text-center text-sm text-muted-foreground">
-                          <span>{problem}</span>
-                        </div>
-                      ) : null}
                     </div>
                   ) : (
                     <div className="relative w-full" style={{ aspectRatio }}>
@@ -675,23 +965,34 @@ export function ComputerView({
                   )}
                 </div>
                 {/*
-                  NOT ON A TURN THAT IS OVER. Every past turn used to carry the wheel and the
-                  standing "who is driving" prose under a picture of a page it opened an hour ago,
-                  offering control of whatever the Bot has open now. Those sentences are about the
-                  present and this view is a record; a record does not get a steering wheel.
+                  EVERY PAST TURN CARRIES THE WHEEL NOW, and that is the second half of "take control
+                  does nothing".
+
+                  The wheel belongs to the person and the desktop outlives every conversation, so
+                  "You have control" is a claim about the machine in front of them NOW — not about the
+                  turn above this tile. Hiding the button on a settled turn meant the states where a
+                  person most wants it, looking at a transcript with nothing running, were exactly the
+                  states with no way to ask for it.
+
+                  The old reason for hiding it was fair: a record should not offer control of whatever
+                  the Bot has open at some later moment. It was answered by removing the wheel rather
+                  than by showing the right thing. Now that taking it swaps the record for the LIVE
+                  desktop above, what this row says and what is on screen are the same machine, which
+                  is what the gating was trying to achieve in the first place.
                 */}
-                {settled ? null : (
+                {
                   <div className="mt-4 flex items-center justify-center gap-4">
                     <span className="flex min-w-0 items-center gap-2 text-sm">
-                      {name ? (
-                        <span className="flex shrink-0 items-center gap-1.5 font-medium">
-                          <ChannelAvatar
-                            participantIds={[computerId]}
-                            size={20}
-                          />
-                          {name}
-                        </span>
-                      ) : null}
+                      {/*
+                        NOT THE NAME. It is already on the picture, as a badge over the bottom-right
+                        of the screen itself, and this line sat four pixels below it saying the same
+                        word — so somebody watching a Bot work saw its name twice, stacked, with an
+                        avatar beside each. On a narrow tile the badge and this line also collided.
+
+                        What is left here is the part that is NOT on the picture: who has their hands
+                        on it. That is a statement about the present and the badge is a label on the
+                        screen, and neither repeats the other.
+                      */}
                       {driving ? (
                         <span className="truncate text-muted-foreground">
                           You have control — click and type on the page.
@@ -727,7 +1028,7 @@ export function ComputerView({
                       </button>
                     )}
                   </div>
-                )}
+                }
               </div>
             </div>,
             document.body,

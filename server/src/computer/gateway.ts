@@ -17,6 +17,7 @@
  * by the model is theatre: "never click Submit" is evaded by sending `{ref: "e13", name: "Continue"}`.
  * The refs are opaque to the caller precisely so that the server holds the mapping.
  */
+import { computerInstanceToken } from "../../../shared/computer-token";
 import { type AuditStore, recordAuditEvent } from "../audit";
 import {
   ComputerStoppedError,
@@ -41,10 +42,14 @@ import {
   type ActionPolicy,
   evaluateActionPolicy,
   type PolicyContext,
-  policyInitiator,
   type PolicyDecision,
+  policyInitiator,
 } from "./policy";
-import type { ComputerProvider } from "./provider";
+import {
+  type ComputerProvider,
+  parseScopedComputerKey,
+  scopeComputerKey,
+} from "./provider";
 import type {
   ActionResult,
   ClickInput,
@@ -100,11 +105,31 @@ export type ComputerGatewayOptions = {
   provider: ComputerProvider;
   auditStore: AuditStore;
   /** Absent denies everything. See evaluateActionPolicy. */
-  policy: () => ActionPolicy | undefined;
+  policy: (actorId?: string) => ActionPolicy | undefined;
   /** True on a laptop, where browsing private network addresses is required. */
   allowPrivateHosts?: boolean;
   /** The secret that agent-computer requires on each request. */
   token?: string;
+  /**
+   * Whose sandbox a Bot's computer lives in.
+   *
+   * Strict per-user SaaS sandbox: the computer for a (user, Bot) pair is
+   * keyed by the Bot's owner, or by the acting user for ownerless deployment
+   * templates. Wired in `index.ts` to `agent_profiles.ownerUserId`. Absent,
+   * every Bot is treated as its own owner — correct for single-user
+   * development, never for a multi-user deployment.
+   */
+  scopeOfBot?: (botId: string) => Promise<string | null>;
+  /**
+   * Durable record of which (user, Bot) pair each scope key names
+   * (`computer_scopes`), so a replica that only lists the fleet reports real
+   * ids instead of key slugs. Best-effort like the in-memory map: a missed
+   * write degrades the listing, never an action.
+   */
+  scopeDirectory?: {
+    record(key: string, botId: string, owner: string): Promise<void>;
+    lookup(key: string): Promise<{ botId: string; owner: string } | null>;
+  };
   /** An injectable fetch implementation for focused gateway tests. */
   fetchImpl?: typeof fetch;
   /**
@@ -122,15 +147,45 @@ export type ComputerGatewayOptions = {
    * this deployment makes in as many words.
    */
   pageFrames?: PageFrameStore;
+  /** Called whenever a computer action finishes executing, with elapsed wall-clock seconds. */
+  onActionElapsed?: (info: {
+    actor: ActionActor;
+    botId: string;
+    toolName: string;
+    elapsedSeconds: number;
+  }) => void;
 };
 
 export interface ComputerGateway {
   readonly provider: ComputerProvider;
-  locate(botId: string): Promise<string>;
-  status(botId: string): Promise<ComputerStatus>;
-  screenshot(botId: string): Promise<ScreenshotResult>;
-  snapshot(botId: string): Promise<SnapshotResult>;
-  read(botId: string): Promise<ReadResult>;
+  /**
+   * Every read and action takes the acting user, because the computer it
+   * reaches is the (user, Bot) pair's own — never another user's. The Bot
+   * owner wins when there is one, so a Bot's computer is stable whichever
+   * allowed user reaches it; an ownerless deployment template is scoped by
+   * the acting user.
+   */
+  locate(botId: string, actorId?: string): Promise<string>;
+  /**
+   * The scoped computer key for this (user, Bot) pair — the name the
+   * provider, the snapshot store and the page-frame table all address this
+   * user's computer by. Exposed so a surface storing something ABOUT that
+   * computer files it under the same key the computer itself is reached at.
+   */
+  keyOf(botId: string, actorId?: string): Promise<string>;
+  /**
+   * The secret this deployment presents to that computer — the per-instance
+   * token where the provider mints one, the deployment's own where it does
+   * not. Exposed for the live screen stream, which is a websocket upgrade and
+   * so cannot carry the header the other calls use.
+   */
+  streamToken(computerKey: string): string;
+  status(botId: string, actorId?: string): Promise<ComputerStatus>;
+  screenshot(botId: string, actorId?: string): Promise<ScreenshotResult>;
+  snapshot(botId: string, actorId?: string): Promise<SnapshotResult>;
+  read(botId: string, actorId?: string): Promise<ReadResult>;
+  /** Read and reset container seconds accumulated for this actor during their turns. */
+  consumeElapsedContainerSeconds?(actorId: string): number;
   navigate(
     botId: string,
     actor: ActionActor,
@@ -180,7 +235,7 @@ export interface ComputerGateway {
     actor: ActionActor,
     input: WriteFileInput,
   ): Promise<WriteFileResult>;
-  control(botId: string): Promise<ControlState>;
+  control(botId: string, actorId?: string): Promise<ControlState>;
   requestHelp(
     botId: string,
     actor: ActionActor,
@@ -198,11 +253,16 @@ export interface ComputerGateway {
     actor: ActionActor,
     text: string,
   ): Promise<SecretResult>;
-  humanInput(botId: string, input: HumanInput): Promise<HumanInputResult>;
+  humanInput(
+    botId: string,
+    input: HumanInput,
+    actorId?: string,
+  ): Promise<HumanInputResult>;
   computers(): Promise<{
-    isolation: "per-bot" | "shared";
+    isolation: "per-bot" | "per-user" | "shared";
     computers: {
       botId: string;
+      owner: string;
       running: boolean;
       startedAt: string | null;
       egress?: string | null;
@@ -233,7 +293,7 @@ export function createComputerGateway(
    * Where the snapshot a ref is resolved against lives.
    *
    * Not a `Map` in this process. It describes the live contents of a browser window, and the process
-   * that took it is rarely the one that resolves a ref from it: OpenBot is several servers behind a
+   * that took it is rarely the one that resolves a ref from it: Remii is several servers behind a
    * load balancer, and consecutive calls on one conversation land on different ones. Kept in memory,
    * the mapping is absent on every replica but the one that snapshotted, so the ref resolves to
    * nothing, the policy decides with no element in front of it, and the audit row cannot name what
@@ -242,6 +302,101 @@ export function createComputerGateway(
    */
   const snapshots = options.snapshots ?? createInMemorySnapshotStore();
   const pageFrames = options.pageFrames;
+
+  const elapsedContainerSecondsByActor = new Map<string, number>();
+
+  /**
+   * The computer key for this action — the Remii sandbox rule, enforced here.
+   *
+   * Every provider call, snapshot row, page frame and transport header below
+   * goes through this: the addressable computer is the (user, Bot) pair, so
+   * user A can never be sent to user B's browser, files, shell or logins —
+   * even when both users act through the same deployment template. The
+   * policy context and the audit rows keep the REAL Bot id (rules are
+   * written against Bots, and the trail must name them); only the addressing
+   * is scoped.
+   *
+   * Owner resolution: the Bot's owner wins, so an owner's computer is the
+   * same whichever allowed actor reaches it. Ownerless deployment templates
+   * are scoped by the acting user instead — each user gets their own
+   * computer for the template. With neither (a background caller with no
+   * user behind it addressing a template), there is nobody whose sandbox
+   * this could be, so the action is refused rather than run on a shared one.
+   */
+  const keyOrigins = new Map<string, { botId: string; owner: string }>();
+  async function keyFor(
+    botId: string,
+    actorId?: string,
+  ): Promise<{ key: string; owner: string }> {
+    const owner =
+      (await options.scopeOfBot?.(botId).catch(() => null)) ?? actorId ?? null;
+    if (!owner) {
+      throw new ComputerUnavailableError(
+        `The computer for ${botId} has no owner to scope it to, so it cannot be started. ` +
+          `Use your own copy of this coworker rather than the shared template.`,
+      );
+    }
+    const key = scopeComputerKey(owner, botId);
+    keyOrigins.set(key, { botId, owner });
+    options.scopeDirectory?.record(key, botId, owner).catch(() => undefined);
+    return { key, owner };
+  }
+
+  /**
+   * The secret for one computer.
+   *
+   * Strict per-user sandboxing: where the provider mints a token per
+   * (user, Bot) computer, that is what goes on the wire, so a token lifted off
+   * one computer's traffic opens that computer and no other. Providers that
+   * do not (a Kubernetes template mounting one secret into its pods) keep the
+   * deployment's own token, which their per-computer network isolation carries
+   * instead.
+   */
+  function tokenFor(key: string): string | undefined {
+    if (!options.token) return undefined;
+    if (!provider.instanceScopedTokens) return options.token;
+    return computerInstanceToken(options.token, key);
+  }
+
+  /**
+   * Whose computer a provider listing row is.
+   *
+   * A replica that located a computer knows exactly: the key was derived from
+   * this (user, Bot) pair a moment ago. One that only lists does not, and the
+   * key is deliberately one-way in its Bot half, so what it reports is the Bot
+   * SLUG and the owner SLUG the key carries — which for ordinary ids is the
+   * id itself. Never a guess at addressing: every call resolves its own key
+   * from the owner in the database, not from this.
+   */
+  async function originOf(
+    providerKey: string,
+  ): Promise<{ botId: string; owner: string }> {
+    const known = keyOrigins.get(providerKey);
+    if (known) return known;
+    const stored = await options.scopeDirectory
+      ?.lookup(providerKey)
+      .catch(() => null);
+    if (stored) {
+      keyOrigins.set(providerKey, stored);
+      return stored;
+    }
+    const parsed = parseScopedComputerKey(providerKey);
+    if (!parsed) {
+      return { botId: providerKey, owner: "unknown" };
+    }
+    return { botId: parsed.botSlug, owner: parsed.ownerSlug };
+  }
+
+  function recordContainerDuration(actorId: string, seconds: number) {
+    const current = elapsedContainerSecondsByActor.get(actorId) ?? 0;
+    elapsedContainerSecondsByActor.set(actorId, current + seconds);
+  }
+
+  function consumeElapsedContainerSeconds(actorId: string): number {
+    const elapsed = elapsedContainerSecondsByActor.get(actorId) ?? 0;
+    elapsedContainerSecondsByActor.delete(actorId);
+    return elapsed;
+  }
 
   /**
    * Where this Bot's computer is, checked before anything is sent to it.
@@ -254,8 +409,8 @@ export function createComputerGateway(
    * Not the navigation check. That one refuses private hosts, which is the right answer for where a
    * Bot may browse and the wrong one here, where loopback is the normal case.
    */
-  async function locate(botId: string): Promise<string> {
-    const address = await provider.locate(botId);
+  async function locateKey(key: string): Promise<string> {
+    const address = await provider.locate(key);
     const verdict = checkComputerAddress(address);
     if (!verdict.allowed) {
       throw new ComputerUnavailableError(verdict.reason);
@@ -263,17 +418,26 @@ export function createComputerGateway(
     return verdict.url;
   }
 
+  async function locate(botId: string, actorId?: string): Promise<string> {
+    const { key } = await keyFor(botId, actorId);
+    return locateKey(key);
+  }
+
   async function get<T>(
     botId: string,
     path: string,
     signal?: AbortSignal,
+    actorId?: string,
   ): Promise<T> {
+    const { key } = await keyFor(botId, actorId);
     return transport.call<T>(
-      await locate(botId),
-      botId,
+      await locateKey(key),
+      key,
       path,
       undefined,
       signal,
+      undefined,
+      tokenFor(key),
     );
   }
 
@@ -291,15 +455,43 @@ export function createComputerGateway(
     signal?: AbortSignal,
     timeoutMs?: number,
     address?: string,
+    actorId?: string,
   ): Promise<T> {
+    const { key } = await keyFor(botId, actorId);
     return transport.post<T>(
-      address ?? (await locate(botId)),
-      botId,
+      address ?? (await locateKey(key)),
+      key,
       path,
       payload,
       signal,
       timeoutMs,
+      tokenFor(key),
     );
+  }
+
+  /** The same POST, addressed by an already-resolved scoped key. */
+  async function postTo<T>(
+    key: string,
+    path: string,
+    payload: unknown,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+    address?: string,
+  ): Promise<T> {
+    return transport.post<T>(
+      address ?? (await locateKey(key)),
+      key,
+      path,
+      payload,
+      signal,
+      timeoutMs,
+      tokenFor(key),
+    );
+  }
+
+  /** Navigate on an already-resolved scoped key. */
+  async function navigateTo(key: string, url: string): Promise<NavigateResult> {
+    return transport.navigate(await locateKey(key), key, url, tokenFor(key));
   }
 
   /**
@@ -310,9 +502,12 @@ export function createComputerGateway(
    * decision; throwing here would take the action off the trail entirely. So a failure answers
    * "unknown", which leaves the generation check where it was and leaves the address to the attempt.
    */
-  async function locateForAction(botId: string): Promise<string | undefined> {
+  async function locateForAction(
+    botId: string,
+    actorId?: string,
+  ): Promise<string | undefined> {
     try {
-      return await locate(botId);
+      return await locate(botId, actorId);
     } catch {
       return undefined;
     }
@@ -326,11 +521,14 @@ export function createComputerGateway(
    * only has to outlast it. Below the shell's maximum, the transport gave up first and the person was
    * told the computer did not respond while the command ran on to completion inside the container.
    */
-  const COMMAND_BACKSTOP_MS = 615_000;
+  const COMMAND_BACKSTOP_MS = 65_000;
 
   /** Read-only, so it passes straight through. Nothing has changed and there is nothing to decide. */
-  async function screenshot(botId: string): Promise<ScreenshotResult> {
-    return get<ScreenshotResult>(botId, "/screenshot");
+  async function screenshot(
+    botId: string,
+    actorId?: string,
+  ): Promise<ScreenshotResult> {
+    return get<ScreenshotResult>(botId, "/screenshot", undefined, actorId);
   }
 
   /**
@@ -343,21 +541,31 @@ export function createComputerGateway(
    * the refs are returned, so the snapshot cannot be resolved against on one server before it exists
    * on the store.
    */
-  async function snapshot(botId: string): Promise<SnapshotResult> {
+  async function snapshot(
+    botId: string,
+    actorId?: string,
+  ): Promise<SnapshotResult> {
+    const { key } = await keyFor(botId, actorId);
     const result = await transport.call<SnapshotResult>(
-      await locate(botId),
-      botId,
+      await locateKey(key),
+      key,
       "/snapshot",
       { method: "POST" },
+      undefined,
+      undefined,
+      tokenFor(key),
     );
-    await snapshots.save(botId, {
+    // Stored under the scoped key, not the bare Bot id: the refs describe
+    // the page in THAT user's computer, and a bare-Bot row would let one
+    // user's refs resolve against another user's page.
+    await snapshots.save(key, {
       snapshotId: result.snapshotId,
       url: result.url,
       elements: new Map(
         result.elements.map((element) => [element.ref, element]),
       ),
       // Read after `locate`, which is the `/ensure` that reports it.
-      ...(await sessionOf(botId)),
+      ...(await sessionOf(key)),
     });
     return result;
   }
@@ -369,18 +577,18 @@ export function createComputerGateway(
    * must not stop a snapshot being recorded, because a snapshot nobody stored is a ref that resolves
    * to nothing and a boundary deciding with no element in front of it.
    */
-  async function sessionOf(botId: string): Promise<{ session?: string }> {
+  async function sessionOf(key: string): Promise<{ session?: string }> {
     if (!provider.sessionOf) return {};
     try {
-      const session = await provider.sessionOf(botId);
+      const session = await provider.sessionOf(key);
       return session ? { session } : {};
     } catch {
       return {};
     }
   }
 
-  async function read(botId: string): Promise<ReadResult> {
-    return get<ReadResult>(botId, "/read");
+  async function read(botId: string, actorId?: string): Promise<ReadResult> {
+    return get<ReadResult>(botId, "/read", undefined, actorId);
   }
 
   /**
@@ -447,12 +655,25 @@ export function createComputerGateway(
       /** The person's Stop, on its way to the browser. See the acting methods below. */
       signal?: AbortSignal;
     },
-    run: (address?: string) => Promise<T>,
+    /**
+     * The attempt. Receives the already-located address (when a ref was
+     * cited) and the scoped computer key, so the send cannot resolve a
+     * different — or another user's — computer than the one the decision and
+     * the snapshot were about.
+     */
+    run: (address?: string, key?: string) => Promise<T>,
   ): Promise<T> {
     const { ref, filePath, snapshotId } = subject;
+    /*
+     * The scoped computer key, resolved once: the snapshot store, the
+     * session check and the address below must all speak about the same
+     * (user, Bot) computer, or a ref taken in one user's browser would be
+     * resolved against another user's page.
+     */
+    const { key } = await keyFor(botId, actor.id);
     // Loaded from the store, not this process's memory: the snapshot these refs belong to was very
     // likely taken by another replica, and resolving against a local map would find nothing there.
-    const stored = await snapshots.load(botId);
+    const stored = await snapshots.load(key);
     /*
      * LOCATE FIRST, THEN ASK WHICH RUN THAT WAS. The order is the check.
      *
@@ -468,8 +689,8 @@ export function createComputerGateway(
      * the policy has even seen it. The address that comes back is the one the attempt then uses, so
      * this costs no extra call for the actions that do need it.
      */
-    const address = ref ? await locateForAction(botId) : undefined;
-    const { session } = ref ? await sessionOf(botId) : { session: undefined };
+    const address = ref ? await locateForAction(botId, actor.id) : undefined;
+    const { session } = ref ? await sessionOf(key) : { session: undefined };
     const element = resolve(stored, ref, snapshotId, session);
     // For a navigation the relevant page is the one being opened, not the one already loaded. Using
     // the stored URL would mean `page.host == "..."` could never match the destination, which is the
@@ -529,7 +750,7 @@ export function createComputerGateway(
       mcp: { server: "", tool: "", effect: "" },
     };
 
-    const decision = evaluateActionPolicy(options.policy(), context);
+    const decision = evaluateActionPolicy(options.policy(actor.id), context);
     await write(auditStore, {
       toolName,
       botId,
@@ -547,6 +768,7 @@ export function createComputerGateway(
     }
 
     let result: T;
+    const actionStartTime = Date.now();
     try {
       /*
        * A citation that was made and could not be honoured is refused, not carried out.
@@ -581,7 +803,7 @@ export function createComputerGateway(
           `${ref} is not on the page this computer is showing, so nothing can be checked against it before acting. Take a fresh snapshot and use the refs it returns.`,
         );
       }
-      result = await run(address);
+      result = await run(address, key);
     } catch (error) {
       /**
        * A permitted action that did not happen gets its own row.
@@ -612,12 +834,24 @@ export function createComputerGateway(
         pageUrl,
         decision,
         failure: error instanceof Error ? error.message : "The action failed.",
-        // A person pressing Stop mid-action is not the computer failing. The message still says so;
-        // this keeps the row's type a stop, so a count of failed actions does not read every Stop as
-        // an outage.
         ...(error instanceof ComputerStoppedError ? { stopped: true } : {}),
       });
       throw error;
+    } finally {
+      const elapsedSeconds = Math.max(
+        1,
+        Math.round((Date.now() - actionStartTime) / 1000),
+      );
+      recordContainerDuration(actor.id, elapsedSeconds);
+      if (actor.userId && actor.userId !== actor.id) {
+        recordContainerDuration(actor.userId, elapsedSeconds);
+      }
+      options.onActionElapsed?.({
+        actor,
+        botId,
+        toolName,
+        elapsedSeconds,
+      });
     }
     // The element's label, attached on the way out, so the transcript can say what was acted on
     // instead of quoting a ref. The computer cannot supply this: it knows the ref, and the resolved
@@ -630,12 +864,20 @@ export function createComputerGateway(
   return {
     provider,
     locate,
+    async keyOf(botId: string, actorId?: string): Promise<string> {
+      return (await keyFor(botId, actorId)).key;
+    },
+    streamToken(computerKey: string): string {
+      return tokenFor(computerKey) ?? "";
+    },
     screenshot,
     snapshot,
     read,
+    consumeElapsedContainerSeconds,
 
-    status(botId: string): Promise<ComputerStatus> {
-      return provider.status(botId);
+    async status(botId: string, actorId?: string): Promise<ComputerStatus> {
+      const { key } = await keyFor(botId, actorId);
+      return provider.status(key);
     },
 
     /**
@@ -648,9 +890,15 @@ export function createComputerGateway(
      * an investigator wants is that a human drove this browser between two times.
      */
     async requestHelp(botId: string, actor: ActionActor, reason: string) {
-      const state = await post<ControlState>(botId, "/control/request", {
-        reason,
-      });
+      const state = await post<ControlState>(
+        botId,
+        "/control/request",
+        { reason },
+        undefined,
+        undefined,
+        undefined,
+        actor.id,
+      );
       await writeControlEvent(auditStore, "computer.help_requested", {
         botId,
         actor,
@@ -660,7 +908,15 @@ export function createComputerGateway(
     },
 
     async takeControl(botId: string, actor: ActionActor) {
-      const state = await post<ControlState>(botId, "/control/take", {});
+      const state = await post<ControlState>(
+        botId,
+        "/control/take",
+        {},
+        undefined,
+        undefined,
+        undefined,
+        actor.id,
+      );
       await writeControlEvent(auditStore, "computer.control_taken", {
         botId,
         actor,
@@ -672,7 +928,15 @@ export function createComputerGateway(
     },
 
     async releaseControl(botId: string, actor: ActionActor) {
-      const state = await post<ControlState>(botId, "/control/release", {});
+      const state = await post<ControlState>(
+        botId,
+        "/control/release",
+        {},
+        undefined,
+        undefined,
+        undefined,
+        actor.id,
+      );
       await writeControlEvent(auditStore, "computer.control_released", {
         botId,
         actor,
@@ -680,22 +944,29 @@ export function createComputerGateway(
       return state;
     },
 
-    control(botId: string): Promise<ControlState> {
-      return get<ControlState>(botId, "/control");
+    control(botId: string, actorId?: string): Promise<ControlState> {
+      return get<ControlState>(botId, "/control", undefined, actorId);
     },
 
     /** Return every computer that the configured provider owns. */
     async computers() {
       const computers = await provider.list();
-      return {
-        isolation: provider.isolation,
-        computers: computers.map((computer) => ({
-          botId: computer.botId,
-          running: computer.status === "running",
-          startedAt: computer.startedAt ?? null,
-          egress: computer.egress,
-        })),
-      };
+      // Scoped keys are unwrapped back to the Bot they name: the locating
+      // replica knows exactly, any other replica reads the durable directory,
+      // and only with neither does the row fall back to key slugs.
+      const resolved = await Promise.all(
+        computers.map(async (computer) => {
+          const origin = await originOf(computer.botId);
+          return {
+            botId: origin.botId,
+            owner: origin.owner,
+            running: computer.status === "running",
+            startedAt: computer.startedAt ?? null,
+            egress: computer.egress,
+          };
+        }),
+      );
+      return { isolation: provider.isolation, computers: resolved };
     },
 
     /**
@@ -707,7 +978,8 @@ export function createComputerGateway(
      * tried.
      */
     async stopComputer(botId: string, actor: ActionActor) {
-      const result = await provider.stop(botId);
+      const { key } = await keyFor(botId, actor.id);
+      const result = await provider.stop(key);
       await writeControlEvent(auditStore, "computer.stopped", {
         botId,
         actor,
@@ -725,7 +997,8 @@ export function createComputerGateway(
      * row is written whatever happens next.
      */
     async resetComputer(botId: string, actor: ActionActor) {
-      const result = await provider.reset(botId);
+      const { key } = await keyFor(botId, actor.id);
+      const result = await provider.reset(key);
       /*
        * The row goes in HERE, before the two deletes below, because this line is the point of no
        * return: the profile is already gone and nothing after it can put the logins back.
@@ -743,8 +1016,9 @@ export function createComputerGateway(
           : "no saved state was present to delete",
       });
       // The refs the last snapshot handed out describe a page that no longer exists, and a fresh
-      // computer counts generations from one again, so the row has to go with the profile.
-      await snapshots.clear(botId);
+      // computer counts generations from one again, so the row has to go with the profile. Scoped
+      // key, so a reset wipes only the owner's computer and nobody else's.
+      await snapshots.clear(key);
       /*
        * And the pictures, which are the part that made the promise above untrue.
        *
@@ -753,7 +1027,7 @@ export function createComputerGateway(
        * transcript by anybody who could reach that Bot. A reset that leaves those has not reset
        * anything a person would recognise as private.
        */
-      await pageFrames?.clear(botId);
+      await pageFrames?.clear(key);
       return result;
     },
 
@@ -770,7 +1044,15 @@ export function createComputerGateway(
       actor: ActionActor,
       input: SecretRequest,
     ) {
-      const state = await post<ControlState>(botId, "/control/secret", input);
+      const state = await post<ControlState>(
+        botId,
+        "/control/secret",
+        input,
+        undefined,
+        undefined,
+        undefined,
+        actor.id,
+      );
       await writeControlEvent(auditStore, "computer.secret_requested", {
         botId,
         actor,
@@ -780,7 +1062,15 @@ export function createComputerGateway(
     },
 
     async supplySecret(botId: string, actor: ActionActor, text: string) {
-      const result = await post<SecretResult>(botId, "/human/secret", { text });
+      const result = await post<SecretResult>(
+        botId,
+        "/human/secret",
+        { text },
+        undefined,
+        undefined,
+        undefined,
+        actor.id,
+      );
       await writeControlEvent(auditStore, "computer.secret_supplied", {
         botId,
         actor,
@@ -793,6 +1083,7 @@ export function createComputerGateway(
     async humanInput(
       botId: string,
       input: HumanInput,
+      actorId?: string,
     ): Promise<HumanInputResult> {
       const { kind, ...payload } = input;
       /*
@@ -810,7 +1101,15 @@ export function createComputerGateway(
           `A person's input is one of ${[...HUMAN_GESTURES].join(", ")}, not ${JSON.stringify(kind)}.`,
         );
       }
-      return post<HumanInputResult>(botId, `/human/${kind}`, payload);
+      return post<HumanInputResult>(
+        botId,
+        `/human/${kind}`,
+        payload,
+        undefined,
+        undefined,
+        undefined,
+        actorId,
+      );
     },
 
     /**
@@ -825,7 +1124,7 @@ export function createComputerGateway(
         botId,
         actor,
         { targetUrl: url },
-        async () => transport.navigate(await locate(botId), botId, url),
+        async (_address, key) => navigateTo(key ?? "", url),
       );
     },
 
@@ -844,9 +1143,9 @@ export function createComputerGateway(
           snapshotId: input.snapshotId,
           ...(signal ? { signal } : {}),
         },
-        (address) =>
-          post<ActionResult>(
-            botId,
+        (address, key) =>
+          postTo<ActionResult>(
+            key ?? "",
             "/click",
             input,
             signal,
@@ -880,8 +1179,15 @@ export function createComputerGateway(
           ...(input.submit ? { key: "Enter" } : {}),
           ...(signal ? { signal } : {}),
         },
-        (address) =>
-          post<ActionResult>(botId, "/type", input, signal, undefined, address),
+        (address, key) =>
+          postTo<ActionResult>(
+            key ?? "",
+            "/type",
+            input,
+            signal,
+            undefined,
+            address,
+          ),
       );
     },
 
@@ -903,14 +1209,21 @@ export function createComputerGateway(
           key: input.key,
           ...(signal ? { signal } : {}),
         },
-        (address) =>
-          post<ActionResult>(botId, "/key", input, signal, undefined, address),
+        (address, key) =>
+          postTo<ActionResult>(
+            key ?? "",
+            "/key",
+            input,
+            signal,
+            undefined,
+            address,
+          ),
       );
     },
 
     scroll(botId: string, actor: ActionActor, input: ScrollInput) {
-      return govern("computer_scroll", botId, actor, {}, () =>
-        post<ActionResult>(botId, "/scroll", input),
+      return govern("computer_scroll", botId, actor, {}, (_address, key) =>
+        postTo<ActionResult>(key ?? "", "/scroll", input),
       );
     },
 
@@ -927,7 +1240,8 @@ export function createComputerGateway(
         botId,
         actor,
         { filePath: input.path },
-        () => post<ReadFileResult>(botId, "/files/read", input),
+        (_address, key) =>
+          postTo<ReadFileResult>(key ?? "", "/files/read", input),
       );
     },
 
@@ -942,7 +1256,8 @@ export function createComputerGateway(
         botId,
         actor,
         { filePath: input.path ?? "." },
-        () => post<ListFilesResult>(botId, "/files/list", input),
+        (_address, key) =>
+          postTo<ListFilesResult>(key ?? "", "/files/list", input),
       );
     },
 
@@ -964,9 +1279,9 @@ export function createComputerGateway(
         botId,
         actor,
         { command: input.command, ...(caller ? { signal: caller } : {}) },
-        () =>
-          post<RunCommandResult>(
-            botId,
+        (_address, key) =>
+          postTo<RunCommandResult>(
+            key ?? "",
             "/exec",
             input,
             caller,
@@ -981,7 +1296,8 @@ export function createComputerGateway(
         botId,
         actor,
         { filePath: input.path },
-        () => post<WriteFileResult>(botId, "/files/write", input),
+        (_address, key) =>
+          postTo<WriteFileResult>(key ?? "", "/files/write", input),
       );
     },
   };

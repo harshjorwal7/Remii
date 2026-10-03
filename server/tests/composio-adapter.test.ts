@@ -140,7 +140,7 @@ const WHOLE_LISTING = 1000;
 const PAGES_BEFORE_REFUSING = 200;
 
 /** The page this deployment sends somebody back to once the consent screen is done with them. */
-const RETURN_URL = "https://openbot.test/settings/connected-accounts/x";
+const RETURN_URL = "https://remii.test/settings/connected-accounts/x";
 
 /**
  * What Composio answers a withdrawal it actually performed, returned by every double that performs
@@ -182,11 +182,11 @@ const CREATED = { id: "ac_created" };
  * — instead of being an array whose index quietly carries the answer.
  */
 const BY_HAND = { id: "ac_by_hand", name: "Linear", status: "ENABLED" };
-const OURS = { id: "ac_ours", name: "Linear (OpenBot)", status: "ENABLED" };
+const OURS = { id: "ac_ours", name: "Linear (Remii)", status: "ENABLED" };
 /** The spare from a lost enable race: two administrators both found nothing and both created. */
 const OURS_SPARE = {
   id: "ac_ours_spare",
-  name: "Linear (OpenBot)",
+  name: "Linear (Remii)",
   status: "ENABLED",
 };
 
@@ -201,12 +201,12 @@ const OURS_SPARE = {
  *
  * ITS OWN CONSTANT RATHER THAN {@link OURS}, because the suffix is the whole of what the adapter
  * reads and the rest of the name is the app an administrator typed. A gmail withdrawal answered
- * with a config called "Linear (OpenBot)" would pass, and would leave the one fixture in this file
+ * with a config called "Linear (Remii)" would pass, and would leave the one fixture in this file
  * that names the app it is about naming the wrong one.
  */
 const OUR_GMAIL = {
   id: "ac_gmail_ours",
-  name: "Gmail (OpenBot)",
+  name: "Gmail (Remii)",
   status: "ENABLED",
 };
 
@@ -235,8 +235,8 @@ const ourGmailConfig = async () => ({ items: [OUR_GMAIL] });
  * its own AND the absence of the others.
  */
 const NO_CONFIG_REMEDY =
-  /removing the app on its Plugins page and adding it again creates one/;
-const DISABLED_REMEDY = /can enable it in Composio's dashboard/;
+  /[Rr]emoving the app under App connections and adding it again creates one/;
+const DISABLED_REMEDY = /[Ee]nable it in Composio's dashboard/;
 const NO_PAGE_REMEDY =
   /connected by entering a credential rather than by visiting a page/;
 
@@ -432,7 +432,7 @@ describe("listing an app's actions", () => {
 });
 
 describe("the app catalogue", () => {
-  test("a toolkit becomes the row an administrator chooses from", async () => {
+  test("a toolkit becomes the row a person chooses from", async () => {
     const asked: unknown[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({
@@ -706,7 +706,7 @@ describe("executing an action", () => {
     // holding a contradiction with nothing to do about it. The url this action was recorded under
     // has changed, and refreshing the app's tools is what reconciles the two.
     expect(refusal.message).toMatch(
-      /Refreshing this app's tools on its Plugins page/,
+      /Refreshing this app's tools on App connections/,
     );
     expect(executed).toEqual([]);
   });
@@ -882,7 +882,7 @@ describe("beginning one person's connection", () => {
               items: [
                 {
                   id: "ac_this_deployments",
-                  name: "Linear (OpenBot)",
+                  name: "Linear (Remii)",
                   status: "ENABLED",
                 },
               ],
@@ -902,7 +902,7 @@ describe("beginning one person's connection", () => {
       userId: "user_1",
       toolkit: "linear",
       returnUrl:
-        "https://openbot.test/settings/connected-accounts/composio-linear",
+        "https://remii.test/settings/connected-accounts/composio-linear",
     });
 
     // The config this deployment already holds for the app — and no `authConfigs.create`, which
@@ -917,7 +917,16 @@ describe("beginning one person's connection", () => {
         "ac_this_deployments",
         {
           callbackUrl:
-            "https://openbot.test/settings/connected-accounts/composio-linear",
+            "https://remii.test/settings/connected-accounts/composio-linear",
+          /*
+           * The vendor is asked NOT to enforce one account per person per app. Multi-account is the
+           * point: a person may hold a work and a personal account, and `allowMultiple` absent or
+           * false lets Composio refuse the second link itself — which this branch had been doing
+           * while the routes above it stopped guarding, so a second press failed at the vendor with a
+           * message nothing here could improve on. Which account a call runs in is settled by
+           * multi-account storage, not by asking the vendor to allow it.
+           */
+          allowMultiple: true,
         },
       ],
     ]);
@@ -926,7 +935,7 @@ describe("beginning one person's connection", () => {
     });
   });
 
-  test("an app with no auth config is a refusal naming an administrator's step", async () => {
+  test("an app with no auth config is a refusal naming the step to take", async () => {
     /*
      * The state is real rather than defensive: an app enabled before this deployment created
      * configs at all, or a config deleted by hand in Composio's dashboard. Creating one here
@@ -951,7 +960,7 @@ describe("beginning one person's connection", () => {
       userId: "user_1",
       toolkit: "linear",
       returnUrl:
-        "https://openbot.test/settings/connected-accounts/composio-linear",
+        "https://remii.test/settings/connected-accounts/composio-linear",
     });
 
     const refusal = await failureOf(refused);
@@ -1010,7 +1019,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     await broker.authorize({
       userId: "user_1",
       toolkit: "linear",
-      returnUrl: "https://openbot.test/settings/connected-accounts/x",
+      returnUrl: "https://remii.test/settings/connected-accounts/x",
     });
 
     // A connection is a lasting attachment to whatever config it was made against: scopes, tool
@@ -1020,7 +1029,13 @@ describe("telling this deployment's auth configs from anybody else's", () => {
       [
         "user_1",
         "ac_ours",
-        { callbackUrl: "https://openbot.test/settings/connected-accounts/x" },
+        {
+          callbackUrl: "https://remii.test/settings/connected-accounts/x",
+          // Multi-account, so the vendor does not refuse a second link itself. The whole list is
+          // asserted, which is what this test is about: it is the ORDER of the arguments that must not
+          // drift, and a partial match would have let this field through without noticing.
+          allowMultiple: true,
+        },
       ],
     ]);
   });
@@ -1044,7 +1059,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     const refused = broker.authorize({
       userId: "user_1",
       toolkit: "linear",
-      returnUrl: "https://openbot.test/settings/connected-accounts/x",
+      returnUrl: "https://remii.test/settings/connected-accounts/x",
     });
 
     const refusal = await failureOf(refused);
@@ -1147,7 +1162,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     // The count of what is standing and the marker that would claim it, which together are the
     // whole remedy: an operator can look at one config and see which of the two readings it is.
     expect(refusal.message).toMatch(/Composio holds 1 for linear/);
-    expect(refusal.message).toMatch(/\(OpenBot\)/);
+    expect(refusal.message).toMatch(/\(Remii\)/);
     /*
      * AND NOTHING WAS DELETED, which is the half this refusal is not allowed to trade away. The
      * row carries no marker, so deleting it is as likely to destroy an operator's own dashboard
@@ -1191,7 +1206,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     expect(refusal.message).not.toMatch(A_CRASH);
     // The renamed-config reading, which is the one this refusal already carried.
     expect(refusal.message).toMatch(/Composio holds 1 for linear/);
-    expect(refusal.message).toMatch(/\(OpenBot\)/);
+    expect(refusal.message).toMatch(/\(Remii\)/);
     // And the row that was never sorted, whose remedy is the same dashboard and whose existence is
     // what stops the sentence promising a removal that would go through.
     expect(refusal.message).toMatch(/no id or no name/);
@@ -1283,7 +1298,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
    * WHAT IT COST IS A REFUSAL AFTER THE WORK WAS DONE. `configs` held the one readable copy and
    * `unreadable.length` was 1, so this method deleted the config, succeeded, and THEN threw "…and
    * the app has not been fully withdrawn" — over a config that was already gone. `removeServer`
-   * treats that as a failure, so the app's row stayed on the Plugins page behind a removal that had
+   * treats that as a failure, so the app's row stayed on the App connections behind a removal that had
    * completed, and every retry met the same repeat and failed in the same place.
    */
   test("a repeated row whose second copy has no readable name is still one config", async () => {
@@ -1382,7 +1397,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     });
 
     expect(linked).toEqual([
-      ["user_1", "ac_ours", { callbackUrl: RETURN_URL }],
+      ["user_1", "ac_ours", { callbackUrl: RETURN_URL, allowMultiple: true }],
     ]);
   });
 
@@ -1506,7 +1521,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
           // A listing that omitted them would find nothing and create the split it exists to stop.
           list: async () => ({
             items: [
-              { id: "ac_ours", name: "Linear (OpenBot)", status: "DISABLED" },
+              { id: "ac_ours", name: "Linear (Remii)", status: "DISABLED" },
             ],
           }),
           create: async (...call: unknown[]) => {
@@ -1532,7 +1547,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_ours", name: "Linear (OpenBot)", status: "DISABLED" },
+              { id: "ac_ours", name: "Linear (Remii)", status: "DISABLED" },
             ],
           }),
         },
@@ -1548,7 +1563,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     const refused = broker.authorize({
       userId: "user_1",
       toolkit: "linear",
-      returnUrl: "https://openbot.test/settings/connected-accounts/x",
+      returnUrl: "https://remii.test/settings/connected-accounts/x",
     });
 
     // Sending somebody to consent against a disabled config spends their consent and attaches
@@ -1580,8 +1595,8 @@ describe("telling this deployment's auth configs from anybody else's", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_a", name: "Linear (OpenBot)", status: "DISABLED" },
-              { id: "ac_b", name: "Linear (OpenBot)", status: "PENDING" },
+              { id: "ac_a", name: "Linear (Remii)", status: "DISABLED" },
+              { id: "ac_b", name: "Linear (Remii)", status: "PENDING" },
             ],
           }),
         },
@@ -1638,7 +1653,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     expect(created).toEqual([
       [
         "linear",
-        { type: "use_composio_managed_auth", name: "Linear (OpenBot)" },
+        { type: "use_composio_managed_auth", name: "Linear (Remii)" },
       ],
     ]);
   });
@@ -1691,7 +1706,7 @@ describe("the config each kind of app is enabled with", () => {
         {
           type: "use_custom_auth",
           authScheme: "DCR_OAUTH",
-          name: "Linear MCP (OpenBot)",
+          name: "Linear MCP (Remii)",
           credentials: {},
         },
       ],
@@ -1730,7 +1745,7 @@ describe("the config each kind of app is enabled with", () => {
         {
           type: "use_custom_auth",
           authScheme: "API_KEY",
-          name: "Perplexity (OpenBot)",
+          name: "Perplexity (Remii)",
           credentials: {},
         },
       ],
@@ -2421,7 +2436,7 @@ describe("withdrawing one person's grants", () => {
     // The count standing and the marker that would have claimed it, which is the same pair
     // `deleteAuthConfig` hands an operator for the same state and the same one act in a dashboard.
     expect(refusal.message).toMatch(/Composio holds 1 for gmail/);
-    expect(refusal.message).toMatch(/\(OpenBot\)/);
+    expect(refusal.message).toMatch(/\(Remii\)/);
   });
 
   /**
@@ -2594,7 +2609,7 @@ describe("withdrawing one person's grants", () => {
    * `unreadable` counts the rest — so both are ordinary facts about one listing and both can be
    * true at once. Written as consecutive throws the second is reachable only when the first is
    * false, so a person whose app holds one renamed config beside one unreadable row is told that
-   * "renaming it to end with (OpenBot) lets disconnecting again withdraw them" — which is not true
+   * "renaming it to end with (Remii) lets disconnecting again withdraw them" — which is not true
    * while a row nothing could scope the account listing to is still sitting there. The method's own
    * partial-withdrawal sentence appends that fact as its own clause; the refusal ahead of it did
    * not.
@@ -2629,7 +2644,7 @@ describe("withdrawing one person's grants", () => {
     expect(failure.message).not.toMatch(A_CRASH);
     // The renamed-config reading, which this refusal already carried.
     expect(failure.message).toMatch(/Composio holds 1 for gmail/);
-    expect(failure.message).toMatch(/\(OpenBot\)/);
+    expect(failure.message).toMatch(/\(Remii\)/);
     // And the row that was never sorted, which is what makes the rename alone insufficient.
     expect(failure.message).toMatch(/cannot read/);
     // Nothing was withdrawn either way — the listing was never scoped, so no delete was composed.
@@ -2656,12 +2671,12 @@ describe("refusals a route can tell from an outage", () => {
       .authorize({
         userId: "user_1",
         toolkit: "linear",
-        returnUrl: "https://openbot.test/settings/connected-accounts/x",
+        returnUrl: "https://remii.test/settings/connected-accounts/x",
       })
       .catch((raised: unknown) => raised);
 
-    // `/An administrator/` opens two of this method's three refusals, so it recognised the class
-    // and not the branch. The remedy is what a reader is being handed.
+    // The remedy fragment opens only one of this method's three refusals, so this recognised the
+    // branch rather than the class. What a reader is handed is the thing being asserted.
     expect(brokerSentence(error)).toMatch(NO_CONFIG_REMEDY);
     expect(brokerSentence(error)).not.toMatch(DISABLED_REMEDY);
   });
@@ -2672,7 +2687,7 @@ describe("refusals a route can tell from an outage", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_ours", name: "Linear (OpenBot)", status: "ENABLED" },
+              { id: "ac_ours", name: "Linear (Remii)", status: "ENABLED" },
             ],
           }),
         },
@@ -2687,7 +2702,7 @@ describe("refusals a route can tell from an outage", () => {
       .authorize({
         userId: "user_1",
         toolkit: "linear",
-        returnUrl: "https://openbot.test/settings/connected-accounts/x",
+        returnUrl: "https://remii.test/settings/connected-accounts/x",
       })
       .catch((raised: unknown) => raised);
 
@@ -2977,6 +2992,19 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
         "Reading what the app asks a person for did not answer. No form was drawn and nothing was attached, so there is nothing about this app to say that the route's own advice — the deployment's key, the vendor's status page — does not already cover.",
     },
     {
+      /*
+       * ADDED WITH MULTI-ACCOUNT SUPPORT. `listAccounts` reads the same listing `isConnected` does and
+       * hands the rows back rather than reducing them to a boolean, so a listing that did not answer
+       * leaves nothing authored to say — no app is quoted and no sentence is composed. The reader gets
+       * Composio's own message, which is what the `allowed` branch of the table below verifies rather
+       * than taking this sentence's word for it.
+       */
+      method: "listAccounts",
+      kind: "an outage",
+      because:
+        "The account listing did not answer, and there is nothing to name it against. This method returns the rows a person already holds rather than reducing them to a boolean, so no app is quoted and no sentence is composed; Composio's own message is what reaches the reader.",
+    },
+    {
       method: "revokeAccount",
       kind: "an outage",
       because:
@@ -2989,7 +3017,7 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
      * the app gets named somewhere downstream; neither does. `listingSentence` returns the thrown
      * message verbatim whenever it is neither a schema mismatch nor the vendor's placeholder
      * (`./composio`), and `callTool` does the same on the execute path — so "socket hang up" reaches
-     * an administrator's Plugins page and a model's context exactly like that, bare, naming no app.
+     * an administrator's App connections and a model's context exactly like that, bare, naming no app.
      * The entries now say so, and the `allowed` branch of the test asserts the message travels
      * untouched, which is what makes the claim hold itself up.
      */
@@ -3089,6 +3117,12 @@ describe("what a vendor failure becomes on its way out of the seam", () => {
           toolkit: "perplexityai",
           authScheme: "API_KEY",
         }),
+    },
+    {
+      method: "listAccounts",
+      vendor: (raise) => ({ connectedAccounts: { list: raise } }),
+      ask: ({ broker }) =>
+        broker.listAccounts({ userId: "user_1", toolkit: "gmail" }),
     },
     {
       method: "connectWithFields",
@@ -3438,7 +3472,7 @@ describe("each vendor condition reaches the reader as its own remedy", () => {
               error: {
                 error: {
                   message:
-                    "The auth config linear (OpenBot) has no redirect URI registered.",
+                    "The auth config linear (Remii) has no redirect URI registered.",
                 },
               },
             },
@@ -3449,7 +3483,7 @@ describe("each vendor condition reaches the reader as its own remedy", () => {
 
     expect(brokerSentence(failure)).toBeNull();
     expect(vendorSentence(failure)).toBe(
-      "The auth config linear (OpenBot) has no redirect URI registered.",
+      "The auth config linear (Remii) has no redirect URI registered.",
     );
   });
 });
@@ -3704,7 +3738,7 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
         {
           shape: "a row whose id is null",
           answer: {
-            items: [{ id: null, name: "Linear (OpenBot)", status: "ENABLED" }],
+            items: [{ id: null, name: "Linear (Remii)", status: "ENABLED" }],
           },
         },
       ],
@@ -4106,7 +4140,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     // Reading one page here answers "this deployment has no config for linear" and sends an
     // administrator to remove and re-add an app whose config is sitting on page two.
     expect(linked).toEqual([
-      ["user_1", "ac_ours", { callbackUrl: RETURN_URL }],
+      ["user_1", "ac_ours", { callbackUrl: RETURN_URL, allowMultiple: true }],
     ]);
   });
 
@@ -4657,7 +4691,7 @@ describe("what a malformed field of a row actually costs", () => {
 
     expect(refusal.message).not.toMatch(A_CRASH);
     expect(refusal.message).toMatch(/slug/);
-    // Which row, because an administrator reading this off a Plugins page has a listing of sixty
+    // Which row, because an administrator reading this off a App connections has a listing of sixty
     // actions and no other way to tell which of them Composio named with nothing.
     expect(refusal.message).toMatch(/row 2/);
     // And what it cost them, which is nothing: a refusal here leaves the actions already recorded
@@ -4724,7 +4758,7 @@ describe("what a malformed field of a row actually costs", () => {
       fakeVendor({
         authConfigs: {
           list: async () => ({
-            items: [{ id: "   ", name: "Linear (OpenBot)", status: "ENABLED" }],
+            items: [{ id: "   ", name: "Linear (Remii)", status: "ENABLED" }],
           }),
         },
       }),
@@ -4929,7 +4963,7 @@ describe("what a malformed field of a row actually costs", () => {
       fakeVendor({
         authConfigs: {
           list: async () => ({
-            items: [{ name: "Linear (OpenBot)", status: "ENABLED" }],
+            items: [{ name: "Linear (Remii)", status: "ENABLED" }],
           }),
           delete: async (...call: unknown[]) => {
             deleted.push(call);
@@ -4978,7 +5012,7 @@ describe("what a malformed field of a row actually costs", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { name: "Linear (OpenBot)", status: "ENABLED" },
+              { name: "Linear (Remii)", status: "ENABLED" },
               { id: "ac_b", status: "ENABLED" },
             ],
           }),
@@ -5011,8 +5045,8 @@ describe("what a malformed field of a row actually costs", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_a", name: "Linear (OpenBot)", status: "PENDING" },
-              { id: "ac_b", name: "Linear (OpenBot)", status: "SUSPENDED" },
+              { id: "ac_a", name: "Linear (Remii)", status: "PENDING" },
+              { id: "ac_b", name: "Linear (Remii)", status: "SUSPENDED" },
             ],
           }),
         },
@@ -5062,7 +5096,7 @@ describe("what a malformed field of a row actually costs", () => {
           list: async () => ({
             items: WORDS.map((status, index) => ({
               id: `ac_${index}`,
-              name: "Linear (OpenBot)",
+              name: "Linear (Remii)",
               status,
             })),
           }),
@@ -5106,7 +5140,7 @@ describe("what a malformed field of a row actually costs", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_a", name: "Linear (OpenBot)", status: "DISABLED" },
+              { id: "ac_a", name: "Linear (Remii)", status: "DISABLED" },
               { id: "ac_b", status: "ENABLED" },
             ],
           }),
@@ -5140,7 +5174,7 @@ describe("what a malformed field of a row actually costs", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_a", name: "Linear (OpenBot)", status: "DISABLED" },
+              { id: "ac_a", name: "Linear (Remii)", status: "DISABLED" },
               { id: "ac_b", status: "ENABLED" },
             ],
           }),
@@ -5182,7 +5216,7 @@ describe("what a malformed field of a row actually costs", () => {
       fakeVendor({
         authConfigs: {
           list: async () => ({
-            items: [{ id: "ac_a", name: "Linear (OpenBot)", status: WIRE }],
+            items: [{ id: "ac_a", name: "Linear (Remii)", status: WIRE }],
           }),
         },
       }),
@@ -5213,8 +5247,8 @@ describe("what a malformed field of a row actually costs", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_a", name: "Linear (OpenBot)", status: "ENABLED" },
-              { id: "ac_B", name: "Linear (OpenBot)", status: "ENABLED" },
+              { id: "ac_a", name: "Linear (Remii)", status: "ENABLED" },
+              { id: "ac_B", name: "Linear (Remii)", status: "ENABLED" },
             ],
           }),
         },
@@ -5241,7 +5275,9 @@ describe("what a malformed field of a row actually costs", () => {
      * Connect and an administrator pressing Remove, who need not be answered by the same process,
      * container or build of ICU. This pair is the one that tells the two orders apart.
      */
-    expect(linked).toEqual([["user_1", "ac_B", { callbackUrl: RETURN_URL }]]);
+    expect(linked).toEqual([
+      ["user_1", "ac_B", { callbackUrl: RETURN_URL, allowMultiple: true }],
+    ]);
   });
 
   test("a created config the answer does not name is reported as possibly standing", async () => {
@@ -5326,7 +5362,7 @@ describe("what a malformed field of a row actually costs", () => {
         fakeVendor({
           authConfigs: {
             list: async () => ({
-              items: [{ id: "ac_ours", name: "Linear (OpenBot)", status }],
+              items: [{ id: "ac_ours", name: "Linear (Remii)", status }],
             }),
           },
           connectedAccounts: {
@@ -5409,7 +5445,7 @@ describe("a field Composio padded with whitespace", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: " ac_ours ", name: "Linear (OpenBot)", status: "ENABLED" },
+              { id: " ac_ours ", name: "Linear (Remii)", status: "ENABLED" },
             ],
           }),
           delete: async (...call: unknown[]) => {
@@ -5591,7 +5627,7 @@ describe("a field Composio padded with whitespace", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_ours", name: "Linear (OpenBot)", status: " ENABLED " },
+              { id: "ac_ours", name: "Linear (Remii)", status: " ENABLED " },
             ],
           }),
         },
@@ -5615,7 +5651,7 @@ describe("a field Composio padded with whitespace", () => {
       redirectUrl: "https://backend.composio.dev/s/a-link",
     });
     expect(linked).toEqual([
-      ["user_1", "ac_ours", { callbackUrl: RETURN_URL }],
+      ["user_1", "ac_ours", { callbackUrl: RETURN_URL, allowMultiple: true }],
     ]);
   });
 
@@ -5627,7 +5663,7 @@ describe("a field Composio padded with whitespace", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_ours", name: "Linear (OpenBot)", status: " ENABLED " },
+              { id: "ac_ours", name: "Linear (Remii)", status: " ENABLED " },
             ],
           }),
         },
@@ -5664,7 +5700,7 @@ describe("a field Composio padded with whitespace", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_ours", name: "Linear (OpenBot)", status: " DISABLED " },
+              { id: "ac_ours", name: "Linear (Remii)", status: " DISABLED " },
             ],
           }),
         },
@@ -5942,7 +5978,11 @@ describe("the key becoming a vendor, and which delete that vendor carries", () =
     // The person, then the config, then the callback — and the whole list rather than a field of
     // it, because the defect this is written for is an order and not a value.
     expect(minted).toEqual([
-      ["user_1", OUR_GMAIL.id, { callbackUrl: RETURN_URL }],
+      [
+        "user_1",
+        OUR_GMAIL.id,
+        { callbackUrl: RETURN_URL, allowMultiple: true },
+      ],
     ]);
     expect(begun).toEqual({
       redirectUrl: "https://backend.composio.dev/s/a-link",
@@ -6827,7 +6867,7 @@ describe("the fields an app asks a person to fill in", () => {
     // act that rewrites the recorded scheme, which is an administrator's rather than this person's.
     expect(refusal.message).toMatch(/linear/);
     expect(refusal.message).toMatch(/API_KEY/);
-    expect(refusal.message).toMatch(/Plugins page/);
+    expect(refusal.message).toMatch(/App connections/);
   });
 
   /**
@@ -6897,13 +6937,13 @@ describe("the fields an app asks a person to fill in", () => {
       /*
        * THE REMEDY IS THE WHOLE OF WHAT SEPARATES THIS FROM THE CASE ABOVE. A shape Composio
        * changed is nobody's setting, so what fixes it is an upgrade; a mode the app stopped
-       * publishing is fixed by an administrator recording the scheme afresh on the Plugins page.
+       * publishing is fixed by an administrator recording the scheme afresh on the App connections.
        * Handing the second sentence to somebody holding the first sends them to remove and re-add
        * an app whose publication never moved, after which the re-add reads the same unreadable
        * answer and records the same word.
        */
       expect(refusal.message).toMatch(/@composio\/core/);
-      expect(refusal.message).not.toMatch(/Plugins page/);
+      expect(refusal.message).not.toMatch(/App connections/);
     }
   });
 
@@ -6914,7 +6954,7 @@ describe("the fields an app asks a person to fill in", () => {
    * recorded one is not among them — so an unreadable answer reached an administrator wearing the
    * sentence about a mode this app has stopped publishing. So did a retrieve that answered
    * something which is not a toolkit: `("perplexityai").auth_config_details` is `undefined` rather
-   * than a throw. Both sent somebody to the Plugins page to remove and re-add an app that publishes
+   * than a throw. Both sent somebody to the App connections to remove and re-add an app that publishes
    * exactly what it always did.
    */
   test("an answer whose modes this deployment cannot read is refused as that rather than as a mode the app dropped", async () => {
@@ -6934,7 +6974,7 @@ describe("the fields an app asks a person to fill in", () => {
       expect(refusal.message).not.toMatch(A_CRASH);
       expect(refusal.message).toMatch(/linear/);
       expect(refusal.message).toMatch(/@composio\/core/);
-      expect(refusal.message).not.toMatch(/Plugins page/);
+      expect(refusal.message).not.toMatch(/App connections/);
     }
   });
 
@@ -7811,7 +7851,7 @@ describe("connecting one person with the secret they typed", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_ours", name: "Linear (OpenBot)", status: "DISABLED" },
+              { id: "ac_ours", name: "Linear (Remii)", status: "DISABLED" },
             ],
           }),
         },
@@ -7859,8 +7899,8 @@ describe("connecting one person with the secret they typed", () => {
         authConfigs: {
           list: async () => ({
             items: [
-              { id: "ac_a", name: "Linear (OpenBot)", status: "DISABLED" },
-              { id: "ac_b", name: "Linear (OpenBot)", status: "PENDING" },
+              { id: "ac_a", name: "Linear (Remii)", status: "DISABLED" },
+              { id: "ac_b", name: "Linear (Remii)", status: "PENDING" },
             ],
           }),
         },
@@ -7890,7 +7930,7 @@ describe("connecting one person with the secret they typed", () => {
     expect(created).toEqual([]);
   });
 
-  test("a listing this deployment cannot read does not send an administrator round a loop", async () => {
+  test("a listing this deployment cannot read does not send the reader round a loop", async () => {
     const created: unknown[] = [];
     const { broker } = buildComposioClient(
       fakeVendor({

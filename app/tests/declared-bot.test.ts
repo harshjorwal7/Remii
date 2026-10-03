@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { declaredBotId } from "../src/lib/copilot/active-bot";
+import { REMII_AGENT_ID } from "@/lib/agents/default-agent";
 
 /**
  * The placeholder Bot id is a routing convenience, not a Bot. Anything that would ask the server
@@ -12,7 +13,7 @@ describe("declaredBotId", () => {
   });
 
   test("passes a declared Bot through", () => {
-    expect(declaredBotId("general-assistant")).toBe("general-assistant");
+    expect(declaredBotId(REMII_AGENT_ID)).toBe(REMII_AGENT_ID);
   });
 
   test("passes a Bot through even when the placeholder is its prefix", () => {

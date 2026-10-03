@@ -9,7 +9,7 @@ import { client } from "@/lib/client";
  */
 export type { BrokerField } from "./mutations";
 
-/** A tool one server offers, as the Plugins page sees it. */
+/** A tool one server offers, as App connections sees it. */
 export type PluginTool = {
   serverId: string;
   name: string;
@@ -77,6 +77,19 @@ export type PluginServer = {
    * Null is not an older brokered row. It is a row that is not brokered at all.
    */
   authScheme: string | null;
+  /**
+   * The vendor's presentation for an enabled Composio app: logo, description
+   * and action count, joined server-side off the cached directory.
+   *
+   * Display only — connection decisions never read it. Null for rows that
+   * are not brokered, or when the directory could not be read.
+   */
+  broker?: {
+    logo: string | null;
+    description: string;
+    categories: string[];
+    actionCount: number;
+  } | null;
   tools: PluginTool[];
   /** Empty for a healthy connector. See {@link WithdrawnGrant}. */
   withdrawn: WithdrawnGrant[];
@@ -102,6 +115,33 @@ export type PluginSkill = {
    * `grantedTo` on the tool side is what decides.
    */
   tools: string[];
+  /**
+   * The public repository this skill is about, or null.
+   *
+   * The summary rather than the whole reading, and the size is the reason: the cached file list is
+   * bounded at a few hundred kilobytes and this payload is read on every paint of the Skills page and
+   * on every poll of the `/` menu in every open conversation. What the screen needs is enough to draw
+   * where a skill points and when it was last read; what a run needs is a repository to bind three
+   * tools to. Neither needs the files, and the files are fetched server-side when a tool is called.
+   */
+  repo: SkillRepoSummary | null;
+};
+
+/** Where a skill's repository points, and how stale this deployment's reading of it is. */
+export type SkillRepoSummary = {
+  /** `https://github.com/owner/repo`, rebuilt from the parsed segments. */
+  url: string;
+  /** The branch, tag or commit the author named. Null means the repository's default branch. */
+  ref: string | null;
+  /** A folder inside the repository, treated as the root. Empty means the whole repository. */
+  path: string;
+  /** The branch the last reading was at, which is the answer for a null `ref`. */
+  defaultRef: string | null;
+  indexedAt: string | null;
+  /** Whether the cached file list is all of it. Said here rather than left for a Bot to assume. */
+  truncated: boolean;
+  /** Null rather than zero before the first read: an unread repository has no file count. */
+  fileCount: number | null;
 };
 
 export type CatalogueItem = {
@@ -179,6 +219,16 @@ export type GrantedPlugins = {
     title: string;
     summary: string;
     instructions: string;
+    /**
+     * The public repository this skill is about, or null.
+     *
+     * This is what binds `repo_overview`, `repo_search` and `repo_read_file` to one repository each:
+     * the browser already knows which skills this Bot was granted, and the server checks that grant
+     * again on every read, so the model is offered a set of repositories rather than a set of URLs it
+     * could aim anywhere. Present here because the browser is the only place that knows a skill is in
+     * play — the same reason `instructions` is here rather than assembled server-side.
+     */
+    repo: SkillRepoSummary | null;
   }[];
 };
 
@@ -186,6 +236,8 @@ export const pluginKeys = {
   all: ["plugins"] as const,
   page: () => ["plugins", "page"] as const,
   forAgent: (agentId: string) => ["plugins", "for-agent", agentId] as const,
+  serverTools: (serverId: string) =>
+    ["plugins", "server-tools", serverId] as const,
   connections: () => ["plugins", "connections"] as const,
   composioApps: (query: string) =>
     ["plugins", "composio", "apps", query] as const,
@@ -305,10 +357,35 @@ export function pluginsPageQueryOptions() {
 }
 
 /**
+ * The same page without per-tool detail: ids, titles, logos, connection
+ * schemes, grants state — everything the connected-accounts screens draw.
+ * With the whole broker catalogue enabled the full payload is tens of
+ * megabytes; this one is kilobytes.
+ */
+export function pluginsSlimQueryOptions() {
+  return queryOptions({
+    queryKey: [...pluginKeys.page(), "slim"] as const,
+    queryFn: async (): Promise<PluginsPage> => {
+      const response = await client("/api/plugins?slim=1", {
+        fallback: "Plugins could not be loaded.",
+      });
+      return response.json();
+    },
+  });
+}
+
+/**
  * Composio's app directory, narrowed by a search term.
  *
  * The term goes to our own endpoint because the vendor's client drops a search parameter and
  * answers with an unfiltered page, so filtering has to happen somewhere that admits to doing it.
+ *
+ * An EMPTY TERM IS FETCHED RATHER THAN WAITED ON, which is the correction to what this used to do.
+ * It was `enabled: term.length > 0`, on the reasoning that the directory is a thousand rows and
+ * nobody should pay for all of them before typing. But that made the browser open on nothing at
+ * all — an empty box, no rows, and no hint that typing was the thing that would fill it, which
+ * reads as a broken feature rather than as an empty search. The server answers an empty term with a
+ * short curated set, so this costs a few rows instead of a thousand and the list is usable on sight.
  */
 export function composioAppsQueryOptions(query: string) {
   return queryOptions({
@@ -335,6 +412,66 @@ export function agentPluginsQueryOptions(agentId: string) {
       const response = await client(
         `/api/plugins/for/${encodeURIComponent(agentId)}`,
         { fallback: "This Bot's plugins could not be read." },
+      );
+      return response.json();
+    },
+  });
+}
+
+/** Tools and current grants for one specific server. */
+export function serverToolsQueryOptions(serverId: string) {
+  return queryOptions({
+    queryKey: pluginKeys.serverTools(serverId),
+    enabled: serverId.length > 0,
+    queryFn: async (): Promise<{ tools: PluginTool[] }> => {
+      const response = await client(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/tools`,
+        { fallback: "This app's tools could not be loaded." },
+      );
+      return response.json();
+    },
+  });
+}
+
+export type ConnectedAccountDetail = {
+  id: string;
+  accountId: string | null;
+  label: string | null;
+  connectedAt: string;
+  verified: boolean;
+  verifiedAt: string | null;
+  grantedAgents: Array<{ id: string; name: string; avatarUrl: string | null }>;
+};
+
+export function serverAccountsQueryOptions(serverId: string) {
+  return queryOptions({
+    queryKey: ["plugins", "servers", serverId, "accounts"] as const,
+    enabled: serverId.length > 0,
+    queryFn: async (): Promise<{ accounts: ConnectedAccountDetail[] }> => {
+      const response = await client(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/accounts`,
+        { fallback: "Connected accounts could not be loaded." },
+      );
+      return response.json();
+    },
+  });
+}
+
+export type AgentAccountGrant = {
+  connectionId: string;
+  toolkit: string;
+  accountId: string | null;
+  label: string | null;
+};
+
+export function agentAccountGrantsQueryOptions(agentId: string) {
+  return queryOptions({
+    queryKey: ["plugins", "account-grants", agentId] as const,
+    enabled: agentId.length > 0,
+    queryFn: async (): Promise<{ grants: AgentAccountGrant[] }> => {
+      const response = await client(
+        `/api/plugins/account-grants/${encodeURIComponent(agentId)}`,
+        { fallback: "Agent account grants could not be loaded." },
       );
       return response.json();
     },

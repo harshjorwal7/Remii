@@ -1,5 +1,5 @@
 import type { Message } from "@ag-ui/core";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { ChannelAvatar } from "@/components/channels/avatar";
@@ -16,13 +16,16 @@ import {
   ComboboxList,
 } from "@/components/ui/combobox";
 import { defaultAgentProfile } from "@/lib/agents/default-agent";
+import { duplicateAgentMutationOptions } from "@/lib/agents/mutations";
 import {
   type AgentProfile,
   agentListQueryOptions,
   agentQueryOptions,
 } from "@/lib/agents/queries";
+import { workspaceAgentId } from "@/lib/agents/workspace";
 import { useStartChannel } from "@/lib/channels/start";
 import { useSkillCommands } from "@/lib/plugins/skill-commands";
+import { queryClient } from "@/query-client";
 import { newId } from "../../../../lib/new-id";
 
 /**
@@ -47,6 +50,14 @@ function RouteComponent() {
   const [error, setError] = useState<string | null>(null);
   // Optimistic seed shown before the first channel record exists.
   const [sent, setSent] = useState<Message | null>(null);
+  /*
+   * Templates join the workspace as copies, not as themselves. Picking a template and pressing
+   * send duplicates it first and starts the channel with the copy, so the shared template is
+   * never edited in place and never holds anybody's conversation. The duplication waits for the
+   * first send the way channel creation does: choosing is free, sending commits.
+   */
+  const duplicate = useMutation(duplicateAgentMutationOptions(queryClient));
+  const duplicateAsync = duplicate.mutateAsync;
 
   // Stale or private `?agent=` values are ignored because the roster is permission-filtered.
   const listed = profiles?.find((profile) => profile.id === agent);
@@ -94,7 +105,7 @@ function RouteComponent() {
           // Do not auto-open when the recipient came from the URL; the field is already answered.
           defaultOpen={!chosen && !loadError && !waitingForUrlAgent}
           autoHighlight
-          items={profiles ?? []}
+          items={(profiles ?? []).filter((item) => !item.isSystemTemplate)}
           isItemEqualToValue={(item: AgentProfile, value: AgentProfile) =>
             item.id === value.id
           }
@@ -124,11 +135,24 @@ function RouteComponent() {
             <ComboboxList>
               {(item: AgentProfile) => (
                 <ComboboxItem key={item.id} value={item} className="h-10">
-                  <ChannelAvatar participantIds={[item.id]} size={24} />
+                  {/* The combobox has the whole profile in hand, so it shows the chosen mascot rather
+                      than a seeded one that would differ from the card this same agent appears on. */}
+                  <ChannelAvatar
+                    participantIds={[item.id]}
+                    mascots={
+                      item.mascot ? { [item.id]: item.mascot } : undefined
+                    }
+                    size={24}
+                  />
                   {item.name}
                   <span className="truncate text-muted-foreground ml-1">
                     {item.title}
                   </span>
+                  {item.isSystemTemplate ? (
+                    <span className="ml-auto shrink-0 rounded-full bg-muted px-1.5 py-px text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+                      Template
+                    </span>
+                  ) : null}
                 </ComboboxItem>
               )}
             </ComboboxList>
@@ -160,9 +184,19 @@ function RouteComponent() {
           setSent(seedMessage(draft.text, newId()));
 
           try {
+            /*
+             * A template is added to the workspace at the moment it is first spoken to: the
+             * duplicate lands on the person's roster and the channel opens with the copy. A
+             * duplicate that fails is a send that fails, with the draft preserved below.
+             */
+            const targetId = await workspaceAgentId(
+              chosen?.id === recipient.id ? chosen : undefined,
+              recipient.id,
+              duplicateAsync,
+            );
             // Recorded, then started: a coworker picked here is as much a choice as an `@` on the
             // home screen, and the trail has to say so for both.
-            await startChosen(recipient.id, draft.text);
+            await startChosen(targetId, draft.text);
           } catch (caught) {
             // Preserve the unsent draft when channel creation fails.
             setSent(null);
@@ -174,7 +208,7 @@ function RouteComponent() {
             throw caught;
           }
         }}
-        pending={pending}
+        pending={pending || duplicate.isPending}
       />
     </div>
   );

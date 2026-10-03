@@ -21,12 +21,6 @@ function rootDockerfile() {
   return readFileSync(join(import.meta.dir, "..", "Dockerfile"), "utf8");
 }
 
-function agentComputerDockerfile() {
-  return readFileSync(
-    join(import.meta.dir, "..", "agent-computer", "Dockerfile"),
-    "utf8",
-  );
-}
 
 function runLangGraphAguiModelProbe(
   openaiBaseUrl: string | undefined,
@@ -36,7 +30,7 @@ function runLangGraphAguiModelProbe(
     openaiApiKey?: string;
   } = {},
 ) {
-  const dir = mkdtempSync(join(tmpdir(), "openbot-langgraph-agui-"));
+  const dir = mkdtempSync(join(tmpdir(), "remii-langgraph-agui-"));
   try {
     writeFileSync(
       join(dir, "ag_ui_langgraph.py"),
@@ -188,7 +182,7 @@ function runComposeConfig(env: Record<string, string>) {
       cwd: join(import.meta.dir, ".."),
       env: {
         PATH: process.env.PATH ?? "",
-        PICKED_HARNESS_IMAGE: "openbot-agent-langgraph-agui:test",
+        PICKED_HARNESS_IMAGE: "remii-agent-langgraph-agui:test",
         ...env,
       },
       encoding: "utf8",
@@ -233,10 +227,11 @@ test("provides PostgreSQL with pgvector for local development", () => {
 test("publishes every service on a settable port with the documented default", () => {
   const compose = composeFile();
 
+  // No COMPUTER_PORT and no SUPERVISOR_PORT. The computer is a E2B desktop, provisioned per
+  // person, so nothing on this host publishes a browser; and the supervisor existed only to start
+  // those per-Bot browser containers, so there is nothing left for it to hold a socket for.
   const published = [
     ["POSTGRES_PORT", "5432", "5432"],
-    ["COMPUTER_PORT", "4100", "4100"],
-    ["SUPERVISOR_PORT", "4500", "4300"],
     ["BOT_PORT", "4200", "4200"],
     ["LANGGRAPH_PORT", "4201", "4201"],
   ] as const;
@@ -264,8 +259,6 @@ test("publishes every service that holds a secret on loopback only", () => {
 
   for (const name of [
     "POSTGRES_PORT",
-    "SUPERVISOR_PORT",
-    "COMPUTER_PORT",
     "BOT_PORT",
     "LANGGRAPH_PORT",
     "PICKED_HARNESS_PORT",
@@ -439,103 +432,14 @@ test("runs migrations after PostgreSQL becomes healthy", () => {
   expect(compose).toContain('"drizzle-kit", "migrate"');
 });
 
-test("builds the deployment image with Playwright's Chromium payload only", () => {
-  for (const dockerfile of [rootDockerfile(), agentComputerDockerfile()]) {
-    expect(dockerfile).toContain(
-      "FROM node:24.18.1-bookworm-slim AS node-toolchain",
-    );
-    expect(dockerfile).toContain("FROM ubuntu:24.04");
-    expect(dockerfile).not.toContain("mcr.microsoft.com/playwright");
-    expect(dockerfile).toContain("ARG PLAYWRIGHT_VERSION=1.62.1");
-    expect(dockerfile).toContain("ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright");
-    expect(dockerfile).toContain(
-      "COPY --from=node-toolchain /usr/local /usr/local",
-    );
-    expect(dockerfile).toContain(
-      'bunx --bun "playwright@' +
-        "$" +
-        "{PLAYWRIGHT_VERSION}" +
-        '" install --with-deps chromium',
-    );
-    expect(dockerfile).not.toMatch(/\bnodejs\b|\bnpm\b/);
-    expect(dockerfile).not.toMatch(
-      /\binstall(?:\s+--with-deps)?\s+(firefox|webkit)\b/,
-    );
-  }
-
-  const compose = composeFile();
-  expect(compose).toContain(
-    [
-      "agent-computer:",
-      "    build:",
-      "      context: .",
-      "      dockerfile: agent-computer/Dockerfile",
-    ].join("\n"),
-  );
-});
-
-test("takes Bun from the same immutable release in both computer images", () => {
-  const { packageManager } = JSON.parse(
-    readFileSync(join(import.meta.dir, "..", "package.json"), "utf8"),
-  );
-  const bunVersion = packageManager.replace("bun@", "");
-  const sources = [];
-  for (const dockerfile of [rootDockerfile(), agentComputerDockerfile()]) {
-    const source = dockerfile.match(
-      /^FROM (oven\/bun:\S+) AS bun-toolchain$/m,
-    )?.[1];
-    expect(source).toMatch(
-      new RegExp(
-        `^oven/bun:${bunVersion.replaceAll(".", "\\.")}@sha256:[a-f0-9]{64}$`,
-      ),
-    );
-    expect(dockerfile).toContain(
-      "COPY --from=bun-toolchain /usr/local/bin/bun /usr/local/bin/bun",
-    );
-    expect(dockerfile).not.toContain("bun.sh/install");
-    expect(dockerfile).not.toMatch(/\b(?:curl|wget)\b[^\n]*\|\s*(?:bash|sh)\b/);
-    sources.push(source);
-  }
-  expect(sources[0]).toBe(sources[1]);
-});
-
-/**
- * Per-Bot egress reaches the processes that read it.
- *
- * `EGRESS_PROXY_<BOT>` and `EGRESS_PROXY_DEFAULT` are resolved from `process.env` by the computer
- * itself (`agent-computer/src/egress.ts`), and the supervisor forwards every `EGRESS_PROXY` key out
- * of its own environment into each computer it creates (`supervisor/src/index.ts`). Compose gives a
- * container only what its `environment:` and `env_file:` blocks name, and for a long time neither
- * named these, so an operator who configured a proxy per the documentation got a browser that went
- * out directly and no error saying so.
- *
- * A file rather than `environment:` entries because the names are per-Bot and therefore not knowable
- * here, and a file of its own rather than `.env` because that one holds the deployment's secrets and
- * the browser container is deliberately not given them.
- */
-test("carries per-Bot egress into the computer and the supervisor", () => {
-  const compose = composeFile();
-
-  // Both halves: the shared computer reads them itself, and the supervisor passes them on.
-  const services = compose.split(/^ {2}(?=\S)/m);
-  for (const name of ["agent-computer:", "supervisor:"]) {
-    const service = services.find((block) => block.startsWith(name));
-    expect(service).toBeDefined();
-    expect(service).toContain("egress.env");
-  }
-
-  // Optional, because a deployment with no proxy is the ordinary case and must still start.
-  expect(compose).toContain("required: false");
-});
-
 test("gives the selected harness the same governed callback as the framework Bot", () => {
   const config = runComposeConfig({
-    OPENBOT_TOOL_URL: "http://callback.example/api/agent-tools/call",
+    REMII_TOOL_URL: "http://callback.example/api/agent-tools/call",
     AGENT_TOOL_TOKEN: "synthetic-callback-token",
   });
   for (const service of ["agent-harness", "agent-langgraph"] as const) {
     expect(config.services[service].environment).toMatchObject({
-      OPENBOT_TOOL_URL: "http://callback.example/api/agent-tools/call",
+      REMII_TOOL_URL: "http://callback.example/api/agent-tools/call",
       AGENT_TOOL_TOKEN: "synthetic-callback-token",
     });
     expect(config.services[service].extra_hosts).toContain(

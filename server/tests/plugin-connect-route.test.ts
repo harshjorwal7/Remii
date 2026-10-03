@@ -25,7 +25,7 @@ function signedIn(): MiddlewareHandler<{ Variables: AppVariables }> {
   return async (context, next) => {
     context.set("actor", {
       id: "user-1",
-      email: "person@openbot.test",
+      email: "person@remii.test",
       role: "user",
     } as never);
     await next();
@@ -52,8 +52,12 @@ function app(store: {
     } as never,
     signedIn(),
     async () => true,
+    // `canManageBot`, a fourth POSITIONAL argument ahead of the options bag. Passing the bag in its
+    // place made `connect` undefined, so the route answered "This deployment has no app URL
+    // configured" instead of minting an authorization URL.
+    async () => true,
     {
-      publicUrl: "https://openbot.example",
+      publicUrl: "https://remii.example",
       appUrl: "https://app.example",
       encryptionKey: ENCRYPTION_KEY,
       // Only the callback asks this. Every test here stops at the authorization URL.
@@ -81,7 +85,7 @@ describe("connecting a dynamically registered vendor", () => {
 
     expect(response.status).toBe(200);
     expect(ensureCalls).toEqual([
-      { serverId: "notion", by: "person@openbot.test" },
+      { serverId: "notion", by: "person@remii.test" },
     ]);
 
     const body = (await response.json()) as { authorizationUrl: string };
@@ -156,7 +160,7 @@ describe("connecting a manually registered vendor (regression pin)", () => {
  * unhandled `CatalogueEntryUnknownError` out of `ensureOAuthClient`.
  */
 describe("connecting a vendor this deployment has not added", () => {
-  test("is the 409 an administrator can act on, not a 500", async () => {
+  test("is the 409 one the person can act on, not a 500", async () => {
     const hono = app({
       oauthClientFor: async () => null,
       ensureOAuthClient: async (serverId) => {
@@ -172,7 +176,7 @@ describe("connecting a vendor this deployment has not added", () => {
     expect(response.status).toBe(409);
     const body = (await response.json()) as { error: string };
     expect(body.error).toBe(
-      "Notion has not been added to this deployment yet. An administrator has to add it first.",
+      "Notion has not been added yet. Add it from App connections first, then connect it.",
     );
   });
 });

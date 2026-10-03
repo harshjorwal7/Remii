@@ -75,7 +75,7 @@ export function DataTable(props: Record<string, unknown>) {
       }
     >
       <section
-        className="overflow-x-auto rounded-lg border border-border focus-visible:outline-2 focus-visible:outline-ring"
+        className="overflow-x-auto rounded-lg border border-border focus-visible:outline-1 focus-visible:outline-ring"
         aria-label={`${title} table, scroll for more columns`}
         // biome-ignore lint/a11y/noNoninteractiveTabindex: Overflow regions need keyboard focus to scroll in Safari; the region has an accessible name.
         tabIndex={0}
@@ -101,7 +101,7 @@ export function DataTable(props: Record<string, unknown>) {
                 >
                   <button
                     type="button"
-                    className="flex w-full items-center justify-between gap-3 whitespace-nowrap px-3 py-2.5 text-left hover:bg-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+                    className="flex w-full items-center justify-between gap-3 whitespace-nowrap px-3 py-2.5 text-left hover:bg-muted focus-visible:outline-1 focus-visible:-outline-offset-2 focus-visible:outline-ring"
                     onClick={() =>
                       setSort({
                         column: index,

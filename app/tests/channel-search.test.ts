@@ -8,6 +8,7 @@ function channel(overrides: Partial<ChannelSummary>): ChannelSummary {
     id: "channel-1",
     name: "Knowledge",
     agentIds: ["agent-1"],
+    mascots: {},
     threadId: "thread-1",
     active: true,
     summary: null,

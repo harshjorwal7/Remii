@@ -21,7 +21,7 @@ use crate::engine::{Address, Engine};
 use crate::quiet::said as command_said;
 
 #[cfg(test)]
-const DEFAULT_IMAGE: &str = "openbot-agent-computer:s10-chromium-arm64";
+const DEFAULT_IMAGE: &str = "remii-agent-computer:s10-chromium-arm64";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_OUTPUT_LIMIT: usize = 64 * 1024;
@@ -324,7 +324,7 @@ impl HostAccess {
         });
         let thread_inner = inner.clone();
         let handle = thread::Builder::new()
-            .name("openbot-host-access".into())
+            .name("remii-host-access".into())
             .spawn(move || broker_loop(thread_inner))
             .map_err(|error| {
                 HostAccessError::Runtime(format!("Could not start host access broker: {error}"))
@@ -497,7 +497,7 @@ impl Inner {
         let worker_bot_id = bot_id.clone();
         let worker_client = client.clone();
         if let Err(error) = thread::Builder::new()
-            .name("openbot-host-operation".into())
+            .name("remii-host-operation".into())
             .spawn(move || {
                 inner.handle_and_post(&worker_client, operation);
                 let mut state = inner.state.lock().expect("host state poisoned");
@@ -735,10 +735,10 @@ impl Inner {
         let relative = host_relative_for_write(&grant.root, &target)?;
         let target_path = container_path(&relative);
         let backup_name = backup_name_for(&relative);
-        let backup_path = format!("{APPROVED_MOUNT}/.openbot-backups/{backup_name}");
+        let backup_path = format!("{APPROVED_MOUNT}/.remii-backups/{backup_name}");
         let script = format!(
             "mkdir -p -- {backup_dir} && if [ -e {target} ]; then cp -- {target} {backup}; fi && cat > {target}",
-            backup_dir = shell_quote(format!("{APPROVED_MOUNT}/.openbot-backups")),
+            backup_dir = shell_quote(format!("{APPROVED_MOUNT}/.remii-backups")),
             target = shell_quote(target_path),
             backup = shell_quote(backup_path.clone()),
         );
@@ -750,7 +750,7 @@ impl Inner {
             content.as_bytes(),
         )?;
         Ok(OperationSuccess::output(format!(
-            "Wrote file. Backup, if the file existed, is .openbot-backups/{backup_name}"
+            "Wrote file. Backup, if the file existed, is .remii-backups/{backup_name}"
         )))
     }
 
@@ -1034,7 +1034,7 @@ impl Inner {
     }
 
     fn verify_no_owned_containers(&self) -> HostAccessResult<()> {
-        let filter = format!("label=openbot.host-access.instance={}", self.instance_label);
+        let filter = format!("label=remii.host-access.instance={}", self.instance_label);
         let output = self
             .config
             .engine
@@ -1239,9 +1239,9 @@ fn append_container_create_args(
     command.arg(&config.memory);
     command.arg("--cpus");
     command.arg(&config.cpus);
-    command.args(["--label", "openbot.host-access=true"]);
+    command.args(["--label", "remii.host-access=true"]);
     command.arg("--label");
-    command.arg(format!("openbot.host-access.instance={instance_label}"));
+    command.arg(format!("remii.host-access.instance={instance_label}"));
     command.args(["--entrypoint", "/usr/bin/env"]);
     command.arg(&config.image);
     command.args([
@@ -1329,12 +1329,12 @@ fn forbidden_paths_with_home(configured: &[PathBuf], home: Option<&Path>) -> For
             ".npmrc",
             ".docker",
             ".kube",
-            "Library/Application Support/OpenBot",
+            "Library/Application Support/Remii",
             "Library/Application Support/Google/Chrome",
             "Library/Application Support/BraveSoftware",
             "Library/Application Support/Firefox",
             "Library/Keychains",
-            "AppData/Roaming/OpenBot",
+            "AppData/Roaming/Remii",
             "AppData/Roaming/GitHub CLI",
             "AppData/Local/Google/Chrome",
             "AppData/Local/BraveSoftware",
@@ -1567,7 +1567,7 @@ fn fresh_container_name(operation_id: &str) -> String {
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
         .take(32)
         .collect();
-    format!("openbot-host-{safe}-{}", std::process::id())
+    format!("remii-host-{safe}-{}", std::process::id())
 }
 
 fn read_limited<R: Read>(mut reader: R, limit: usize) -> HostAccessResult<Vec<u8>> {
@@ -1978,7 +1978,7 @@ mod tests {
         let config = HostAccessConfig::new(
             "http://127.0.0.1:3001",
             "token",
-            Address::new(Engine::Podman, Some("openbot".into())),
+            Address::new(Engine::Podman, Some("remii".into())),
             DEFAULT_IMAGE,
             vec![],
         );
@@ -2138,7 +2138,7 @@ mod tests {
         let Some(home) = home_dir() else {
             return;
         };
-        let child = home.join(format!("openbot-host-access-{}", std::process::id()));
+        let child = home.join(format!("remii-host-access-{}", std::process::id()));
         fs::create_dir_all(&child).unwrap();
         assert!(validate_grant_root(&child, &[]).is_ok());
         assert!(validate_grant_root(&home, &[]).is_err());

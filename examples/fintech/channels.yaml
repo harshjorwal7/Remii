@@ -1,8 +1,14 @@
 channels:
-  - id: general-assistant
-    name: General Assistant
-    description: Ask for help with everyday work.
-    permitted_agents: [general-assistant]
+  # The direct conversation with Remii, and the one most work starts in.
+  #
+  # The id was `general-assistant` and is renamed with the Bot in `0072_remii_rename`. Channels are seeded
+  # by id, so renaming the Bot without renaming this row would leave a channel pointing at a coworker that
+  # no longer exists — and a channel whose Bot is gone still renders, still accepts a message, and never
+  # answers.
+  - id: remii
+    name: Remii
+    description: Ask Remii to run something, chase something, or hand it to the right coworker.
+    permitted_agents: [remii]
     allowed_groups: [all]
   - id: risk-and-compliance
     name: Risk & Compliance

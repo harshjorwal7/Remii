@@ -48,7 +48,7 @@ const PORT = resolvedPort.port;
 const MANAGED_AGENT_TOKEN = process.env.MANAGED_AGENT_TOKEN?.trim();
 if (!MANAGED_AGENT_TOKEN) {
   console.error(
-    "MANAGED_AGENT_TOKEN is not set. This process holds a model credential and will not start without a token for OpenBot's server.",
+    "MANAGED_AGENT_TOKEN is not set. This process holds a model credential and will not start without a token for Remii's server.",
   );
   process.exit(1);
 }
@@ -234,7 +234,7 @@ function buildModel() {
 const TOOL_URL =
   // Numeric, never `localhost`: it resolves to `::1` under Node and `127.0.0.1` under bun, so a
   // name here reaches a different interface depending on what started the process.
-  process.env.OPENBOT_TOOL_URL ?? "http://127.0.0.1:3001/api/agent-tools/call";
+  process.env.REMII_TOOL_URL ?? "http://127.0.0.1:3001/api/agent-tools/call";
 const TOOL_TOKEN = process.env.AGENT_TOOL_TOKEN ?? "";
 
 async function callTool(
@@ -257,7 +257,7 @@ async function callTool(
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-openbot-agent-token": TOOL_TOKEN,
+        "x-remii-agent-token": TOOL_TOKEN,
       },
       /*
        * The deployment's own statement, handed straight back.
@@ -284,8 +284,8 @@ async function callTool(
  * calls a tool, and the deployment that signed it is the only thing that can open it.
  */
 function runAssertionOf(input: RunAgentInput): string {
-  const props = input.forwardedProps as { openbotRun?: unknown } | undefined;
-  return typeof props?.openbotRun === "string" ? props.openbotRun : "";
+  const props = input.forwardedProps as { remiiRun?: unknown } | undefined;
+  return typeof props?.remiiRun === "string" ? props.remiiRun : "";
 }
 
 /**
@@ -298,9 +298,9 @@ function runAssertionOf(input: RunAgentInput): string {
  */
 function deploymentToolsOf(input: RunAgentInput): Set<string> {
   const props = input.forwardedProps as
-    | { openbotDeploymentTools?: unknown }
+    | { remiiDeploymentTools?: unknown }
     | undefined;
-  const names = props?.openbotDeploymentTools;
+  const names = props?.remiiDeploymentTools;
   return new Set(
     Array.isArray(names)
       ? names.filter((name) => typeof name === "string")
@@ -326,6 +326,24 @@ function callsTheSurface(
  * Now it answers, calls what it needs, reads the results and answers again, which is what a harness
  * is for. `recursionLimit` bounds a model that would otherwise call tools in a circle.
  */
+
+/**
+ * How many times this Bot may go round its tool loop in one run.
+ *
+ * A super-step is one node execution, so this is a ceiling on model calls, not on wall-clock.
+ *
+ * IT IS NOT A CAP ON HOW MUCH WORK A TASK MAY BE. That was learned the expensive way: set to 12 on the
+ * reasoning that the old implicit 25 was being reached too often to be useful, when in fact a real
+ * audit here — DNS, DMARC, TLS, CORS, headers, a report — reached it while doing genuine work, and
+ * lowering it would have cut short jobs that were about to finish. A job that reads a dozen pages is
+ * not a job that is going in circles, and the bound cannot tell those apart; only the work can.
+ *
+ * So it is set where a long job still fits, and the guard against circling is `stream.ts` ending a
+ * run that has already spoken rather than treating the bound as a failure. A ceiling high enough for
+ * real work plus an honest ending is the pair; a low ceiling is just a slower way to fail.
+ */
+const TOOL_LOOP_STEPS = 60;
+
 function buildGraph(input: RunAgentInput) {
   const model = buildModel();
   const run = runAssertionOf(input);
@@ -334,58 +352,74 @@ function buildGraph(input: RunAgentInput) {
   const bound = tools.length > 0 ? model.bindTools(tools) : model;
   const ours = deploymentToolsOf(input);
 
-  return new StateGraph(MessagesAnnotation)
-    .addNode("answer", async (state) => ({
-      messages: [await bound.invoke(state.messages)],
-    }))
-    .addNode("tools", async (state) => {
-      const last = state.messages.at(-1) as AIMessage;
-      const results = await Promise.all(
+  return (
+    new StateGraph(MessagesAnnotation)
+      .addNode("answer", async (state) => ({
+        messages: [await bound.invoke(state.messages)],
+      }))
+      .addNode("tools", async (state) => {
+        const last = state.messages.at(-1) as AIMessage;
+        const results = await Promise.all(
+          /*
+           * Only this deployment's own tools. A component is drawn by the surface, and a decision is
+           * answered there by a person, so neither is executed here and neither gets a result invented
+           * here. The run ends instead, and the surface starts the next one carrying what it produced.
+           */
+          (last.tool_calls ?? [])
+            .filter((call) => ours.has(call.name))
+            .map(async (call) => {
+              const text = await callTool(
+                run,
+                call.name,
+                (call.args ?? {}) as Record<string, unknown>,
+              );
+              return new ToolMessage({
+                content: text,
+                tool_call_id: call.id ?? call.name,
+                name: call.name,
+              });
+            }),
+        );
+        return { messages: results };
+      })
+      .addEdge(START, "answer")
+      .addConditionalEdges("answer", (state) => {
+        const last = state.messages.at(-1) as AIMessage | undefined;
+        const calls = last?.tool_calls ?? [];
+        if (calls.length === 0) return END;
         /*
-         * Only this deployment's own tools. A component is drawn by the surface, and a decision is
-         * answered there by a person, so neither is executed here and neither gets a result invented
-         * here. The run ends instead, and the surface starts the next one carrying what it produced.
+         * A call the surface owns ends the run.
+         *
+         * This is how a tool that lives in the browser is supposed to work: the Bot asks for it, the
+         * run finishes, the surface draws it or puts the question to a person, and the surface begins
+         * the next run with the answer in hand. Running the loop through it here instead invents a
+         * result: the Bot apologises for a chart the person is looking at, and an approval card that
+         * has already been answered on its behalf sits waiting for a click that can never land.
+         *
+         * A turn that asks for both kinds at once ends too, and the model asks again for what it still
+         * has no answer to. That is the rarer case and the safe way round: the alternative runs a
+         * governed tool whose result nobody is waiting for.
          */
-        (last.tool_calls ?? [])
-          .filter((call) => ours.has(call.name))
-          .map(async (call) => {
-            const text = await callTool(
-              run,
-              call.name,
-              (call.args ?? {}) as Record<string, unknown>,
-            );
-            return new ToolMessage({
-              content: text,
-              tool_call_id: call.id ?? call.name,
-              name: call.name,
-            });
-          }),
-      );
-      return { messages: results };
-    })
-    .addEdge(START, "answer")
-    .addConditionalEdges("answer", (state) => {
-      const last = state.messages.at(-1) as AIMessage | undefined;
-      const calls = last?.tool_calls ?? [];
-      if (calls.length === 0) return END;
+        if (callsTheSurface(calls, ours)) return END;
+        return "tools";
+      })
+      .addEdge("tools", "answer")
       /*
-       * A call the surface owns ends the run.
+       * A BOUND, and a small one.
        *
-       * This is how a tool that lives in the browser is supposed to work: the Bot asks for it, the
-       * run finishes, the surface draws it or puts the question to a person, and the surface begins
-       * the next run with the answer in hand. Running the loop through it here instead invents a
-       * result: the Bot apologises for a chart the person is looking at, and an approval card that
-       * has already been answered on its behalf sits waiting for a click that can never land.
+       * This ran on LangGraph's default of 25 super-steps, which is a loop of up to 25 model calls
+       * before the run is abandoned — minutes of a person's conversation looking stuck, followed by a
+       * "Recursion limit" error, and then (before the delivery stopped retrying a refusal) the same
+       * 25 calls again. A step here is a model call, so the ceiling is a cost and a latency ceiling
+       * as much as a correctness one, and a run that needs more than this is a loop that is not
+       * converging.
        *
-       * A turn that asks for both kinds at once ends too, and the model asks again for what it still
-       * has no answer to. That is the rarer case and the safe way round: the alternative runs a
-       * governed tool whose result nobody is waiting for.
+       * Set here rather than left to the framework default so the number is a decision this Bot owns
+       * and can be read next to the loop it bounds. A turn that ends on the limit says so in its own
+       * words below rather than surfacing a framework's exception.
        */
-      if (callsTheSurface(calls, ours)) return END;
-      return "tools";
-    })
-    .addEdge("tools", "answer")
-    .compile();
+      .compile({ recursionLimit: TOOL_LOOP_STEPS })
+  );
 }
 
 async function runAgent(input: RunAgentInput): Promise<Response> {

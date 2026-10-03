@@ -3,6 +3,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import {
   grantPlugin,
   setPluginGrantMutationOptions,
+  setServerAppGrantMutationOptions,
 } from "../src/lib/plugins/mutations";
 
 /**
@@ -130,5 +131,41 @@ test("granting one on its own still carries its refetch", async () => {
   );
 
   expect(seen).toHaveLength(1);
+  expect(invalidated).toEqual([{ queryKey: ["plugins"] }]);
+});
+
+test("setServerAppGrantMutationOptions calls the server grant endpoint and invalidates", async () => {
+  const seen = capturingFetch(200, { ok: true, count: 5, granted: true });
+  const { queryClient, invalidated } = invalidationRecorder();
+  const options = setServerAppGrantMutationOptions(queryClient);
+
+  await options.mutationFn?.(
+    {
+      agentId: "agent-1",
+      granted: true,
+      serverId: "composio-slack",
+    },
+    mutationContext(queryClient),
+  );
+
+  await options.onSettled?.(
+    undefined,
+    null,
+    {
+      agentId: "agent-1",
+      granted: true,
+      serverId: "composio-slack",
+    },
+    undefined,
+    mutationContext(queryClient),
+  );
+
+  expect(seen).toHaveLength(1);
+  expect(seen[0]?.url).toBe("/api/plugins/servers/composio-slack/grant");
+  expect(seen[0]?.init?.method).toBe("POST");
+  expect(JSON.parse(String(seen[0]?.init?.body))).toEqual({
+    agentId: "agent-1",
+    granted: true,
+  });
   expect(invalidated).toEqual([{ queryKey: ["plugins"] }]);
 });

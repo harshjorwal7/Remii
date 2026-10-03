@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  MASCOT_COLOR_IDS,
+  MASCOT_SHAPE_IDS,
+} from "../../../../shared/mascot-ids";
 
 /**
  * Browser-side coworker form contract. Limits match the server parser so validation errors can be
@@ -20,24 +24,27 @@ export const agentFormSchema = z.object({
     .trim()
     .min(1, "Role description is required.")
     .max(1000, "Role description must be 1000 characters or fewer."),
-  visibility: z.enum(["public", "private"]),
+  // Strict per-user SaaS sandbox: public sharing is removed. Every
+  // coworker is private to its owner.
+  visibility: z.literal("private"),
   /**
-   * The AG-UI endpoint this coworker runs on. Empty means the Bot in the box.
+   * The mascot this coworker should wear, or undefined for "not mentioned".
    *
-   * Only URL shape is checked here; deployment allow/deny rules are server-side.
+   * Undefined is the default and the whole point. A coworker nobody has dressed must stay that way
+   * across an unrelated edit: the server reads a missing `mascot` as untouched, so if the resolved
+   * mascot were sent on every save then the first time somebody fixed a typo in a name the coworker
+   * would stop being seeded and become a fixed choice, and the customizer's reset would stop working.
+   * `{}` is how a person says "go back to being seeded", and it is a different thing from undefined.
+   *
+   * Every axis optional for the same reason one axis at a time is allowed: an axis left out is filled
+   * from the avatar seed, so choosing only a colour gives coworkers that differ in shape.
    */
-  endpoint: z
-    .string()
-    .trim()
-    .refine(
-      (value) => value === "" || /^https?:\/\/\S+$/.test(value),
-      "Enter a web address starting with http:// or https://.",
-    ),
-  /**
-   * A key the agent sits behind. WRITE-ONLY: it is never sent back from the server, so this field is
-   * always empty when editing, and leaving it empty keeps whatever key is already set.
-   */
-  authValue: z.string(),
+  mascot: z
+    .object({
+      shape: z.enum(MASCOT_SHAPE_IDS).optional(),
+      color: z.enum(MASCOT_COLOR_IDS).optional(),
+    })
+    .optional(),
 });
 
 export type AgentFormValues = z.infer<typeof agentFormSchema>;
@@ -47,20 +54,19 @@ export const emptyAgentForm: AgentFormValues = {
   title: "",
   roleDescription: "",
   visibility: "private",
-  endpoint: "",
-  authValue: "",
+  // Not `{}`. Empty is a deliberate reset, and the default state of the form is not a decision.
+  mascot: undefined,
 };
 
-/** Convert form values to API input; omit an empty key so editing preserves the current credential. */
+/** Convert form values to API input. */
 export function agentInputFrom(values: AgentFormValues) {
   return {
     name: values.name,
     title: values.title,
     roleDescription: values.roleDescription,
     visibility: values.visibility,
-    endpoint: values.endpoint,
-    ...(values.authValue.trim()
-      ? { auth: { header: "Authorization", value: values.authValue.trim() } }
-      : {}),
+    // Omitted rather than defaulted, for the reason on the schema field. `{}` is a reset and is
+    // passed through, so the two stay distinguishable all the way to the route.
+    ...(values.mascot === undefined ? {} : { mascot: values.mascot }),
   };
 }

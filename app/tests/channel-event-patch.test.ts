@@ -14,6 +14,7 @@ function channel(
     id,
     name: id,
     agentIds: [],
+    mascots: {},
     threadId: `thread-${id}`,
     active: true,
     summary: null,
@@ -284,5 +285,97 @@ describe("a summary", () => {
         event({ channelId: "a", summary: "Expense categories" }),
       ),
     ).toBe(data);
+  });
+});
+
+/*
+ * RUN ACTIVITY ON THE ROSTER.
+ *
+ * The one behaviour that must not regress is the one the socket event exists for: a run ending has
+ * to clear the mark. Everything else here is the ordinary patching rules applied to a new field.
+ */
+describe("applyChannelEvent for run activity", () => {
+  const running = {
+    state: "delegated" as const,
+    label: "With Research Desk",
+    detail: null,
+    botId: "agent_a6d34c79",
+  };
+
+  test("a run starting puts a mark on the row", () => {
+    const before = cache([channel("c1")]);
+    const after = applyChannelEvent(before, {
+      ...event({ channelId: "c1" }),
+      activity: running,
+    });
+    expect(after).not.toBe("unknown");
+    expect(
+      (after as ReturnType<typeof cache>).pages[0].channels[0].activity,
+    ).toEqual(running);
+  });
+
+  test("a run ending clears the mark, and clears it as null rather than leaving it stale", () => {
+    const before = cache([channel("c1", { activity: running })]);
+    const after = applyChannelEvent(before, {
+      ...event({ channelId: "c1" }),
+      activity: null,
+    });
+    const row = (after as ReturnType<typeof cache>).pages[0].channels[0];
+    expect(row.activity).toBeNull();
+  });
+
+  test("an event with no activity key leaves the mark alone", () => {
+    // The distinction the whole design turns on: absent means "this event is about something else",
+    // null means "a run ended". Collapsing them strands the mark.
+    const before = cache([channel("c1", { activity: running })]);
+    const after = applyChannelEvent(before, {
+      ...event({ channelId: "c1" }),
+      busy: true,
+    });
+    expect(
+      (after as ReturnType<typeof cache>).pages[0].channels[0].activity,
+    ).toEqual(running);
+  });
+
+  test("a state arriving again unchanged changes nothing, so the roster does not re-render", () => {
+    const before = cache([channel("c1", { activity: running })]);
+    const after = applyChannelEvent(before, {
+      ...event({ channelId: "c1" }),
+      activity: { ...running },
+    });
+    // Identity, not equality: the caller re-renders nothing only if the cache object is the same one.
+    expect(after).toBe(before);
+  });
+
+  test("a state change does not move the row to the top of the roster", () => {
+    // A run starting is not something anybody said in the channel, and a roster that reorders
+    // under the cursor while a Bot works is unusable.
+    const older = channel("c1", {
+      lastMessageAt: "2024-01-01T00:00:00.000Z",
+      activity: null,
+    });
+    const newer = channel("c2", {
+      lastMessageAt: "2024-06-01T00:00:00.000Z",
+      activity: null,
+    });
+    const after = applyChannelEvent(cache([older, newer]), {
+      ...event({ channelId: "c1" }),
+      activity: running,
+    });
+    const rows = (after as ReturnType<typeof cache>).pages[0].channels;
+    expect(rows.map((row) => row.id)).toEqual(["c1", "c2"]);
+  });
+
+  test("the preview survives a state change, which a spread would have wiped", () => {
+    const before = cache([
+      channel("c1", { lastMessage: "the quarterly numbers", activity: null }),
+    ]);
+    const after = applyChannelEvent(before, {
+      ...event({ channelId: "c1" }),
+      activity: running,
+    });
+    expect(
+      (after as ReturnType<typeof cache>).pages[0].channels[0].lastMessage,
+    ).toBe("the quarterly numbers");
   });
 });

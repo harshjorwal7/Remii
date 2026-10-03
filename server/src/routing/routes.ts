@@ -16,14 +16,15 @@ const PICKED_HARNESS_AGENT_ID = "picked-harness";
 export function defaultRoutingProfile(
   roster: readonly AgentProfile[],
 ): AgentProfile | undefined {
+  // Strict per-user SaaS sandbox: no public fallback. The roster is already
+  // scoped to this user (own bots + system templates), so the default is the
+  // picked harness or simply the first entry on their own roster.
   return (
-    roster.find((agent) => agent.id === PICKED_HARNESS_AGENT_ID) ??
-    roster.find((agent) => agent.visibility === "public") ??
-    roster[0]
+    roster.find((agent) => agent.id === PICKED_HARNESS_AGENT_ID) ?? roster[0]
   );
 }
 
-const DEV_ACTOR_EMAIL = "dev@openbot.local";
+const DEV_ACTOR_EMAIL = "dev@remii.local";
 
 /**
  * Who to record the routing against, or nobody.

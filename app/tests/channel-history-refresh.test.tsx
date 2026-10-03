@@ -18,7 +18,7 @@ import {
   channelKeys,
 } from "@/lib/channels/queries";
 import { applyChannelEvent } from "@/lib/channels/use-channel-events";
-import { a2uiProviderOptions, OPENBOT_A2UI_CATALOG } from "@/lib/copilot/a2ui";
+import { a2uiProviderOptions, REMII_A2UI_CATALOG } from "@/lib/copilot/a2ui";
 import { queryClient } from "@/query-client";
 
 type ChannelCache = InfiniteData<ChannelPage>;
@@ -33,6 +33,7 @@ const channel: AgentChannel = {
   id: "refresh-channel",
   name: "Refresh test",
   agentIds: ["refresh-bot"],
+  mascots: {},
   threadId: "refresh-thread",
   active: true,
   lastMessageAt: "2026-09-09T00:00:00.000Z",
@@ -229,7 +230,7 @@ test("A2UI activity actions run the actual channel agent and thread with edited 
           version: "v0.9",
           createSurface: {
             surfaceId: "trip",
-            catalogId: OPENBOT_A2UI_CATALOG.id,
+            catalogId: REMII_A2UI_CATALOG.id,
           },
         },
         {

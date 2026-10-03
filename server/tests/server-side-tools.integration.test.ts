@@ -188,7 +188,12 @@ describe("the tools a Bot is handed on the server", () => {
       const text = await tools[0]?.execute({ query: "invoices" });
 
       // Returned, not thrown: the run continues and the person is told what was blocked.
-      expect(text).toContain("policy");
+      //
+      // "Refused by boundary rule", not the word "policy". The refusal sentence is the boundary's
+      // own and names the rule it matched; it does not describe the mechanism to the person, because
+      // there is no administrator to configure one and saying "policy" would point at a setting that
+      // does not exist. What matters is asserted directly below: the marker, and the audit row.
+      expect(text).toContain("Refused");
       // And marked, so the transcript can draw it as a refusal rather than as a result. The wording
       // is an administrator's to change; the marker is not, which is the whole reason it exists.
       expect(text?.startsWith(REFUSAL_MARKER)).toBe(true);

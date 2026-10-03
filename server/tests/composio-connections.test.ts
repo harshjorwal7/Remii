@@ -11,6 +11,7 @@ import { createDatabase } from "../src/db/client";
 import {
   agents,
   auditEvents,
+  composioAccountGrants,
   composioConnections,
   mcpServers,
   mcpTools,
@@ -432,7 +433,7 @@ const foreignToolkit = `foreign-${suite}`;
  * its actions go out with the server rows in {@link clean}.
  */
 const probeAppId = `probe-${suite}`;
-const admin = "admin@openbot.local";
+const admin = "admin@remii.local";
 /**
  * THE SECRET A PERSON TYPES, which the test below looks for everywhere it must not be.
  *
@@ -511,7 +512,7 @@ const credentialsStub: CredentialSecretReader & CredentialStore = {
  * touches is swept on the way out; `audit_events` is not, and the omission is the database's rule
  * rather than an oversight here. The trail is append-only, enforced by a trigger rather than by the
  * application (`0007_audit_retention_window.sql`): a plain `delete` raises "Audit events are
- * append-only", and the one exemption — a session that sets `openbot.audit_retention_days` to a
+ * append-only", and the one exemption — a session that sets `remii.audit_retention_days` to a
  * positive whole number — still refuses any row younger than that many days. The rows this file
  * writes are seconds old at the moment it would sweep them, so NO setting makes them deletable;
  * `3650` is refused for the same reason `1` is. A cleanup here would be a statement that always
@@ -929,6 +930,39 @@ async function addApp() {
   await store.grant("mcp", ref, botId, admin);
 }
 
+/**
+ * A connection as the connect path leaves it: an account id, and a per-Bot grant to it.
+ *
+ * WAS a bare row `{ toolkit, userId }`. Multi-account support means a call now names WHICH account it
+ * runs as — a person may hold several at one app — so `connectionTokenFor` selects from
+ * `composio_account_grants` and refuses when there is nothing to select. Every fixture here was
+ * refused with "This Bot has not been granted one of your ... accounts", which reads like a product
+ * refusal rather than a fixture that stopped matching the shape of a connection.
+ */
+async function connectAccount(input: {
+  toolkit: string;
+  userId: string;
+  agentId?: string;
+}) {
+  const [connection] = await database
+    .insert(composioConnections)
+    .values({
+      toolkit: input.toolkit,
+      userId: input.userId,
+      accountId: `ca_${input.toolkit}_${input.userId}`,
+      label: `${input.userId}@example.test`,
+    })
+    .returning({ id: composioConnections.id });
+  if (input.agentId) {
+    await database.insert(composioAccountGrants).values({
+      connectionId: connection!.id,
+      agentId: input.agentId,
+      userId: input.userId,
+    });
+  }
+  return connection!;
+}
+
 /** The app, a Bot holding its one action, and optionally somebody who has connected it. */
 async function seedApp(options: { connect?: boolean } = {}) {
   await database.insert(agents).values({
@@ -939,9 +973,7 @@ async function seedApp(options: { connect?: boolean } = {}) {
   });
   await addApp();
   if (options.connect !== false) {
-    await database
-      .insert(composioConnections)
-      .values({ toolkit, userId: askerId });
+    await connectAccount({ toolkit, userId: askerId, agentId: botId });
   }
 }
 
@@ -1163,9 +1195,11 @@ test("a connection whose person is already deleted is retired, and stops passing
   await database
     .insert(users)
     .values({ id: leaverId, email: `${leaverId}@example.com`, name: "Leaver" });
-  await database
-    .insert(composioConnections)
-    .values({ toolkit, userId: leaverId });
+  await database.insert(composioConnections).values({
+    toolkit,
+    userId: leaverId,
+    accountId: `ca_${toolkit}_${leaverId}`,
+  });
   await database.delete(users).where(eq(users.id, leaverId));
 
   // The design fact this rests on: the row outlives the person, which is what leaves anything to
@@ -1263,9 +1297,7 @@ test("an offboarding carries the vendor's answer per app, in a fixed order", asy
   await database
     .insert(composioConnections)
     .values({ toolkit: secondToolkit, userId: askerId });
-  await database
-    .insert(composioConnections)
-    .values({ toolkit, userId: askerId });
+  await connectAccount({ toolkit, userId: askerId, agentId: botId });
   vendorFinds = ({ toolkit: asked }) => asked === toolkit;
 
   expect((await store.retireConnectionsFor(askerId, admin)).retired).toBe(2);
@@ -1373,9 +1405,11 @@ test("an offboarding one app refuses still records the app that answered", async
  */
 test("a refusal on the first app still fails the act and still asks the second", async () => {
   await seedApp({ connect: false });
-  await database
-    .insert(composioConnections)
-    .values({ toolkit, userId: askerId });
+  await database.insert(composioConnections).values({
+    toolkit,
+    userId: askerId,
+    accountId: `ca_${toolkit}_${askerId}`,
+  });
   await database
     .insert(composioConnections)
     .values({ toolkit: secondToolkit, userId: askerId });
@@ -3181,7 +3215,7 @@ test("a key typed at a consent app is refused before the vendor is handed anythi
       values: { generic_api_key: typedKey },
     }),
     // The app by name, and the one act that is open to somebody standing in front of this: the
-    // Plugins page, where it is connected the way it asks for.
+    // App connections, where it is connected the way it asks for.
   ).rejects.toThrow(
     new RegExp(
       `${consentToolkit} is not an app this deployment connects with values somebody types`,

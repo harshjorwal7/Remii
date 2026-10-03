@@ -1,0 +1,1 @@
+ALTER TABLE "artifacts" ADD COLUMN "storage_key" text;

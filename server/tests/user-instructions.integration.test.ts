@@ -18,7 +18,7 @@ const createdUserIds: string[] = [];
 
 async function person() {
   const id = `user-instructions-${randomUUID()}`;
-  await database.insert(users).values({ id, email: `${id}@openbot.test` });
+  await database.insert(users).values({ id, email: `${id}@remii.test` });
   createdUserIds.push(id);
   return id;
 }

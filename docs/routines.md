@@ -12,12 +12,12 @@ here." Turning a sentence into a five-field cron expression and a channel is con
 that is what the conversation is for. The same Bot can list what is standing, change one, or delete
 one, all by being asked.
 
-**The prerequisite:** a Bot can only do this once an administrator has granted it to. Routines is a
+**The prerequisite:** a Bot can only do this once you have granted it to. Routines is a
 catalogue entry like any other — `create_routine`, `update_routine` and `delete_routine` are its write
-tools — and enabling the entry does not hand any Bot access to it. Each tool is granted per Bot at
-`/admin/plugins/routines`, exactly as a Google Drive or Notion tool would be. An administrator decides
-which Bots may schedule future work at all, before deciding what that work is; a Bot with none of the
-three tools can still be asked and will say it cannot.
+tools — and adding the entry does not hand any Bot access to it. Each tool is granted per Bot from
+the coworker's own **Connection** tab under `/agents`, exactly as a Google Drive or Notion tool
+would be. Deciding which of your Bots may schedule future work at all is a step before deciding what
+that work is; a Bot with none of the three tools can still be asked and will say it cannot.
 
 The routine belongs to whoever asked for it and runs as them. See
 [Who a routine runs as](#who-a-routine-runs-as).
@@ -96,7 +96,7 @@ in sync.
 
 ## Who a routine runs as
 
-A routine runs as the person who created it, not as the Bot and not as an administrator. Its turn is
+A routine runs as the person who created it, not as the Bot and not as the deployment. Its turn is
 built with that person's own grants, so it can do in the middle of the night exactly what they could
 do by typing the same instruction in chat themselves, and nothing more — a routine cannot reach a
 connector its creator never connected, or post into a channel they are not in. Its reply is posted
@@ -112,9 +112,10 @@ cap and the fatigue rule; the worker that fires them. Four follow-ups are tracke
 of them has since been closed. Audit rows now say what started the run they came out of, so a
 routine's action is told apart from the same person's own by reading the row rather than by
 correlating timestamps against `routine_runs`. See [Architecture](architecture.md#what-started-a-run). Still open:
-there is no admin view of
-other people's routines, only the owner-scoped page each person sees for their own; there is no
-per-deployment or per-Bot cap on how many routines may be running at once beyond the sweep's own claim
+routines are owner-scoped by row and there is no deployment-wide list of them — not because such a
+view was withheld, but because there is nothing to widen it to, since no query here can reach past
+the owner's id; there is also no
+per-Bot cap on how many routines may be running at once beyond the sweep's own claim
 limit; and a tenant package cannot yet ship routines the way it ships agents, channels or skills.
 
 ## See also

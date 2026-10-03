@@ -62,12 +62,10 @@ const UP_TO_PLUGIN_STORE = [
   undefined,
   undefined,
   undefined,
-  undefined,
 ] as const;
 
-/** `createApp`'s positions 16-29, between the plugin store and the broker. See {@link UP_TO_PLUGIN_STORE}. */
+/** `createApp`'s positions 15-27, between the plugin store and the broker. See {@link UP_TO_PLUGIN_STORE}. */
 const UP_TO_BROKER = [
-  undefined,
   undefined,
   undefined,
   undefined,
@@ -141,7 +139,7 @@ function serverRecord(row: { id: string; url: string }): ServerRecord {
 
 const ADMIN = {
   id: "admin-1",
-  email: "admin@openbot.test",
+  email: "admin@remii.test",
   name: "An Administrator",
   image: null,
 };
@@ -164,13 +162,13 @@ function appWith(
       api: { getSession: async () => ({ user: ADMIN }) },
     } as never,
     { rolesForUser: async () => [role] },
-    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    // Positions 4-13 are the other stores; `store` is 14, pluginStore.
     ...UP_TO_PLUGIN_STORE,
     store,
   );
 
   return (body: unknown) =>
-    app.request("http://openbot.test/api/plugins/servers", {
+    app.request("http://remii.test/api/plugins/servers", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -239,12 +237,30 @@ describe("adding a curated server", () => {
     expect((await request({ key: "google-drive" })).status).toBe(500);
   });
 
-  test("somebody who is not an administrator cannot add one at all", async () => {
-    const request = appWith(async () => {
-      throw new Error("the store must not be reached");
-    }, "user");
+  test("every signed-in person may add one, because there are no other people", async () => {
+    /*
+     * WAS "somebody who is not an administrator cannot add one at all", expecting 403 for the `user`
+     * role. That role distinction is gone: individual-user SaaS has no administrator, so a server a
+     * person adds is added to their OWN account and the guard would have been refusing the only kind
+     * of user there is. The `rolesForUser` argument these tests passed to `createApp` is not a
+     * parameter of it any more, so it landed on `credentialService` and gated nothing — the old 403
+     * could never have been produced by this route either.
+     *
+     * What is worth keeping is the isolation, which the status code never checked: the store is
+     * reached, and it is reached on behalf of the session's own person.
+     */
+    const seen: { key: string; actorUserId?: string; by?: string }[] = [];
+    const request = appWith(async (input: { key: string }) => {
+      seen.push(input);
+      return undefined as never;
+    });
 
-    expect((await request({ key: "google-drive" })).status).toBe(403);
+    expect((await request({ key: "google-drive" })).status).toBe(200);
+    // The whole point of the rewritten test: the row is written for the session's own person, which
+    // is what keeps two users' server lists from ever meeting.
+    expect(seen).toMatchObject([
+      { key: "google-drive", actorUserId: ADMIN.id, by: ADMIN.email },
+    ]);
   });
 });
 
@@ -279,13 +295,13 @@ function refreshApp(
       api: { getSession: async () => ({ user: ADMIN }) },
     } as never,
     { rolesForUser: async () => [role] },
-    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    // Positions 4-13 are the other stores; `store` is 14, pluginStore.
     ...UP_TO_PLUGIN_STORE,
     store,
   );
 
   return () =>
-    app.request("http://openbot.test/api/plugins/servers/notion/refresh", {
+    app.request("http://remii.test/api/plugins/servers/notion/refresh", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
@@ -293,7 +309,7 @@ function refreshApp(
 }
 
 describe("refreshing a server that cannot be resolved", () => {
-  test("the administrator is told which row and what to do about it", async () => {
+  test("the person is told which row and what to do about it", async () => {
     const sentence =
       "notion is a server this deployment ships an entry for, and a row with that id says its " +
       "provenance is composio. Rename it, or correct its provenance.";
@@ -356,13 +372,26 @@ describe("refreshing a server that cannot be resolved", () => {
     expect((await request()).status).toBe(500);
   });
 
-  test("somebody who is not an administrator cannot press it at all", async () => {
+  test("every signed-in person may press it, and the sentence names the row to them", async () => {
+    /*
+     * WAS "somebody who is not an administrator cannot press it at all", expecting 403 for the `user`
+     * role. There is no administrator to be somebody else from, so the route answers every signed-in
+     * person alike.
+     *
+     * The sentence above is still worth showing, and the reason has not weakened: it names WHICH of
+     * this deployment's own rows contradicts itself, and that row belongs to the person pressing the
+     * button. The isolation that keeps it safe is ownership at the store, not a role at the edge.
+     */
+    const sentence =
+      "notion is a server this deployment ships an entry for, and a row with that id says its " +
+      "provenance is composio. Rename it, or correct its provenance.";
     const request = refreshApp(async () => {
-      throw new Error("the store must not be reached");
-    }, "user");
+      throw new ServerRowAmbiguousError(sentence);
+    });
 
-    // Which is what makes showing the sentence above safe: nobody else reaches this route.
-    expect((await request()).status).toBe(403);
+    const response = await request();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: sentence });
   });
 });
 
@@ -436,11 +465,11 @@ function grantsApp(
 }
 
 describe("granting one Bot to another", () => {
-  test("an administrator can grant it", async () => {
+  test("a grant on their own app is accepted", async () => {
     const { calls, app } = grantsApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/grants",
+      "http://remii.test/api/plugins/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -475,7 +504,7 @@ describe("granting one Bot to another", () => {
     const { calls, app } = grantsApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/grants?kind=bot&ref=knowledge&agentId=assistant",
+      "http://remii.test/api/plugins/grants?kind=bot&ref=knowledge&agentId=assistant",
       { method: "DELETE" },
     );
 
@@ -497,11 +526,28 @@ describe("granting one Bot to another", () => {
    * It lets one Bot spend another's model calls, wake its computer and reach whatever that Bot may
    * reach. That is not an instruction somebody attaches to a coworker they own.
    */
-  test("somebody who is not an administrator cannot", async () => {
-    const { calls, app } = grantsApp("user");
+  test("a hop is refused when the Bot doing the handing is somebody else's", async () => {
+    /*
+     * WAS "somebody who is not an administrator cannot", expecting 403 for the `user` role and the
+     * sentence "An administrator decides which Bots may hand work to another Bot." Neither survives.
+     * There is no administrator to decide, so the sentence has nothing true to say; and `rolesForUser`
+     * is not a `createApp` parameter any more, so it landed on `credentialService` and this route was
+     * never gated on it.
+     *
+     * What still has to be refused is the HOP, and it is refused for a reason about the Bot rather than
+     * the person's role: `canUseBot` answers true for every id here because this deployment has no
+     * profile store, so the refusal has to come from the store instead — the grantee is asked whether
+     * it runs in this deployment, and a Bot that runs at its own endpoint cannot be given a tool to
+     * hand work on. The answer names the Bot and says what would have to change, which is what lets
+     * this be shown to a person rather than hidden behind a generic sentence.
+     */
+    const { calls, app } = grantsApp(
+      "user",
+      (agentId) => agentId !== "assistant",
+    );
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/grants",
+      "http://remii.test/api/plugins/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -516,7 +562,7 @@ describe("granting one Bot to another", () => {
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({
       error:
-        "An administrator decides which Bots may hand work to another Bot.",
+        "assistant runs at its own endpoint, so this deployment cannot offer it a tool for handing work on. Only a Bot that runs here can be given one.",
     });
     expect(calls).toEqual([]);
   });
@@ -525,7 +571,7 @@ describe("granting one Bot to another", () => {
     const { calls, app } = grantsApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/grants",
+      "http://remii.test/api/plugins/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -555,7 +601,7 @@ describe("granting a hop to a Bot that runs somewhere else", () => {
     const { calls, app } = grantsApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/grants",
+      "http://remii.test/api/plugins/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -577,7 +623,7 @@ describe("granting a hop to a Bot that runs somewhere else", () => {
     const { calls, app } = grantsApp("admin", () => undefined);
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/grants",
+      "http://remii.test/api/plugins/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -598,7 +644,7 @@ describe("granting a hop to a Bot that runs somewhere else", () => {
     const { calls, app } = grantsApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/grants",
+      "http://remii.test/api/plugins/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -627,11 +673,17 @@ describe("granting a hop to a Bot that runs somewhere else", () => {
 });
 
 /**
- * What a refusal tells somebody who is not an administrator.
+ * What a refusal tells the person who asked.
  *
- * This route only requires a signed-in user. Checking whether a Bot exists, and whether it runs
- * here, before checking the role handed out three distinguishable 403s and turned the refusal into
- * an oracle for other people's private Bots — the exact property `handoff.ts` collapses on purpose.
+ * WAS "what a refusal tells somebody who is not an administrator", built on a split that no longer
+ * exists: a non-administrator got one flat sentence and an administrator got the real reason. There
+ * is no administrator now, so there is no second reader to collapse the answers for — and the oracle
+ * this describe was written to close is closed at the front instead, by `canUseBot` refusing a Bot the
+ * asker cannot reach before the route looks anything up at all.
+ *
+ * What survives, and what is still worth pinning, is that the role argument changes nothing. These
+ * tests still pass `"user"` and `"admin"` to the same factory; if a future role gate came back it would
+ * show up here as the two runs disagreeing, which is the cheapest possible warning.
  */
 describe("what a bot grant refusal reveals", () => {
   const refusalFor = async (
@@ -641,7 +693,7 @@ describe("what a bot grant refusal reveals", () => {
   ) => {
     const { calls, app } = grantsApp(role);
     const response = await app.request(
-      "http://openbot.test/api/plugins/grants",
+      "http://remii.test/api/plugins/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -651,32 +703,30 @@ describe("what a bot grant refusal reveals", () => {
     return { status: response.status, body: await response.json(), calls };
   };
 
-  test("a non-administrator gets one answer, whatever the Bot is", async () => {
-    const said = new Set<string>();
-    for (const agentId of [
-      "general-assistant",
-      "at-an-endpoint",
-      "never-registered",
-    ]) {
-      const { status, body, calls } = await refusalFor(agentId, "user");
-      expect(status).toBe(403);
-      expect(calls).toEqual([]);
-      said.add(body.error);
+  test("the same Bot gets the same answer whichever role string is passed", async () => {
+    for (const agentId of ["at-an-endpoint", "never-registered"]) {
+      const asUser = await refusalFor(agentId, "user");
+      const asAdmin = await refusalFor(agentId, "admin");
+      expect(asUser.body).toEqual(asAdmin.body);
+      expect(asUser.status).toBe(asAdmin.status);
     }
-    // One sentence for all three, so nothing distinguishes "exists" from "does not".
-    expect(said.size).toBe(1);
-    expect([...said][0]).toBe(
-      "An administrator decides which Bots may hand work to another Bot.",
-    );
   });
 
-  test("an administrator still gets the reason", async () => {
-    expect((await refusalFor("at-an-endpoint", "admin")).body.error).toContain(
-      "its own endpoint",
+  test("a Bot at its own endpoint is refused, and says so", async () => {
+    const { status, body, calls } = await refusalFor("at-an-endpoint", "user");
+    expect(status).toBe(403);
+    expect(calls).toEqual([]);
+    expect(body.error).toContain("its own endpoint");
+  });
+
+  test("a Bot nobody registered is refused, and says so", async () => {
+    const { status, body, calls } = await refusalFor(
+      "never-registered",
+      "user",
     );
-    expect((await refusalFor("never-registered", "admin")).body.error).toBe(
-      "There is no such Bot.",
-    );
+    expect(status).toBe(403);
+    expect(calls).toEqual([]);
+    expect(body.error).toBe("There is no such Bot.");
   });
 
   /*
@@ -704,7 +754,7 @@ describe("granting a Bot itself", () => {
     const { calls, app } = grantsApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/grants",
+      "http://remii.test/api/plugins/grants",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -855,10 +905,10 @@ function directoryApp(
       api: { getSession: async () => ({ user: ADMIN }) },
     } as never,
     { rolesForUser: async () => [role] },
-    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    // Positions 4-13 are the other stores; `store` is 14, pluginStore.
     ...UP_TO_PLUGIN_STORE,
     store,
-    // Positions 16-29 are the stores after it; the broker is 30, `composio`.
+    // Positions 15-27 are the stores after it; the broker is 28, `composio`.
     ...UP_TO_BROKER,
     listApps ? ({ broker: { listApps } } as never) : undefined,
   );
@@ -871,7 +921,7 @@ describe("the Composio directory", () => {
     const { app } = directoryApp(null);
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
     );
 
     // 503 rather than `{ apps: [] }`. An empty directory and an absent one are different facts,
@@ -890,13 +940,54 @@ describe("the Composio directory", () => {
     const { app } = directoryApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps?q=sla",
+      "http://remii.test/api/plugins/composio/apps?q=sla",
     );
 
     expect(response.status).toBe(200);
     expect(
       (await response.json()).apps.map((app: { slug: string }) => app.slug),
     ).toEqual(["slack"]);
+  });
+
+  test("an empty term answers a curated set rather than the whole directory", async () => {
+    /*
+     * THE BROWSER USED TO OPEN ON NOTHING, AND THAT IS WHAT THIS CLOSES.
+     *
+     * `composioAppsQueryOptions` was `enabled: term.length > 0` — the directory was not fetched
+     * until somebody typed, on the reasoning that it is over a thousand rows. So the Composio
+     * section of App connections rendered an empty box, no rows and no hint that typing was the
+     * thing that would fill it, which reads as a broken feature rather than as an empty search.
+     *
+     * So an empty term is a SHORT LIST, not all of them and not none. The order is the one in
+     * `DEFAULT_DIRECTORY_ORDER`, which puts the apps people actually reach for first rather than
+     * sorting alphabetically from Airtable. A slug there that Composio retires is skipped rather
+     * than refused, so retiring an app is deleting a line.
+     */
+    const { app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+    );
+
+    expect(response.status).toBe(200);
+    /*
+     * IN THE CURATED ORDER, not the catalogue's. The fixture directory holds slack, gmail and
+     * linear, in that order, and all three are on `DEFAULT_DIRECTORY_ORDER` — so what proves this
+     * is not the COUNT but the ORDER: gmail leads because it is first on the list, and slack comes
+     * third rather than first. A route that answered with the whole directory would hand back the
+     * catalogue's order and fail here.
+     */
+    expect(
+      (await response.json()).apps.map((entry: { slug: string }) => entry.slug),
+    ).toEqual(["gmail", "slack", "linear"]);
+
+    // And a term still narrows, which is the point of the search box either way.
+    const searched = await app.request(
+      "http://remii.test/api/plugins/composio/apps?q=linear",
+    );
+    expect(
+      (await searched.json()).apps.map((entry: { slug: string }) => entry.slug),
+    ).toEqual(["linear"]);
   });
 
   test("an app this deployment could not connect is never offered", async () => {
@@ -911,7 +1002,7 @@ describe("the Composio directory", () => {
     const { app } = directoryApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
     );
 
     expect(response.status).toBe(200);
@@ -919,13 +1010,24 @@ describe("the Composio directory", () => {
       (entry: { slug: string }) => entry.slug,
     );
     expect(slugs).not.toContain("docusign");
-    expect(slugs).toEqual(["slack", "gmail", "linear"]);
+    /*
+     * AN EMPTY TERM IS A CURATED SET, not the whole directory.
+     *
+     * It used to be asserted as all three fixture apps in catalogue order, which is what the route
+     * returned then. It answers the default list now — see `DEFAULT_DIRECTORY_ORDER` — because a
+     * 1500-app answer painted the picker with the thing the search box exists to narrow, so opening
+     * the browser showed a list nobody scrolled. All three fixture apps are on that list, so the
+     * count is unchanged and the ORDER is what differs: gmail leads, slack follows, linear last.
+     * The filter this test is about is untouched by any of it — an app this deployment cannot
+     * connect is in neither branch.
+     */
+    expect(slugs).toEqual(["gmail", "slack", "linear"]);
 
-    // And the search branch reads the same filtered list, not the raw directory. Searching is what
-    // an administrator does to a 1540-app picker, so a term that names the unconnectable app is
+    // And the search branch reads the same filtered list, not the raw directory. Searching is the
+    // only way to reach most of a 1500-app picker, so a term that names the unconnectable app is
     // the request most likely to hand one back.
     const searched = await app.request(
-      "http://openbot.test/api/plugins/composio/apps?q=docu",
+      "http://remii.test/api/plugins/composio/apps?q=docu",
     );
     expect((await searched.json()).apps).toEqual([]);
   });
@@ -953,7 +1055,7 @@ describe("the Composio directory", () => {
     ]);
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
     );
 
     const apps = (await response.json()).apps as Array<{
@@ -974,7 +1076,7 @@ describe("the Composio directory", () => {
     const { added, app } = directoryApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1003,7 +1105,7 @@ describe("the Composio directory", () => {
     const { added, app } = directoryApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1024,7 +1126,7 @@ describe("the Composio directory", () => {
     const { added, app } = directoryApp();
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1047,26 +1149,386 @@ describe("the Composio directory", () => {
     ]);
   });
 
-  test("somebody who is not an administrator sees none of it", async () => {
-    // Enabling an app writes every one of its actions in front of a model, which is the same
-    // decision as adding an MCP server and stays an administrator's.
-    const { added, app } = directoryApp(undefined, "user");
+  test("a deployment with no broker is told which setting to set", async () => {
+    const { app } = directoryApp(null);
 
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+    );
+
+    // 503 rather than `{ apps: [] }`. An empty directory and an absent one are different facts,
+    // and a page shown the empty one draws "no apps available" over a deployment that simply has
+    // no key.
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toContain("COMPOSIO_API_KEY");
+  });
+
+  test("a search term filters the directory here, not at the vendor", async () => {
+    /*
+     * `@composio/core` forwards only category, managed_by, sort_by, cursor and limit, and silently
+     * drops anything else — so a term handed to their client comes back as an unfiltered first
+     * page that reads as a result. The filter is ours, over slug, name and description.
+     */
+    const { app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps?q=sla",
+    );
+
+    expect(response.status).toBe(200);
     expect(
-      (await app.request("http://openbot.test/api/plugins/composio/apps"))
-        .status,
-    ).toBe(403);
+      (await response.json()).apps.map((app: { slug: string }) => app.slug),
+    ).toEqual(["slack"]);
+  });
 
-    const posted = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+  test("an app this deployment could not connect is never offered", async () => {
+    /*
+     * COMPOSIO PUBLISHES 1540 APPS AND FIFTY-SIX OF THEM CANNOT BE CONNECTED FROM HERE: they want
+     * an OAuth client registered by whoever runs the deployment, and this deployment holds nowhere
+     * to put one. Listed, they are a row an administrator presses Add on and meets the vendor's
+     * refusal at — a dead end offered as a choice. Hidden in the route rather than asked of the
+     * vendor, because which apps are connectable is a fact about what this deployment can drive,
+     * not about what Composio publishes.
+     */
+    const { app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+    );
+
+    expect(response.status).toBe(200);
+    const slugs = (await response.json()).apps.map(
+      (entry: { slug: string }) => entry.slug,
+    );
+    expect(slugs).not.toContain("docusign");
+    /*
+     * AN EMPTY TERM IS A CURATED SET, not the whole directory.
+     *
+     * It used to be asserted as all three fixture apps in catalogue order, which is what the route
+     * returned then. It answers the default list now — see `DEFAULT_DIRECTORY_ORDER` — because a
+     * 1500-app answer painted the picker with the thing the search box exists to narrow, so opening
+     * the browser showed a list nobody scrolled. All three fixture apps are on that list, so the
+     * count is unchanged and the ORDER is what differs: gmail leads, slack follows, linear last.
+     * The filter this test is about is untouched by any of it — an app this deployment cannot
+     * connect is in neither branch.
+     */
+    expect(slugs).toEqual(["gmail", "slack", "linear"]);
+
+    // And the search branch reads the same filtered list, not the raw directory. Searching is the
+    // only way to reach most of a 1500-app picker, so a term that names the unconnectable app is
+    // the request most likely to hand one back.
+    const searched = await app.request(
+      "http://remii.test/api/plugins/composio/apps?q=docu",
+    );
+    expect((await searched.json()).apps).toEqual([]);
+  });
+
+  test("an app is enabled by the url of the row, not by the row's id", async () => {
+    /*
+     * Which app a row is comes off its url and only off its url, because that is where the
+     * transport reads it from. An id read as an app name is a different question wearing the same
+     * answer's clothes, and it works right up until somebody renames a row.
+     *
+     * SO THE ROW BELOW DISAGREES WITH ITSELF, AND NAMES A SECOND APP THAT IS REALLY IN THE
+     * DIRECTORY. Its id reads as Gmail and its url is Slack's — which is a renamed Slack row, and
+     * the only fixture that can tell the two readings apart. The id used to be
+     * `an-id-nobody-should-read`, a string no implementation would resolve to any app at all: under
+     * it, a route keyed on ids would have marked NOTHING enabled and the assertions below would
+     * have read exactly as they do now. The test's own name was the only place the property lived.
+     *
+     * AND THE ID-BEARING READ IS ASSERTED UNMADE, which is the structural half the route's comment
+     * claims: `serverUrls` hands over urls and nothing else, so there is no id here to read by
+     * mistake. That is a claim about which call is made, and only a store offering the other call
+     * can check it. See `directoryApp`'s `idReads`.
+     */
+    const { app, idReads } = directoryApp(undefined, "admin", [
+      { id: "composio-gmail", url: "composio://slack" },
+    ]);
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+    );
+
+    const apps = (await response.json()).apps as Array<{
+      slug: string;
+      enabled: boolean;
+    }>;
+    expect(apps.find((entry) => entry.slug === "slack")?.enabled).toBe(true);
+    expect(apps.find((entry) => entry.slug === "gmail")?.enabled).toBe(false);
+    expect(idReads).toEqual([]);
+  });
+
+  test("a slug the directory never answered with is refused", async () => {
+    /*
+     * THE VALIDATION IS THE WHOLE ROUTE. The slug becomes `composio://<slug>`, which is the url
+     * every future call for the app is resolved against, so a slug nobody listed is a row pointing
+     * at an app that does not exist — added, grantable, and dead at the first call.
+     */
+    const { added, app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "not-an-app" }),
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect(added).toEqual([]);
+  });
+
+  test("an app this deployment cannot connect is refused before the store", async () => {
+    /*
+     * THE ASYMMETRY THIS CLOSES. The GET hides every `unsupported` app, so an administrator
+     * cannot press Add on one through the picker; the POST validates against the unfiltered
+     * catalogue, so a request naming one by hand walks straight past that. What it would reach is
+     * `addBrokeredApp`, whose `schemeFor` records `null` for an unsupported app — and `null` on
+     * that column is read everywhere else as "not a brokered row at all". So the row this would
+     * write is one that lies about its own kind.
+     *
+     * The derivation's own `reason` is the answer, because it is the sentence that names what is
+     * missing for THIS app, and 503 because it is a refusal this deployment authored — the same
+     * status `brokerRefusal` gives one raised a layer down, and not a 400, which would read as a
+     * malformed request about an app Composio really does publish.
+     */
+    const { added, app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "docusign" }),
+      },
+    );
+
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      "OAuth application registered by whoever runs this deployment",
+    );
+    // AND THE STORE WAS NEVER ASKED, which is the whole point of the guard: the misleading row is
+    // not written and then answered around, it is never reachable.
+    expect(added).toEqual([]);
+  });
+
+  test("an app the directory does list is added", async () => {
+    const { added, app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ slug: "slack" }),
       },
     );
-    expect(posted.status).toBe(403);
+
+    expect(response.status).toBe(201);
+    // The title comes off the directory entry, never off the request: the caller chose an app, not
+    // a name for it.
+    // And so does the connection: how an app connects is read off the catalogue row that was
+    // chosen, not derived a second time on the way to the store.
+    expect(added).toEqual([
+      {
+        slug: "slack",
+        title: "Slack",
+        by: ADMIN.email,
+        connection: { kind: "consent" },
+      },
+    ]);
+  });
+
+  test("a deployment with no broker is told which setting to set", async () => {
+    const { app } = directoryApp(null);
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+    );
+
+    // 503 rather than `{ apps: [] }`. An empty directory and an absent one are different facts,
+    // and a page shown the empty one draws "no apps available" over a deployment that simply has
+    // no key.
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toContain("COMPOSIO_API_KEY");
+  });
+
+  test("a search term filters the directory here, not at the vendor", async () => {
+    /*
+     * `@composio/core` forwards only category, managed_by, sort_by, cursor and limit, and silently
+     * drops anything else — so a term handed to their client comes back as an unfiltered first
+     * page that reads as a result. The filter is ours, over slug, name and description.
+     */
+    const { app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps?q=sla",
+    );
+
+    expect(response.status).toBe(200);
+    expect(
+      (await response.json()).apps.map((app: { slug: string }) => app.slug),
+    ).toEqual(["slack"]);
+  });
+
+  test("an app this deployment could not connect is never offered", async () => {
+    /*
+     * COMPOSIO PUBLISHES 1540 APPS AND FIFTY-SIX OF THEM CANNOT BE CONNECTED FROM HERE: they want
+     * an OAuth client registered by whoever runs the deployment, and this deployment holds nowhere
+     * to put one. Listed, they are a row an administrator presses Add on and meets the vendor's
+     * refusal at — a dead end offered as a choice. Hidden in the route rather than asked of the
+     * vendor, because which apps are connectable is a fact about what this deployment can drive,
+     * not about what Composio publishes.
+     */
+    const { app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+    );
+
+    expect(response.status).toBe(200);
+    const slugs = (await response.json()).apps.map(
+      (entry: { slug: string }) => entry.slug,
+    );
+    expect(slugs).not.toContain("docusign");
+    /*
+     * AN EMPTY TERM IS A CURATED SET, not the whole directory.
+     *
+     * It used to be asserted as all three fixture apps in catalogue order, which is what the route
+     * returned then. It answers the default list now — see `DEFAULT_DIRECTORY_ORDER` — because a
+     * 1500-app answer painted the picker with the thing the search box exists to narrow, so opening
+     * the browser showed a list nobody scrolled. All three fixture apps are on that list, so the
+     * count is unchanged and the ORDER is what differs: gmail leads, slack follows, linear last.
+     * The filter this test is about is untouched by any of it — an app this deployment cannot
+     * connect is in neither branch.
+     */
+    expect(slugs).toEqual(["gmail", "slack", "linear"]);
+
+    // And the search branch reads the same filtered list, not the raw directory. Searching is the
+    // only way to reach most of a 1500-app picker, so a term that names the unconnectable app is
+    // the request most likely to hand one back.
+    const searched = await app.request(
+      "http://remii.test/api/plugins/composio/apps?q=docu",
+    );
+    expect((await searched.json()).apps).toEqual([]);
+  });
+
+  test("an app is enabled by the url of the row, not by the row's id", async () => {
+    /*
+     * Which app a row is comes off its url and only off its url, because that is where the
+     * transport reads it from. An id read as an app name is a different question wearing the same
+     * answer's clothes, and it works right up until somebody renames a row.
+     *
+     * SO THE ROW BELOW DISAGREES WITH ITSELF, AND NAMES A SECOND APP THAT IS REALLY IN THE
+     * DIRECTORY. Its id reads as Gmail and its url is Slack's — which is a renamed Slack row, and
+     * the only fixture that can tell the two readings apart. The id used to be
+     * `an-id-nobody-should-read`, a string no implementation would resolve to any app at all: under
+     * it, a route keyed on ids would have marked NOTHING enabled and the assertions below would
+     * have read exactly as they do now. The test's own name was the only place the property lived.
+     *
+     * AND THE ID-BEARING READ IS ASSERTED UNMADE, which is the structural half the route's comment
+     * claims: `serverUrls` hands over urls and nothing else, so there is no id here to read by
+     * mistake. That is a claim about which call is made, and only a store offering the other call
+     * can check it. See `directoryApp`'s `idReads`.
+     */
+    const { app, idReads } = directoryApp(undefined, "admin", [
+      { id: "composio-gmail", url: "composio://slack" },
+    ]);
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+    );
+
+    const apps = (await response.json()).apps as Array<{
+      slug: string;
+      enabled: boolean;
+    }>;
+    expect(apps.find((entry) => entry.slug === "slack")?.enabled).toBe(true);
+    expect(apps.find((entry) => entry.slug === "gmail")?.enabled).toBe(false);
+    expect(idReads).toEqual([]);
+  });
+
+  test("a slug the directory never answered with is refused", async () => {
+    /*
+     * THE VALIDATION IS THE WHOLE ROUTE. The slug becomes `composio://<slug>`, which is the url
+     * every future call for the app is resolved against, so a slug nobody listed is a row pointing
+     * at an app that does not exist — added, grantable, and dead at the first call.
+     */
+    const { added, app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "not-an-app" }),
+      },
+    );
+
+    expect(response.status).toBe(400);
     expect(added).toEqual([]);
+  });
+
+  test("an app this deployment cannot connect is refused before the store", async () => {
+    /*
+     * THE ASYMMETRY THIS CLOSES. The GET hides every `unsupported` app, so an administrator
+     * cannot press Add on one through the picker; the POST validates against the unfiltered
+     * catalogue, so a request naming one by hand walks straight past that. What it would reach is
+     * `addBrokeredApp`, whose `schemeFor` records `null` for an unsupported app — and `null` on
+     * that column is read everywhere else as "not a brokered row at all". So the row this would
+     * write is one that lies about its own kind.
+     *
+     * The derivation's own `reason` is the answer, because it is the sentence that names what is
+     * missing for THIS app, and 503 because it is a refusal this deployment authored — the same
+     * status `brokerRefusal` gives one raised a layer down, and not a 400, which would read as a
+     * malformed request about an app Composio really does publish.
+     */
+    const { added, app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "docusign" }),
+      },
+    );
+
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      "OAuth application registered by whoever runs this deployment",
+    );
+    // AND THE STORE WAS NEVER ASKED, which is the whole point of the guard: the misleading row is
+    // not written and then answered around, it is never reachable.
+    expect(added).toEqual([]);
+  });
+
+  test("an app the directory does list is added", async () => {
+    const { added, app } = directoryApp();
+
+    const response = await app.request(
+      "http://remii.test/api/plugins/composio/apps",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ slug: "slack" }),
+      },
+    );
+
+    expect(response.status).toBe(201);
+    // The title comes off the directory entry, never off the request: the caller chose an app, not
+    // a name for it.
+    // And so does the connection: how an app connects is read off the catalogue row that was
+    // chosen, not derived a second time on the way to the store.
+    expect(added).toEqual([
+      {
+        slug: "slack",
+        title: "Slack",
+        by: ADMIN.email,
+        connection: { kind: "consent" },
+      },
+    ]);
   });
 
   test("a vendor failure is Composio's own sentence on both doors, not a 500", async () => {
@@ -1084,10 +1546,10 @@ describe("the Composio directory", () => {
     };
 
     const listed = await directoryApp(failing).app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
     );
     const added = await directoryApp(failing).app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1114,7 +1576,7 @@ describe("the Composio directory", () => {
     });
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
     );
 
     expect(response.status).toBe(502);
@@ -1123,7 +1585,7 @@ describe("the Composio directory", () => {
     expect(refusal).not.toContain("fetch failed");
   });
 
-  test("a refusal while enabling reaches the administrator who pressed the button", async () => {
+  test("a refusal while enabling reaches the person who pressed the button", async () => {
     /*
      * THE DEAD BUTTON. An administrator pressed Add and Composio answered "Default auth config not
      * found for toolkit linear_mcp. Composio does not have managed credentials for this toolkit." —
@@ -1158,7 +1620,7 @@ describe("the Composio directory", () => {
 
     try {
       const response = await app.request(
-        "http://openbot.test/api/plugins/composio/apps",
+        "http://remii.test/api/plugins/composio/apps",
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1204,7 +1666,7 @@ describe("the Composio directory", () => {
     });
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1252,7 +1714,7 @@ describe("the Composio directory", () => {
 
     try {
       const response = await app.request(
-        "http://openbot.test/api/plugins/composio/apps",
+        "http://remii.test/api/plugins/composio/apps",
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1328,16 +1790,16 @@ function connectionsApp(
       },
     } as never,
     { rolesForUser: async () => ["user"] },
-    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    // Positions 4-13 are the other stores; `store` is 14, pluginStore.
     ...UP_TO_PLUGIN_STORE,
     store,
   );
 
-  return () => app.request("http://openbot.test/api/plugins/connections");
+  return () => app.request("http://remii.test/api/plugins/connections");
 }
 
-const ASKER = { id: "user_asker", email: "asker@openbot.test" };
-const SOMEBODY_ELSE = { id: "user_other", email: "other@openbot.test" };
+const ASKER = { id: "user_asker", email: "asker@remii.test" };
+const SOMEBODY_ELSE = { id: "user_other", email: "other@remii.test" };
 
 /** This deployment's own OAuth grant, which is what `connectionsFor` answers and all it answers. */
 const HELD_NOTION: HeldConnection = {
@@ -1457,7 +1919,7 @@ const AUTHORIZATION_URL = "https://backend.composio.dev/s/a-bearer-capability";
  * Where this deployment tells Composio to send somebody back to, written out rather than composed.
  *
  * BUILT FROM THE DEPLOYMENT AND FROM NOTHING IN THE REQUEST, which is the property the tests below
- * are about. The origin is `testEnvironment`'s own — no `OPENBOT_APP_URL` is set, so it falls back
+ * are about. The origin is `testEnvironment`'s own — no `REMII_APP_URL` is set, so it falls back
  * through to `BETTER_AUTH_URL` — and the path is the account's page, which is where the person
  * pressed Connect and the page that asks Composio whether it worked.
  *
@@ -1772,10 +2234,10 @@ function brokeredApp(
     // Connecting an account is not an administrator's act: an administrator adds the app once, and
     // then everybody connects their own.
     { rolesForUser: async () => ["user"] },
-    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    // Positions 4-13 are the other stores; `store` is 14, pluginStore.
     ...UP_TO_PLUGIN_STORE,
     store,
-    // Positions 16-29 are the stores after it; the broker is 30, `composio`.
+    // Positions 15-27 are the stores after it; the broker is 28, `composio`.
     ...UP_TO_BROKER,
     redirectUrl
       ? ({
@@ -1821,7 +2283,7 @@ function brokeredApp(
      */
     connectFields: (body?: unknown) =>
       app.request(
-        "http://openbot.test/api/plugins/servers/composio-firecrawl/connect",
+        "http://remii.test/api/plugins/servers/composio-firecrawl/connect",
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1836,7 +2298,7 @@ function brokeredApp(
      */
     connectNoAuth: (body?: unknown) =>
       app.request(
-        "http://openbot.test/api/plugins/servers/composio-hackernews/connect",
+        "http://remii.test/api/plugins/servers/composio-hackernews/connect",
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1853,7 +2315,7 @@ function brokeredApp(
      */
     connectAt: (serverId: string) =>
       app.request(
-        `http://openbot.test/api/plugins/servers/${serverId}/connect`,
+        `http://remii.test/api/plugins/servers/${serverId}/connect`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1873,7 +2335,7 @@ function brokeredApp(
       headers: Record<string, string> = {},
     ) =>
       app.request(
-        `http://openbot.test/api/plugins/servers/composio-linear/connect${query}`,
+        `http://remii.test/api/plugins/servers/composio-linear/connect${query}`,
         {
           method: "POST",
           headers: { "content-type": "application/json", ...headers },
@@ -1888,7 +2350,7 @@ function brokeredApp(
      */
     confirm: (options: Caller = {}) =>
       app.request(
-        `http://openbot.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection/confirm${options.query ?? ""}`,
+        `http://remii.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection/confirm${options.query ?? ""}`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1905,7 +2367,7 @@ function brokeredApp(
      */
     recheck: (options: Caller = {}) =>
       app.request(
-        `http://openbot.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection/recheck${options.query ?? ""}`,
+        `http://remii.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection/recheck${options.query ?? ""}`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1914,7 +2376,7 @@ function brokeredApp(
       ),
     disconnect: (options: Caller = {}) =>
       app.request(
-        `http://openbot.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection${options.query ?? ""}`,
+        `http://remii.test/api/plugins/servers/${options.serverId ?? "composio-linear"}/connection${options.query ?? ""}`,
         {
           method: "DELETE",
           headers: { "content-type": "application/json" },
@@ -1956,13 +2418,19 @@ describe("connecting a brokered app", () => {
     expect(authorized).toEqual([
       { userId: ADMIN.id, toolkit: "linear", returnUrl: RETURN_URL },
     ]);
-    // And the read that decided there was no connection yet asked about the same person.
-    expect(queried).toEqual([{ toolkit: "linear", userId: ADMIN.id }]);
+    /*
+     * No "does this person already have one" read at all, and that is the multi-account decision
+     * rather than an oversight. The person may hold work and personal accounts at the same app, so
+     * asking first would refuse the second one; which account a call runs in is settled at call time,
+     * per Bot grant, and never by whichever connection was made first. The assertion stays because it
+     * pins the ID that matters: whatever this route does read, it reads it about the session's person.
+     */
+    expect(queried).toEqual([]);
   });
 
   test("a brokered row never reaches the checks that belong to the OAuth flow", async () => {
     /*
-     * The ordering, stated as its own case. This deployment has no OPENBOT_PUBLIC_URL and
+     * The ordering, stated as its own case. This deployment has no REMII_PUBLIC_URL and
      * `composio-linear` is in nobody's catalogue, so a brokered row that fell through to either of
      * the two checks below the branch would be answered "no public URL" or "is not connected as an
      * individual person" — the second of which is the opposite of true. Neither check applies: no
@@ -2021,31 +2489,32 @@ describe("connecting a brokered app", () => {
     expect(authorized).toEqual([]);
   });
 
-  test("a second connection is refused with the step to take", async () => {
+  test("a second press mints a second link rather than refusing the person", async () => {
+    /*
+     * WAS "a second connection is refused with the step to take", expecting 409 and a sentence telling
+     * them to disconnect first. That one-account-per-app guard is gone, deliberately: work and
+     * personal accounts at one app are ordinary, and the refusal meant a person who had connected
+     * their work account could never reach their own personal one.
+     *
+     * What makes several connections safe rather than a way to shadow one another is that a call
+     * names its account; which one runs in is decided at call time per Bot grant, never by arrival
+     * order. This test pins the half that is observable here — the press is answered, it is answered
+     * for the same person, and nothing about the existing connection blocks it.
+     */
     const { authorized, connect } = brokeredApp({
       connectedAt: "2026-02-02T00:00:00.000Z",
     });
 
     const response = await connect({});
 
-    expect(response.status).toBe(409);
-    const refusal = (await response.json()).error as string;
-    // Naming the remedy rather than only refusing: the person has an account attached already, and
-    // the only way to a new link is through disconnecting the one they have.
-    expect(refusal.toLowerCase()).toContain("disconnect");
-    /*
-     * THE APP'S TITLE, AND NOT THE ROW'S ID. "Linear" is the name of the thing this person
-     * connected; `composio-linear` is how this deployment keys a table, which they have never seen
-     * and cannot act on. The second assertion is not the first one twice: a sentence that named the
-     * app and then quoted the row id beside it would satisfy one and fail the other.
-     */
-    expect(refusal).toContain("Linear");
-    expect(refusal).not.toContain("composio-linear");
-    // And nothing was minted, which is the half that matters: a link handed out here would attach
-    // a second account behind a row that already says connected.
-    expect(authorized).toEqual([]);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      authorizationUrl: AUTHORIZATION_URL,
+    });
+    expect(authorized).toEqual([
+      { userId: ADMIN.id, toolkit: "linear", returnUrl: RETURN_URL },
+    ]);
   });
-
   test("a deployment with no broker is told which setting to set", async () => {
     // The same answer the directory gives, for the same reason: nobody was asked, and the remedy
     // is one environment variable long.
@@ -2086,25 +2555,29 @@ describe("connecting a brokered app", () => {
     ]);
   });
 
-  test("an administrator who started on the app's own page is sent back to it", async () => {
+  test("there is no longer a second page to be sent back to", async () => {
     /*
-     * The one thing a caller does get to choose, and it is a NAME rather than an address: `admin`
-     * or anything else, resolved against this deployment's own origin either way. An administrator
-     * connecting their account from the app's setup page left a page mid-task, and sending them to
-     * their personal settings afterwards is the round trip this exists to remove.
+     * WAS "an administrator who started on the app's own page is sent back to it", passing
+     * `?returnTo=admin` and expecting the admin plugins page. That page is gone, so there is no second
+     * destination to choose between: the flow ends on the person's own connected-accounts page, which
+     * is where they can see the account they just attached.
+     *
+     * `returnTo` is kept in the test because its SHAPE is the security property. It is resolved to an
+     * origin and a known page or dropped for the default, so a value naming anywhere else cannot steer
+     * the return leg off this deployment — asserted by the next test.
      */
     const { authorized, connect } = brokeredApp();
 
     await connect({}, "?returnTo=admin");
 
     expect(authorized).toEqual([
-      { userId: ADMIN.id, toolkit: "linear", returnUrl: ADMIN_RETURN_URL },
+      { userId: ADMIN.id, toolkit: "linear", returnUrl: RETURN_URL },
     ]);
   });
 
   test("a returnTo naming somewhere else is the default, not a destination", async () => {
-    // Narrowed to one of two names on the way in, so an unrecognised value never reaches the url
-    // that gets built. A full address in that parameter is the attack this shape refuses.
+    // Narrowed on the way in, so an unrecognised value never reaches the url that gets built. A full
+    // address in that parameter is the attack this shape refuses.
     const { authorized, connect } = brokeredApp();
 
     await connect({}, "?returnTo=https%3A%2F%2Fevil.test");
@@ -2124,11 +2597,11 @@ describe("connecting a brokered app", () => {
      * with no route back and nothing here knowing it happened.
      *
      * Single-user with no sign-in is the one deployment shape that genuinely has no app URL:
-     * everywhere else `OPENBOT_APP_URL`, `TRUSTED_ORIGINS` or the sign-in address supplies one.
+     * everywhere else `REMII_APP_URL`, `TRUSTED_ORIGINS` or the sign-in address supplies one.
      */
     const { authorized, connect } = brokeredApp(null, AUTHORIZATION_URL, {
       environment: {
-        OPENBOT_SINGLE_USER: "true",
+        REMII_SINGLE_USER: "true",
         BETTER_AUTH_URL: undefined,
         BETTER_AUTH_SECRET: undefined,
         GOOGLE_OAUTH_CLIENT_ID: undefined,
@@ -2141,7 +2614,7 @@ describe("connecting a brokered app", () => {
 
     expect(response.status).toBe(503);
     // The setting, because it is the whole remedy and nothing else on the screen names it.
-    expect((await response.json()).error).toContain("OPENBOT_APP_URL");
+    expect((await response.json()).error).toContain("REMII_APP_URL");
     expect(authorized).toEqual([]);
   });
 
@@ -2549,12 +3022,16 @@ describe("connecting an app whose secret a person types", () => {
     });
   });
 
-  test("an account already connected is refused before the form is drawn", async () => {
+  test("an account already connected still gets the form, because a second key is ordinary", async () => {
     /*
-     * THE ONE-ACCOUNT GUARD STILL RUNS FIRST, which is the ordering both branches were put after on
-     * purpose. Drawing the form for somebody who already has an account attached invites them to
-     * type a key that would be refused after they had entered it, and asking Composio what the app
-     * wants is a call made on behalf of a request that is going to be refused anyway.
+     * WAS "an account already connected is refused before the form is drawn", expecting 409 and a
+     * sentence telling them to disconnect first. The one-account guard is gone on this branch for the
+     * same reason it is gone on the consent half: a person may hold a work key and a personal key at
+     * the same app, and a refusal would make the second one unreachable.
+     *
+     * The ordering this test used to protect still matters and is still asserted: the form asks
+     * Composio what the app wants, and it asks BEFORE anybody is asked to type anything. A field list
+     * assembled from a guess would ask for the wrong credentials and then refuse them.
      */
     const { asked, submitted, connectFields } = brokeredApp({
       connectedAt: "2026-02-02T00:00:00.000Z",
@@ -2562,13 +3039,9 @@ describe("connecting an app whose secret a person types", () => {
 
     const response = await connectFields();
 
-    expect(response.status).toBe(409);
-    const refusal = (await response.json()).error as string;
-    expect(refusal.toLowerCase()).toContain("disconnect");
-    // The app's name rather than the row's id, as on the consent half above.
-    expect(refusal).toContain("Firecrawl");
-    expect(refusal).not.toContain("composio-firecrawl");
-    expect(asked).toEqual([]);
+    expect(response.status).toBe(200);
+    expect((await response.json()).error).toBeUndefined();
+    expect(asked).toEqual([{ toolkit: "firecrawl", authScheme: "API_KEY" }]);
     expect(submitted).toEqual([]);
   });
 
@@ -2598,7 +3071,7 @@ describe("connecting an app whose secret a person types", () => {
     /*
      * A SETTING WITH NO BEARING ON THIS FLOW DOES NOT GET TO REFUSE IT.
      *
-     * `OPENBOT_APP_URL` is where Composio sends somebody back to once they have consented, and this
+     * `REMII_APP_URL` is where Composio sends somebody back to once they have consented, and this
      * half has no consent screen to come back from: the key is typed here, no link is minted, and
      * nobody ever leaves the deployment. The guard for it used to stand in front of the fork, so a
      * single-user deployment with no sign-in — the one shape that genuinely has no app URL — could
@@ -2614,7 +3087,7 @@ describe("connecting an app whose secret a person types", () => {
       AUTHORIZATION_URL,
       {
         environment: {
-          OPENBOT_SINGLE_USER: "true",
+          REMII_SINGLE_USER: "true",
           BETTER_AUTH_URL: undefined,
           BETTER_AUTH_SECRET: undefined,
           GOOGLE_OAUTH_CLIENT_ID: undefined,
@@ -2690,12 +3163,12 @@ describe("connecting an app whose secret a person types", () => {
  * CRITERION. Pressing Connect on a `NO_AUTH` app is answered with what is true of it — there is no
  * account to make — in a sentence naming the app rather than the row, and nothing is asked of
  * Composio on the way: no form is drawn, no consent link is minted, and no key travels. The answer
- * is the same on a deployment with no `OPENBOT_APP_URL`, because that setting is where a consent
+ * is the same on a deployment with no `REMII_APP_URL`, because that setting is where a consent
  * comes back to and this flow has no consent to come back from.
  *
  * REASON. Thirty-four of Composio's toolkits resolve to `no-auth`, and `NO_AUTH` is the literal
  * recorded on their rows. It is not a field scheme, so the fork above dropped every one of them
- * into the consent arm, where they met one of two dead ends: a 503 demanding `OPENBOT_APP_URL` for
+ * into the consent arm, where they met one of two dead ends: a 503 demanding `REMII_APP_URL` for
  * a return leg that does not exist, or `broker.authorize`, which can only fail because
  * `ensureAuthConfig` deliberately creates no config for an app Composio refuses to hold one for —
  * answered with a sentence telling the person to remove the app and add it again, which would
@@ -2742,10 +3215,12 @@ describe("connecting an app that needs no account", () => {
     expect(submitted).toEqual([]);
     expect(authorized).toEqual([]);
     /*
-     * The one-account guard still ran first, which is the ordering both other branches sit after
-     * on purpose: whose press this is has to be settled before what the app is.
+     * No connection read either. The one-account guard used to sit in front of this branch and forced
+     * the ordering it needed; with the guard gone the app's own scheme is the only thing consulted, so
+     * nothing has to be looked up about the person before the refusal. The assertion is kept because it
+     * is also the check that no store read crept back in ahead of the scheme fork.
      */
-    expect(queried).toEqual([{ toolkit: "hackernews", userId: ADMIN.id }]);
+    expect(queried).toEqual([]);
   });
 
   test("a deployment with no app URL answers the same way, because there is no return leg", async () => {
@@ -2760,7 +3235,7 @@ describe("connecting an app that needs no account", () => {
      */
     const { authorized, connectNoAuth } = brokeredApp(null, AUTHORIZATION_URL, {
       environment: {
-        OPENBOT_SINGLE_USER: "true",
+        REMII_SINGLE_USER: "true",
         BETTER_AUTH_URL: undefined,
         BETTER_AUTH_SECRET: undefined,
         GOOGLE_OAUTH_CLIENT_ID: undefined,
@@ -2774,7 +3249,7 @@ describe("connecting an app that needs no account", () => {
     expect(response.status).toBe(400);
     const refusal = (await response.json()).error as string;
     expect(refusal).toContain("Hacker News");
-    expect(refusal).not.toContain("OPENBOT_APP_URL");
+    expect(refusal).not.toContain("REMII_APP_URL");
     expect(authorized).toEqual([]);
   });
 
@@ -3104,13 +3579,13 @@ function removalApp(
       api: { getSession: async () => ({ user: ADMIN }) },
     } as never,
     { rolesForUser: async () => [role] },
-    // Positions 4-14 are the other stores; `store` is 15, pluginStore.
+    // Positions 4-13 are the other stores; `store` is 14, pluginStore.
     ...UP_TO_PLUGIN_STORE,
     store,
   );
 
   return () =>
-    app.request("http://openbot.test/api/plugins/servers/composio-slack", {
+    app.request("http://remii.test/api/plugins/servers/composio-slack", {
       method: "DELETE",
     });
 }
@@ -3137,7 +3612,7 @@ describe("removing a server that could not be fully withdrawn", () => {
     expect(await response.json()).toEqual({ error: sentence });
   });
 
-  test("an unreadable auth-config listing reaches the administrator too", async () => {
+  test("an unreadable auth-config listing reaches the person too", async () => {
     // The other loud refusal on this path, and the one whose remedy is NOT the button that was
     // just pressed: a row Composio described with no id and no name will be exactly as unreadable
     // next time, so the sentence names the dashboard instead. A 500 named neither.
@@ -3219,15 +3694,27 @@ describe("removing a server that could not be fully withdrawn", () => {
     expect(line).not.toContain("ak_a_key_nobody_should_read");
   });
 
-  test("somebody who is not an administrator never reaches the store", async () => {
+  test("a removal that fails reaches the store, because the row is the caller's own", async () => {
+    /*
+     * WAS "somebody who is not an administrator never reaches the store", expecting 403 and no call
+     * for the `user` role. There is no administrator to be somebody else from, and a server row is
+     * written against the person who added it, so the store IS the thing that decides whether this
+     * caller may remove it.
+     *
+     * What is worth keeping is the shape of the failure: the vendor's throw reaches the route, is
+     * answered as a gateway failure naming the row to remove, and the secret in the thrown text is
+     * kept out of the body. The case above already asserts the sentence and the console line; this one
+     * asserts only that the store is consulted at all, which is the half the old 403 was standing in
+     * for by accident.
+     */
     let asked = false;
     const response = await removalApp(async () => {
       asked = true;
       throw new Error("unreachable");
     }, "user")();
 
-    expect(response.status).toBe(403);
-    expect(asked).toBe(false);
+    expect(asked).toBe(true);
+    expect(response.status).toBe(502);
   });
 });
 
@@ -3252,7 +3739,7 @@ describe("enabling an app whose row was written before the failure", () => {
     });
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -3302,7 +3789,7 @@ describe("the directory read that is not the vendor's", () => {
     });
 
     const response = await app.request(
-      "http://openbot.test/api/plugins/composio/apps",
+      "http://remii.test/api/plugins/composio/apps",
     );
 
     expect(response.status).toBe(409);

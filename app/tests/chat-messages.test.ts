@@ -1,5 +1,5 @@
-import type { Message, ToolCall } from "@ag-ui/core";
 import { describe, expect, test } from "bun:test";
+import type { Message, ToolCall } from "@ag-ui/core";
 import { toVisibleChatItems } from "../src/components/channels/chat-messages";
 
 /**
@@ -96,6 +96,70 @@ describe("toVisibleChatItems", () => {
         result: "42",
       },
     ]);
+  });
+
+  /*
+   * The same call in two messages draws once.
+   *
+   * A live-streamed turn and its restored stored turn overlap with different message ids, and a
+   * retried turn does the same: the merge dedupes by message id while rows key on the call id,
+   * so both copies used to project and every component card drew twice. The first copy wins.
+   */
+  test("draws one row for a call carried by two messages", () => {
+    const toolCall: ToolCall = {
+      id: "call-1",
+      type: "function",
+      function: { name: "botActivity", arguments: '{"days":7}' },
+    };
+    const live: Message = {
+      id: "assistant-live",
+      role: "assistant",
+      content: "",
+      toolCalls: [toolCall],
+    };
+    const stored: Message = {
+      id: "assistant-stored",
+      role: "assistant",
+      content: "",
+      toolCalls: [toolCall],
+    };
+    const answered: Message = {
+      id: "result-1",
+      role: "tool",
+      toolCallId: "call-1",
+      content: "42",
+    };
+
+    expect(toVisibleChatItems([live, stored, answered])).toEqual([
+      {
+        kind: "tool",
+        id: "call-1",
+        toolCall,
+        result: "42",
+      },
+    ]);
+  });
+
+  test("still draws two distinct calls to the same component", () => {
+    const first: ToolCall = {
+      id: "call-1",
+      type: "function",
+      function: { name: "botActivity", arguments: '{"days":7}' },
+    };
+    const second: ToolCall = {
+      id: "call-2",
+      type: "function",
+      function: { name: "botActivity", arguments: '{"days":30}' },
+    };
+    const called: Message = {
+      id: "assistant-2",
+      role: "assistant",
+      content: "",
+      toolCalls: [first, second],
+    };
+
+    const items = toVisibleChatItems([called]);
+    expect(items.filter((item) => item.kind === "tool")).toHaveLength(2);
   });
 
   /*
@@ -940,7 +1004,7 @@ describe("toVisibleChatItems", () => {
  * WHAT THESE CASES DO AND DO NOT PROVE, STATED UP FRONT SO NOBODY READS THEM AS MORE THAN THEY ARE.
  * They pin the RULE this projection applies to a part, and the rule is now right. They do NOT show
  * that a real sent message is drawn correctly, because no real sent message reaches here carrying a
- * `mimeType` at all: OpenBot does not use the SDK's own send path but `toAttachmentPart` in
+ * `mimeType` at all: Remii does not use the SDK's own send path but `toAttachmentPart` in
  * `channel-chat.tsx`, which rebuilds the source as `{ type: "url", value }` and discards the
  * `mimeType` `onUpload` returned. Every part below that carries one is therefore a shape this app
  * cannot currently produce — deliberately so, because the reader has to be correct BEFORE the one

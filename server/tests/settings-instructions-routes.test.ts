@@ -1,24 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { createApp } from "../src/app";
 import type { AuditStore } from "../src/audit";
-import { loadConfig } from "../src/config";
 import {
   INSTRUCTIONS_LIMIT,
   InstructionsTooLongError,
   type UserInstructionsStore,
 } from "../src/user-instructions";
-import { testEnvironment } from "./support/environment";
+import { createTestApp } from "./support/app";
 
 const MEMBER = {
   id: "member-1",
-  email: "member@openbot.test",
+  email: "member@remii.test",
   name: "A Member",
   image: null,
 };
 
 const OTHER = {
   id: "member-2",
-  email: "other@openbot.test",
+  email: "other@remii.test",
   name: "Another Member",
   image: null,
 };
@@ -34,23 +32,19 @@ function appWith(
   store?: UserInstructionsStore,
   options: { as?: typeof MEMBER; auditStore?: AuditStore } = {},
 ) {
-  return createApp(
-    loadConfig(testEnvironment()),
-    {
-      handler: () => new Response(null, { status: 204 }),
-      api: { getSession: async () => ({ user: options.as ?? MEMBER }) },
-    } as never,
-    { rolesForUser: async () => ["user"] },
-    /*
-     * Positions 4-12 are the other stores, 13 is auditStore, 14-24 are more stores, and `store` is
-     * 25, userInstructions, the signature's last. Every parameter from 4 on is optional, so a wrong
-     * count is a silent type-check pass: see people-routes.test.ts, which learned this the hard way.
-     */
-    ...(Array.from({ length: 9 }) as never[]),
-    options.auditStore as never,
-    ...(Array.from({ length: 11 }) as never[]),
-    store as never,
-  );
+  /*
+   * The collaborators are NAMED rather than counted into place. `createApp` takes thirty-five
+   * positional parameters and every one from the third onwards is optional, so a hand-counted hole
+   * passes `tsc` at any count and fails at runtime with a 503 naming nothing — which is exactly what
+   * this file was doing when its store landed in the wrong slot. See `support/app.ts`.
+   */
+  return createTestApp({
+    ...(options.as ? { as: options.as } : {}),
+    parts: {
+      ...(store ? { userInstructions: store } : {}),
+      ...(options.auditStore ? { auditStore: options.auditStore } : {}),
+    },
+  });
 }
 
 /** One text per person, in memory, with the same trim, cap and clear rules the real store has. */
@@ -92,7 +86,7 @@ describe("standing instruction routes", () => {
     const app = appWith(store);
 
     const response = await app.request(
-      "http://openbot.local/api/settings/instructions",
+      "http://remii.local/api/settings/instructions",
     );
 
     expect(response.status).toBe(200);
@@ -104,7 +98,7 @@ describe("standing instruction routes", () => {
     const app = appWith(store);
 
     const response = await app.request(
-      "http://openbot.local/api/settings/instructions",
+      "http://remii.local/api/settings/instructions",
       {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -123,14 +117,14 @@ describe("standing instruction routes", () => {
     const { store } = memoryStore();
     const app = appWith(store);
 
-    await app.request("http://openbot.local/api/settings/instructions", {
+    await app.request("http://remii.local/api/settings/instructions", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ instructions: "Never say we are a team." }),
     });
 
     const response = await app.request(
-      "http://openbot.local/api/settings/instructions",
+      "http://remii.local/api/settings/instructions",
     );
 
     await expect(response.json()).resolves.toEqual({
@@ -145,7 +139,7 @@ describe("standing instruction routes", () => {
     const app = appWith(store);
 
     const response = await app.request(
-      "http://openbot.local/api/settings/instructions",
+      "http://remii.local/api/settings/instructions",
       {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -165,7 +159,7 @@ describe("standing instruction routes", () => {
     const app = appWith(store);
 
     const response = await app.request(
-      "http://openbot.local/api/settings/instructions",
+      "http://remii.local/api/settings/instructions",
       {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -190,7 +184,7 @@ describe("standing instruction routes", () => {
       const app = appWith(store);
 
       const response = await app.request(
-        "http://openbot.local/api/settings/instructions",
+        "http://remii.local/api/settings/instructions",
         {
           method: "PUT",
           headers: { "content-type": "application/json" },
@@ -214,7 +208,7 @@ describe("standing instruction routes", () => {
     const { store, state } = memoryStore();
 
     await appWith(store, { as: MEMBER }).request(
-      "http://openbot.local/api/settings/instructions",
+      "http://remii.local/api/settings/instructions",
       {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -222,7 +216,7 @@ describe("standing instruction routes", () => {
       },
     );
     await appWith(store, { as: OTHER }).request(
-      "http://openbot.local/api/settings/instructions",
+      "http://remii.local/api/settings/instructions",
       {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -232,12 +226,12 @@ describe("standing instruction routes", () => {
 
     await expect(
       appWith(store, { as: MEMBER })
-        .request("http://openbot.local/api/settings/instructions")
+        .request("http://remii.local/api/settings/instructions")
         .then((response) => response.json()),
     ).resolves.toEqual({ instructions: "Write in British English." });
     await expect(
       appWith(store, { as: OTHER })
-        .request("http://openbot.local/api/settings/instructions")
+        .request("http://remii.local/api/settings/instructions")
         .then((response) => response.json()),
     ).resolves.toEqual({ instructions: "Answer in one paragraph." });
     expect(state).toEqual({
@@ -251,7 +245,7 @@ describe("standing instruction routes", () => {
     const audit = memoryAudit();
     const app = appWith(store, { auditStore: audit.store });
 
-    await app.request("http://openbot.local/api/settings/instructions", {
+    await app.request("http://remii.local/api/settings/instructions", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ instructions: "Write in British English." }),
@@ -278,7 +272,7 @@ describe("standing instruction routes", () => {
     const audit = memoryAudit();
     const app = appWith(store, { auditStore: audit.store });
 
-    await app.request("http://openbot.local/api/settings/instructions", {
+    await app.request("http://remii.local/api/settings/instructions", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ instructions: "" }),
@@ -301,12 +295,12 @@ describe("standing instruction routes", () => {
 
     await expect(
       app
-        .request("http://openbot.local/api/settings/instructions")
+        .request("http://remii.local/api/settings/instructions")
         .then((response) => response.status),
     ).resolves.toBe(503);
     await expect(
       app
-        .request("http://openbot.local/api/settings/instructions", {
+        .request("http://remii.local/api/settings/instructions", {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ instructions: "Write in British English." }),

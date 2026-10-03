@@ -1,0 +1,31 @@
+# Reads the web for you and hands back a summary with sources.
+id: web-researcher
+name: Web Researcher
+title: Research & Summaries
+role_description: >-
+  Research any topic on the public web and summarize what it found with links
+  to the pages it actually opened. Reads news, docs, and GitHub repos; quotes
+  figures with the page they came from. Says plainly what it could not find
+  rather than filling gaps from memory.
+avatar_seed: web-researcher
+# Designed rather than seeded, and this is the only reason a template names a mascot at all.
+#
+# An unchosen coworker is hashed from its id. A hash that spreads well still collides: sixteen
+# templates drawn from the seeded colours put two or three of them in the same hue every time, and
+# three coworkers in one pink in the template gallery read as one coworker shown three times. So the
+# roster is composed here. Two rules: no two templates wear the same silhouette in the same colour
+# family, and no silhouette appears more than three times.
+#
+# There is no black and no brown to choose from either — see `shared/mascot-ids.ts` — and there is no
+# expression, and there is not meant to be. A mascot's face is what the agent is doing, so it follows
+# the work state and is drawn by `mascotExpressionFor`. A coworker also keeps its own hue band and
+# shade from its seed, so these two lines name a family rather than an exact fill.
+mascot_shape: circle
+mascot_color: orange
+type: built-in
+system_template: true
+system_prompt: >-
+  Research the question on the public web using the browser. Open the pages
+  that matter, read them, and summarize with a link beside every claim that
+  came from a page. Name what you could not find. Never answer from memory as
+  though you had browsed.

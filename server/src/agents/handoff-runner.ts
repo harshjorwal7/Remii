@@ -44,6 +44,24 @@ export type HandoffWork = {
    * the asking Bot, which is why it can speak in it at all.
    */
   answerIn?: string;
+  /**
+   * This hop was told to do its work in the addressed Bot's own channel with the person.
+   *
+   * `answerIn` says where the run happens; this says why. A delegation the person asked to happen
+   * in a specialist's own channel also sets `answerIn`, and without this the delivery reads it as a
+   * relay coming home: the specialist is handed "say this in your own words" instead of the task,
+   * and the person finds an empty Bot, which is the whole failure this pair of fields exists to end.
+   */
+  ownChannel?: boolean;
+  /**
+   * The CHANNEL the work lands in, when it lands in the addressed Bot's own channel.
+   *
+   * `answerIn` is the thread that work runs in and `ownChannelId` is the channel a person opens to
+   * read it, and they are two ids that look alike. A roster row is a channel and a transcript is a
+   * thread, so the activity row needs the first and the delivery needs the second — and this is what
+   * stopped the two from being swapped.
+   */
+  ownChannelId?: string;
 };
 
 export type HandoffDelivery = {
@@ -93,6 +111,49 @@ export type HandoffRunReport = {
  * the item has already gone to somebody else, and this one is now the second replica running it.
  */
 const RENEW_EVERY_MS = 20_000;
+
+/**
+ * Whether a failed delivery will fail the same way again, which is the only question a retry asks.
+ *
+ * EVERY FAILURE USED TO BE RETRIED, five times, a minute apart. That is right for a pod that died and
+ * wrong for everything that is a property of the request rather than of the moment: a conversation
+ * whose history no longer parses, a Bot that ran out of graph steps, a credential the far end
+ * refuses. Those are deterministic — the same hop, retried, produces the same refusal — and each
+ * attempt is a whole agent turn. So one Bot with a corrupt history cost five runs, four minutes of
+ * the person watching a conversation that is not going to move, and a stack of model calls whose
+ * only effect was to fail identically five times. The stall WAS the bug, more than the failure was.
+ *
+ * So the deterministic classes are finished on the spot and the person is told, rather than the hop
+ * being re-queued against a refusal that has already been given.
+ *
+ * Matched on stable, narrow markers and read from the reason rather than from a typed error, because
+ * the reasons arrive as HTTP status lines and vendor sentences from two different frameworks and
+ * there is no error type to switch on. Each pattern is specific enough that a transient message is
+ * not going to match it by accident: a 500 mentions neither "recursion" nor a 4xx status, and a
+ * timeout mentions no malformed body.
+ */
+export function isPermanentDeliveryFailure(reason: string): boolean {
+  const text = reason.toLowerCase();
+  /*
+   * A 4xx status at the front of the sentence. Narrowly 400/401/403/404/405/422 — the client-side
+   * classes, where the request itself is the problem. A bare "4xx" or any 4 would also swallow 408
+   * and 429, which are the two 4xx statuses that DO get better by waiting.
+   */
+  if (/\b(400|401|403|404|405|422)\b/.test(text)) return true;
+  return [
+    // The far end ran out of graph steps. Deterministic for the same history.
+    "recursion limit",
+    "recursionlimit",
+    // The request body is not JSON, or a field inside it is. The history is what is broken.
+    "failed to parse the request body",
+    "unexpected end of",
+    "invalid json",
+    // Refused on their own terms rather than unreachable.
+    "unauthorized",
+    "forbidden",
+    "not found",
+  ].some((marker) => text.includes(marker));
+}
 
 /**
  * How long a hop that is over is kept before it is dropped.
@@ -272,10 +333,11 @@ export function createHandoffRunner(options: {
       const heartbeat = setInterval(() => {
         for (const key of ours) {
           void queue
-            .renew({ kind: HANDOFF_KIND, key, owner, leaseMs })
+            .renew({ kind: HANDOFF_KIND, key, owner, leaseMs, live: true })
             .then((kept) => {
-              // False means it went to somebody else. Dropped rather than renewed again, so the
-              // loop below knows not to spend a model call on work it no longer holds.
+              // False means it went to somebody else, or this replica's lease lapsed without anybody
+              // else having taken it yet. Both mean the same thing here: this batch must not spend a
+              // model call on it, so the key is dropped rather than renewed again.
               if (!kept) ours.delete(key);
             })
             .catch(() => {});
@@ -345,6 +407,14 @@ export function createHandoffRunner(options: {
             key: item.key,
             owner,
             leaseMs,
+            /*
+             * `live`, because this answer is being used to decide whether to SPEND A MODEL CALL.
+             * Without it the question was only "does this row still carry my name", and it does for
+             * the whole window between this replica's lease lapsing and somebody else claiming the
+             * item — which is exactly the window in which this replica wakes up. A claim that has run
+             * out is nobody's to execute, so the lease is asked about as well as the name.
+             */
+            live: true,
           });
           if (!stillOurs) {
             ours.delete(item.key);
@@ -437,6 +507,60 @@ export function createHandoffRunner(options: {
             const reason =
               error instanceof Error ? error.message : "could not be delivered";
             /*
+             * FINISHED RATHER THAN RELEASED, when the far end has already given its answer and the
+             * answer is "no".
+             *
+             * The choice that was making a stuck conversation feel crashed: everything was
+             * released, so a refusal that could only repeat repeated — five runs and four minutes
+             * later the person was told, having watched a channel that was never going to move.
+             * A permanent failure is told now and never offered again, because offering it again
+             * would be a promise the deployment cannot keep.
+             */
+            const permanent = isPermanentDeliveryFailure(reason);
+            if (permanent) {
+              const kept = await queue.finish({
+                kind: HANDOFF_KIND,
+                key: item.key,
+                owner,
+              });
+              ours.delete(item.key);
+              report.skipped.push({
+                key: item.key,
+                reason: `${reason} (not retried)`,
+              });
+              await recordAuditEvent(auditStore, {
+                eventType: "agent.handoff_failed",
+                targetType: "agent",
+                targetId: work.toBotId,
+                ...(work.actorId ? { actorUserId: work.actorId } : {}),
+                initiator: { kind: "handoff", id: work.fromBotId },
+                payload: {
+                  bot: work.fromBotId,
+                  from: work.fromBotId,
+                  to: work.toBotId,
+                  run: work.runId,
+                  ms: Date.now() - startedAt,
+                  failure: reason.slice(0, 400),
+                  permanent: true,
+                  note: "Refused in a way that would refuse again, so it was not retried.",
+                },
+              });
+              await tell(work, item.key, reason).catch((failure) => {
+                console.warn(
+                  "Could not queue the notice for a hop that was refused for good.",
+                  failure,
+                );
+              });
+              if (!kept) {
+                report.skipped.push({
+                  key: item.key,
+                  reason: "refused for good, but the lease had gone elsewhere",
+                });
+              }
+              continue;
+            }
+
+            /*
              * The last try, so the person is told rather than left waiting.
              *
              * Enqueued before the release, because the release is what makes this attempt the last
@@ -515,16 +639,18 @@ function clip(answer: string): string {
 /**
  * The same failure, in words that can be said out loud.
  *
- * The reason on a failed hop is whatever threw, and one of the things that throws is the platform
- * client, whose message is `Intelligence platform error 409: {"error":{...}}` — a response body,
- * verbatim. That reason is interpolated into the notice a Bot then paraphrases to a person, so an
- * internal error envelope ends up in somebody's chat. The trail keeps the whole thing; the sentence
- * gets the shape of the problem.
+ * The reason on a failed hop is whatever threw, and one of the things that throws is the thread
+ * lock, whose denial carries a 409 status (`Thread lock denied for thread …` from threads/local,
+ * historically `Intelligence platform error 409: {…}` verbatim). That reason is interpolated into
+ * the notice a Bot then paraphrases to a person, so an internal error envelope ends up in
+ * somebody's chat. The trail keeps the whole thing; the sentence gets the shape of the problem.
  */
 function forThePerson(reason: string): string {
-  const platform = reason.match(/^Intelligence platform error (\d{3})\b/);
-  if (platform) {
-    return `the platform answered ${platform[1]} (the full response is in the trail)`;
+  const denied =
+    reason.match(/^Intelligence platform error (\d{3})\b/) ??
+    reason.match(/^Thread lock denied\b/);
+  if (denied) {
+    return "another run is already going in that conversation (the full response is in the trail)";
   }
   return reason;
 }
@@ -549,11 +675,16 @@ function attribute(work: HandoffWork): string {
    * asked has now asked it for something, which is the beginning of a loop rather than the end of
    * one.
    */
-  if (work.answerIn) {
+  if (work.answerIn && !work.ownChannel) {
     return `${work.task}\n\nSay this in your own words to the person in this conversation, in a sentence or two. Do not hand it to another Bot.`;
   }
   const lines = [
-    `${work.fromBotId} has asked you to help with this, on behalf of the person in this conversation.`,
+    // THE NAME, NOT THE ID. This opened Coco's channel with "general-assistant has asked you to
+    // help with this", which is the one sentence in the conversation that exists to say who is
+    // asking — and it said an identifier the person never sees. The name is already resolved and
+    // already on the payload (`fromName`, written there because the delivery runs later on another
+    // replica), so this was only ever a matter of reading the right field.
+    `${work.fromName ?? work.fromBotId} has asked you to help with this, on behalf of the person in this conversation.`,
     "",
     `Task: ${work.task}`,
   ];
@@ -562,7 +693,9 @@ function attribute(work: HandoffWork): string {
     lines.push(`What a good answer looks like: ${work.expecting}`);
   lines.push(
     "",
-    "Answer in this conversation as yourself. The person can see it, so write it for them rather than for the Bot that asked.",
+    work.ownChannel
+      ? "This is your own channel with the person. Do the whole task here, save anything they will need later as a file, and answer them here. Do not hand it to another Bot and do not wait for one."
+      : "Answer in this conversation as yourself. The person can see it, so write it for them rather than for the Bot that asked.",
   );
   return lines.join("\n");
 }
@@ -581,6 +714,6 @@ function summarise(work: HandoffWork): string | null {
    * the whole message; the text that prompted it is an instruction to a model, and shown here it
    * appears as something the person typed and then had read back to them.
    */
-  if (work.answerIn) return null;
+  if (work.answerIn && !work.ownChannel) return null;
   return `${work.fromName ?? work.fromBotId} asked ${work.toName ?? work.toBotId} for this on your behalf: ${work.task}`;
 }

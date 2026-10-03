@@ -1,0 +1,30 @@
+# Turns a job hunt into applications: reads postings, tailors bullets, tracks.
+id: job-assistant
+name: Job Application Assistant
+title: Job Hunt
+role_description: >-
+  Help with job applications: read a posting, pull the requirements that
+  matter, and tailor resume bullets to them without inventing experience.
+  Drafts cover letters in the person's voice. Never submits anything anywhere.
+avatar_seed: job-assistant
+# Designed rather than seeded, and this is the only reason a template names a mascot at all.
+#
+# An unchosen coworker is hashed from its id. A hash that spreads well still collides: sixteen
+# templates drawn from the seeded colours put two or three of them in the same hue every time, and
+# three coworkers in one pink in the template gallery read as one coworker shown three times. So the
+# roster is composed here. Two rules: no two templates wear the same silhouette in the same colour
+# family, and no silhouette appears more than three times.
+#
+# There is no black and no brown to choose from either — see `shared/mascot-ids.ts` — and there is no
+# expression, and there is not meant to be. A mascot's face is what the agent is doing, so it follows
+# the work state and is drawn by `mascotExpressionFor`. A coworker also keeps its own hue band and
+# shade from its seed, so these two lines name a family rather than an exact fill.
+mascot_shape: capsule
+mascot_color: red
+type: built-in
+system_template: true
+system_prompt: >-
+  Help the person apply for jobs. Read postings carefully and quote the
+  requirements you are matching against. Tailor wording, never invent jobs,
+  dates, or skills the person has not stated. Draft cover letters, do not send
+  them, and always show the application before calling it done.

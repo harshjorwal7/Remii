@@ -11,7 +11,7 @@ export type ToolParameters = Parameters<
   typeof useFrontendTool
 >[0]["parameters"];
 
-/** Grouping for the Admin page only. Never read by the model. */
+/** Grouping for the gallery screens only. Never read by the model. */
 export type GalleryKind = "chart" | "card" | "decision";
 
 export type GalleryComponent = {
@@ -19,7 +19,7 @@ export type GalleryComponent = {
    * The tool name the model calls, the catalogue key, and the stable fork-facing component id.
    */
   name: string;
-  /** What a person sees in Admin and in a refusal. */
+  /** What a person sees in the gallery and in a refusal. */
   title: string;
   kind: GalleryKind;
   /**

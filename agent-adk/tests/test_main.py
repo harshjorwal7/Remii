@@ -125,7 +125,7 @@ def test_client_tool_executes_and_its_result_reaches_the_followup_model(harness)
             "tools": [TOOL],
         }
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://harness") as client:
-            first = decode(await client.post("/", headers={"x-openbot-agent-token": TOKEN}, json=body))
+            first = decode(await client.post("/", headers={"x-remii-agent-token": TOKEN}, json=body))
             calls = [event for event in first if event["type"] == "TOOL_CALL_START"]
             assert len(calls) == 1, first
             call = calls[0]
@@ -140,7 +140,7 @@ def test_client_tool_executes_and_its_result_reaches_the_followup_model(harness)
                 }]},
                 {"id": "tool-result", "role": "tool", "toolCallId": call["toolCallId"], "content": json.dumps(result)},
             ])
-            return decode(await client.post("/", headers={"x-openbot-agent-token": TOKEN}, json=body))
+            return decode(await client.post("/", headers={"x-remii-agent-token": TOKEN}, json=body))
 
     final = asyncio.run(asyncio.wait_for(roundtrip(), timeout=30))
     assert executed == ["probe"]
@@ -160,7 +160,7 @@ def test_client_tool_executes_and_its_result_reaches_the_followup_model(harness)
     assert answer == TOOL_VALUE
 
 
-@pytest.mark.parametrize("headers", [{}, {"x-openbot-agent-token": "wrong-token"}])
+@pytest.mark.parametrize("headers", [{}, {"x-remii-agent-token": "wrong-token"}])
 def test_client_tools_still_require_the_server_token(harness, headers):
     app, seen = harness
 

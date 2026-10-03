@@ -4,7 +4,7 @@ import { expect } from "bun:test";
  * What a failure must never read like: the name of a method that was not there.
  *
  * A guard that is missing does not answer politely, it reads a field off `undefined` and hands an
- * administrator a sentence naming a vendor method. "IS NOT AN OBJECT" IS ANCHORED TO `undefined`
+ * reader a sentence naming a vendor method. "IS NOT AN OBJECT" IS ANCHORED TO `undefined`
  * AND `null` rather than left bare, because the adapter's own sentence for a malformed input schema
  * says "a thing that is not an object cannot be shown as one" — the correct refusal, which a
  * pattern looking for a fragment of a crash would otherwise flag as one.
@@ -68,7 +68,7 @@ const TABLE = {
   /** `checkedApp`: the only name this deployment has for an app did not arrive. */
   catalogueSlug: (at: string = CATALOGUE_ROW) =>
     new RegExp(`where the slug of ${at} belongs`),
-  /** `checkedApp`: the title an administrator chooses by did not arrive. */
+  /** `checkedApp`: the title a person chooses an app by did not arrive. */
   catalogueName: (at: string = CATALOGUE_ROW) =>
     new RegExp(`where the name of ${at} belongs`),
   /** `checkedApp`: the value this deployment puts in an image address is not one. */
@@ -87,9 +87,9 @@ const TABLE = {
     new RegExp(`where the page to send this person to for ${at} belongs`),
   /** `authorize`: this deployment holds no config for the app at all. */
   noConfigRemedy: () =>
-    /removing the app on its Plugins page and adding it again creates one/,
+    /[Rr]emoving the app under App connections and adding it again creates one/,
   /** `authorize`: a config of this deployment's exists and Composio calls it disabled. */
-  disabledRemedy: () => /can enable it in Composio's dashboard/,
+  disabledRemedy: () => /[Ee]nable it in Composio's dashboard/,
   /** `authorize`: the app is connected by entering a credential, so there is no page to visit. */
   noPageRemedy: () =>
     /connected by entering a credential rather than by visiting a page/,

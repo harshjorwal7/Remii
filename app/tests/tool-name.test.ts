@@ -97,3 +97,52 @@ describe("naming a tool call", () => {
     });
   });
 });
+describe("readToolName for this app's own tools", () => {
+  test("a delegation names the coworker, because that is the part worth knowing", () => {
+    expect(readToolName("delegate_bot", '{"bot":"research-desk"}').label).toBe(
+      "Delegated research-desk",
+    );
+    expect(readToolName("message_bot", '{"bot":"coco"}').label).toBe(
+      "Sent a message to coco",
+    );
+  });
+
+  test("a delegation with no readable target is still a delegation", () => {
+    expect(readToolName("delegate_bot").label).toBe("Delegated");
+    expect(readToolName("delegate_bot", "{not json").label).toBe("Delegated");
+    expect(readToolName("delegate_bot", '{"bot":"  "}').label).toBe(
+      "Delegated",
+    );
+  });
+
+  test("a model-written target is capped rather than laid out across the transcript", () => {
+    const long = "x".repeat(500);
+    expect(
+      readToolName("delegate_bot", JSON.stringify({ bot: long })).label,
+    ).toBe(`Delegated ${"x".repeat(60)}`);
+  });
+
+  test("the browser reads as a browser, because a person may have to take it over", () => {
+    expect(readToolName("computer_navigate").label).toBe("Opened a page");
+    expect(readToolName("computer_run_command").label).toBe(
+      "Ran a command on the computer",
+    );
+    expect(readToolName("computer_take_control").label).toBe(
+      "Asked you to take the browser",
+    );
+  });
+
+  test("the web reads as the web", () => {
+    expect(readToolName("web_search").label).toBe("Searched the web");
+  });
+
+  test("a name that is not ours is left alone", () => {
+    expect(readToolName("my_plugin__thing").label).toBe("my_plugin__thing");
+  });
+
+  test("MCP names still resolve through the vendor rules", () => {
+    expect(readToolName("mcp__notes__search_notes")).toEqual({
+      label: "Search notes",
+    });
+  });
+});

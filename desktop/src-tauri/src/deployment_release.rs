@@ -14,7 +14,7 @@ const LATEST_RELEASE: &str = "https://api.github.com/repos/CopilotKit/OpenBot/re
 pub fn resolve_version(root: &Path) -> Result<String, String> {
     resolve_version_with(root, || {
         let body = deployment::get(LATEST_RELEASE)
-            .map_err(|error| format!("could not find the latest OpenBot release: {error}"))?;
+            .map_err(|error| format!("could not find the latest Remii release: {error}"))?;
         release_tag(&body)
     })
 }
@@ -36,9 +36,9 @@ fn release_tag(body: &[u8]) -> Result<String, String> {
     }
 
     let release: Release = serde_json::from_slice(body)
-        .map_err(|error| format!("the latest OpenBot release is not readable: {error}"))?;
+        .map_err(|error| format!("the latest Remii release is not readable: {error}"))?;
     if release.tag_name.trim().is_empty() {
-        return Err("the latest OpenBot release has no version tag".into());
+        return Err("the latest Remii release has no version tag".into());
     }
     Ok(release.tag_name)
 }
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn githubs_exact_tag_is_used_instead_of_the_release_title() {
         assert_eq!(
-            release_tag(br#"{"name":"OpenBot September release","tag_name":"v0.0.9"}"#).unwrap(),
+            release_tag(br#"{"name":"Remii September release","tag_name":"v0.0.9"}"#).unwrap(),
             "v0.0.9"
         );
     }

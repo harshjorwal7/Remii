@@ -289,3 +289,22 @@ body {
 :where(div:has(> iframe.websandbox__frame)) {
   min-height: 200px;
 }
+
+/* Permanently hide CopilotKit inspector / dev console floating elements.
+ * Third-party injected nodes carry their own inline display rules, so only
+ * `!important` reaches them. Scoped to CopilotKit's own selectors, which no
+ * product style uses. Each declaration carries its own suppression because
+ * the rule fires per declaration. */
+copilotkit-web-inspector,
+.copilotkit-dev-console,
+.copilotkit-inspector,
+[data-copilotkit-inspector] {
+  /* biome-ignore lint/complexity/noImportantStyles: third-party inline styles only lose to `!important`. */
+  display: none !important;
+  /* biome-ignore lint/complexity/noImportantStyles: third-party inline styles only lose to `!important`. */
+  visibility: hidden !important;
+  /* biome-ignore lint/complexity/noImportantStyles: third-party inline styles only lose to `!important`. */
+  pointer-events: none !important;
+  /* biome-ignore lint/complexity/noImportantStyles: third-party inline styles only lose to `!important`. */
+  opacity: 0 !important;
+}

@@ -52,7 +52,7 @@ export const mcpServers = pgTable("mcp_servers", {
    *
    * Recorded because the three are not the same risk. A curated entry has reviewed source provenance
    * and a pinned host. A custom one is a URL somebody typed, and every surface that lists it says so.
-   * Storing which it is means the Plugins page, the audit trail and anybody reading the database
+   * Storing which it is means App connections, the audit trail and anybody reading the database
    * later all agree about how a server got here, rather than inferring it from whether the host
    * happens to still be in this build's catalogue.
    *
@@ -115,7 +115,7 @@ export const mcpServers = pgTable("mcp_servers", {
   authScheme: text("auth_scheme"),
   /** What the deployment last heard back from it. `null` until the first successful listing. */
   toolsRefreshedAt: timestamp("tools_refreshed_at", { withTimezone: true }),
-  /** The last failure, kept so the Plugins page can say why a server has no tools. */
+  /** The last failure, kept so App connections can say why a server has no tools. */
   lastError: text("last_error"),
   addedBy: text("added_by"),
   createdAt: createdAt(),
@@ -126,7 +126,7 @@ export const mcpServers = pgTable("mcp_servers", {
  * A tool one server says it offers, as of the last listing.
  *
  * A cache of what the server said, never a source of truth about what it will accept. The row exists
- * so the Plugins page and the `@` menu can show a list without a network call per render, and so a
+ * so App connections and the `@` menu can show a list without a network call per render, and so a
  * grant can name a tool that is not reachable this second. Every actual call re-reads the server.
  *
  * Rows are replaced wholesale on each refresh rather than merged, so a tool a vendor withdrew stops
@@ -219,6 +219,7 @@ export const mcpTools = pgTable(
 export const composioConnections = pgTable(
   "composio_connections",
   {
+    id: text("id").primaryKey(),
     /** The Composio app slug, lower case, as their directory spells it: `gmail`, `slack`. */
     toolkit: text("toolkit").notNull(),
     /**
@@ -228,142 +229,54 @@ export const composioConnections = pgTable(
      * what this row says somebody connected is what a call will act as.
      */
     userId: text("user_id").notNull(),
+    /** Composio's connected account ID, e.g. `ca_...` */
+    accountId: text("account_id"),
+    /** A human-readable label or email for this account (e.g. personal@gmail.com) */
+    label: text("label"),
     /** When they connected, shown on their own settings page. */
     connectedAt: timestamp("connected_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
-    /**
-     * Whether a real call was made with this connection and answered. See the verify path.
-     *
-     * TRUE ON EVERY ROW THAT PREDATES THIS COLUMN WITHOUT A PROBE BEHIND IT. Migration 0038 —
-     * `server/drizzle/0038_composio_schemes.sql`, which is where this pair and `auth_scheme` are
-     * both added and both backfilled; every "0038" in this file names that one file —
-     * backfilled them to true with `verified_at = connected_at`, and no call was made to earn it:
-     * every one of the rows it touched is a consent connection, which is verified by construction,
-     * because the only way it exists at all is that the vendor's own screen sent the person back
-     * connected. So on a backfilled row the timestamp is the moment of consent, not the moment of a
-     * check, and a reader treating every `verified_at` as "this connection answered then" would be
-     * wrong about exactly the rows that were here first.
-     *
-     * AND THE SAME NOW HOLDS OF EVERY CONSENT ROW AND NOT ONLY THE BACKFILLED ONES, because the
-     * writer that records a connection sets `verified` itself: `recordBrokeredConnection` is the
-     * one place a row is written, and `confirmBrokeredConnection` calls it with `verified: true` on
-     * the vendor's yes. So a consent connection made today carries the same true migration 0038
-     * wrote and earns it the same way — the vendor answered that the account is attached — and its
-     * `verified_at` is the moment of that answer: the consent itself on the first confirm, and the
-     * vendor's yes again on every later one, because a confirm really does go and ask. What it used
-     * to do was insert on the defaults, and until it stopped, every consent connection made since
-     * the backfill read `false` beside a null `verified_at` — the very pair a key connection nobody
-     * has ever checked reads — so nothing could tell the two apart, and the rows the migration
-     * touched were the only ones in the table saying anything true.
-     *
-     * ON A CONSENT ROW, AND ONLY THERE. That confirm runs from an effect on mount, so what it
-     * writes it writes on every page load — and the vendor's yes is evidence about a KEY of
-     * nothing, because Composio takes a key when it is typed and never tests it again. So the
-     * confirm branches on the scheme recorded on the app's row: it writes this flag where consent
-     * IS the check, and leaves a key connection's recorded verdict exactly as the last real call
-     * left it. Written across a key row instead, it restated the consent pair below — `verified`
-     * true beside a null `probe_action` — over the record of a check that had actually happened,
-     * and moved this timestamp to the page load, so the page's own sentence named a day on which
-     * nothing was checked.
-     *
-     * AND A CHECK THAT COULD NOT BE MADE LEAVES THIS COLUMN ALONE, which is the one thing a writer
-     * of it must not improvise. `false` here means "no evidence that this connection answers", and
-     * a Composio outage produces no evidence in EITHER direction — so on a connect, whose row has
-     * to exist whatever happens, the outage is written as the unchecked pair, and on a re-check,
-     * which finds a row already standing, NOTHING IS WRITTEN AT ALL. Clearing a verification
-     * because the vendor could not be reached destroys the only record anywhere that this
-     * connection was ever checked, and the date beside it, on the word of an event that says
-     * nothing about the key. See {@link composioConnections.probeAction}.
-     *
-     * WHAT THE PAIR SEPARATES IS A CHECKED CONNECTION FROM AN UNCHECKED ONE, and never one KIND of
-     * connection from another. Which kind a row is comes from the app's own `auth_scheme`, which
-     * the settings page branches on first; this column says only that somebody established the
-     * account is live, and `verified_at` when that was last done.
-     */
     verified: boolean("verified").notNull().default(false),
     /** When that check last passed, which is what the page reports instead of a present tense. */
     verifiedAt: timestamp("verified_at", { withTimezone: true }),
-    /**
-     * The action the last check SPENT on this connection, and null where it spent none.
-     *
-     * A RECORD OF WHAT HAPPENED, NOT A QUESTION ASKED OF TODAY'S METADATA — which is the whole
-     * reason it is a column at all. `verified` is a fact about a check made against the app's action
-     * listing as it stood THEN; this used to be derived on read from the listing as it stands NOW,
-     * and the argument that the two agreed held only for as long as nothing changed in between.
-     * Something can: `POST /servers/:id/refresh` is a generic administrator's route keyed on a
-     * server id and `composio-<slug>` is one, so an ordinary press of Refresh re-lists a brokered
-     * app's actions — the very press the Composio transport tells an operator to make when an
-     * action gains the version that makes it callable. The moment it did, a row that truthfully
-     * said "the key was accepted without being checked, because this app publishes nothing safe to
-     * try one on" began reading as a NAMED probe beside `verified: false`, which the settings page
-     * draws as "your key was checked and rejected, and the account still stands — disconnect it".
-     * Every clause of that is false for somebody whose key was never tried, and it persisted: it is
-     * what every page load said until they pressed Re-check.
-     *
-     * SO THE WRITER RECORDS IT, and the writer is the one place that cannot be wrong about it.
-     * `recordBrokeredConnection` is the single writer of this row, every caller knows what it spent
-     * — a probe's name, or nothing — and it is passed in beside `verified` because the two are one
-     * fact: what was checked, and how it went.
-     *
-     * NULL MEANS NO ACTION WAS SPENT, WHICH IS NOT THE SAME AS UNCHECKED. Read beside `verified` it
-     * says which:
-     *
-     *   null, not verified   — nothing was tried, so nothing is known about the key. EITHER the app
-     *                          published nothing safe to spend one on at the moment of the check,
-     *                          OR a check was attempted and could not be made — Composio
-     *                          unreachable, a socket closed, an answer `@composio/core` could not
-     *                          parse. A fact about the app or about the vendor's availability, and
-     *                          in neither case about the key.
-     *
-     *                          THE OUTAGE WAS NOT ALWAYS HERE, and where it used to land is the
-     *                          reason this clause is spelled out. `callTool` answers with a result
-     *                          rather than throwing, so every failure it has wears `isError`, and
-     *                          the probe read that as the vendor's verdict: an outage was written
-     *                          down as the FOURTH state below — the accusation — while the connect
-     *                          path deleted the account somebody had just made and told them their
-     *                          key was refused. An unreachable vendor is not a fifth state and has
-     *                          no column of its own, because the row records what is KNOWN about a
-     *                          connection and an outage establishes nothing: the honest record is
-     *                          the mildest pair, and the trail carries the attempt. See
-     *                          {@link BrokeredProbe} in `plugins/store.ts` for the four answers a
-     *                          check can reach and which of them may be written here.
-     *   null, verified       — a CONSENT connection. The vendor's own yes at the end of its own
-     *                          screen is the evidence, and no call was ever made against the
-     *                          account, so there is no action to name and there never will be.
-     *                          Which is why `confirmBrokeredConnection`, the one writer of this
-     *                          pair, writes it only for a consent app: on a key row it is not a
-     *                          heal but one of the other three states overwritten by a page load.
-     *   a name, verified     — it ran in this person's account and the vendor took the key.
-     *   a name, not verified — it ran and the vendor refused the key, and the account it ran in is
-     *                          still standing. A live account with a bad key behind it.
-     *
-     *                          AND ONLY A CALL THE VENDOR ANSWERED MAY WRITE IT. This pair is an
-     *                          accusation — the settings page draws it as "your key was checked and
-     *                          rejected, disconnect it" — so the name is withheld from every
-     *                          outcome that cannot be shown to have run in the account. That is
-     *                          structural rather than a rule anybody has to remember:
-     *                          {@link BrokeredProbe} carries no action name on the unreachable
-     *                          outcome, so the writer has none to record.
-     *
-     * AND NULL ON A ROW WRITTEN BEFORE THIS COLUMN EXISTED, which is the same null and deliberately
-     * so. No backfill is possible or wanted: what a check spent in March is not recoverable, and
-     * today's chooser answering for it is exactly the inference this column retires. The rows
-     * migration 0038 touched are consent rows, where null is permanently right; a key row that
-     * predates it reads as unchecked, the mildest of the four states and the only safe direction to
-     * be uncertain in — a name invented for it would be the false accusation above, written down.
-     *
-     * WHAT A CALLER MUST NOT READ IT AS is "the action this app could be checked with now". That is
-     * a different question, asked of `probeActionFor`, and the two answers diverge exactly when
-     * the app's listing has moved since the check.
-     */
     probeAction: text("probe_action"),
     updatedAt: updatedAt(),
   },
   (table) => [
-    primaryKey({ columns: [table.toolkit, table.userId] }),
-    // "What has this person connected" is the settings page's only query, and offboarding's.
     index("composio_connections_user_idx").on(table.userId),
+    index("composio_connections_user_toolkit_idx").on(
+      table.userId,
+      table.toolkit,
+    ),
+  ],
+);
+
+/**
+ * One Bot's grant to one connected Composio account.
+ * When a user connects multiple accounts (e.g. 3 Gmail accounts), this records which Bot has permission to use which account.
+ */
+export const composioAccountGrants = pgTable(
+  "composio_account_grants",
+  {
+    connectionId: text("connection_id")
+      .notNull()
+      .references(() => composioConnections.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull(),
+    grantedAt: timestamp("granted_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "composio_account_grants_pk",
+      columns: [table.connectionId, table.agentId],
+    }),
+    index("composio_account_grants_agent_idx").on(table.agentId),
+    index("composio_account_grants_user_idx").on(table.userId),
   ],
 );
 
@@ -523,6 +436,94 @@ export const skillTools = pgTable(
 );
 
 /**
+ * The repository one skill points at, and the cached reading of it.
+ *
+ * WHY THIS IS NOT A COLUMN ON `skills`. Everything else a skill carries — the command, the title,
+ * the instruction, the tools it names — is either the identity of the skill or a short piece of
+ * prose the author typed. This is a pointer at a repository this deployment has never seen, plus a
+ * few hundred kilobytes of somebody else's files. Putting either on `skills` would make the row
+ * that every skill list reads carry a blob it does not draw, and would put the two on different
+ * lifetimes: the pointer belongs to the author and is written when they press Save, while the cached
+ * index is written by a background refresh and replaced whenever the branch moves. Splitting them is
+ * what lets `listSkills` stay the query it is.
+ *
+ * AND IT IS CONTENT, NOT A CAPABILITY, which is the reason a person may write one without an
+ * administrator. `skills` says a skill can only ask a Bot for what it was already granted, and that
+ * is what lets anybody write one. A public repository read at run time adds no tool, opens no
+ * credential and reaches no system the deployment does not already reach — the model gains the
+ * ability to read prose that was published to be read. That argument does not survive contact with a
+ * private repository, which is why `parseRepoRef` accepts only `github.com` and this stores no
+ * token: there is nothing here that could be pointed at a company intranet.
+ *
+ * ONE ROW PER SKILL, and the key is the skill. A skill is the unit a model picks out of, so a skill
+ * pointing at two repositories would have no answer to "which one do you mean" — and the tools bound
+ * to a run are bound to exactly one repository each for that reason. Two skills may of course point
+ * at the same repository, which costs a second row and is not a problem.
+ */
+export const skillRepos = pgTable(
+  "skill_repos",
+  {
+    /**
+     * The skill this belongs to, and the primary key.
+     *
+     * `on delete cascade` so deleting a skill takes its repository with it. The alternative is a
+     * repository row outliving the only thing that gave it meaning, which is exactly the row that
+     * `skills.yaml` seeds are already careful about — a slug somebody took keeps their skill and the
+     * package loses the row it wrote, and a leftover `skill_repos` row keyed on the same slug would
+     * then be silently adopted by the person's skill.
+     */
+    skillId: text("skill_id")
+      .primaryKey()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    /** GitHub's owner segment. Validated, never interpolated into a host. See {@link skillRepos}. */
+    owner: text("owner").notNull(),
+    /** GitHub's repository segment, with any trailing `.git` already removed by the parser. */
+    repo: text("repo").notNull(),
+    /**
+     * The branch, tag or commit the author named. Null means the repository's default branch, which
+     * is resolved at index time and recorded in `defaultRef` so a skill pointing at a moving branch
+     * still says which commit it was last read at.
+     */
+    ref: text("ref"),
+    /**
+     * A subfolder to treat as the root, for a monorepo where one package is what the skill is
+     * about. Empty means the whole repository.
+     */
+    path: text("path").notNull().default(""),
+    /** The branch actually indexed, which is the answer for a null `ref`. */
+    defaultRef: text("default_ref"),
+    /**
+     * The tree's own sha, and what identifies the content rather than the commit.
+     *
+     * Deliberately not the commit sha. Two commits can hold byte-identical files — a rebase, a merge
+     * with no conflict, a commit that only changed a message — and comparing commits would report that
+     * as a change and spend a refresh on it. The tree's hash changes when a single byte of any file
+     * does, so this is the right answer to the only question anybody asks of it: is what I would serve
+     * still what the repository holds?
+     */
+    treeSha: text("tree_sha"),
+    indexedAt: timestamp("indexed_at", { withTimezone: true }),
+    /**
+     * The cached reading: the file paths, and the contents of the few files worth carrying whole.
+     *
+     * Bounded by `repo-index.ts` before it is ever written here, so this is a column with a ceiling
+     * rather than a table with a row per file. A tree is a flat list of strings and is small; the
+     * key files are capped at a count and at a total size for the reason given on the constant. A
+     * row-per-file design would answer "which skills point at a repository" with a join rather than
+     * with a key, for a repository one skill reads at a time.
+     */
+    index: jsonb("index"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    // "Which repositories does this deployment read?", for the rate-limit accounting and for a
+    // deployment that has to find every skill pointing at a repository it is revoking access to.
+    index("skill_repos_owner_repo_idx").on(table.owner, table.repo),
+  ],
+);
+
+/**
  * One Bot's hold on one plugin, whether that plugin is an MCP tool or a skill. A row is the grant.
  *
  * Absence is the refusal, the same shape component grants use and for the same reason. A Bot
@@ -550,6 +551,35 @@ export const pluginGrants = pgTable(
   (table) => [
     primaryKey({ columns: [table.kind, table.ref, table.agentId] }),
     index("plugin_grants_agent_idx").on(table.agentId),
+  ],
+);
+
+/**
+ * Explicit revocations of plugin tools, servers, composio accounts, or bot handoff grants.
+ *
+ * Connected apps, accounts, and agent handoffs are granted by default. When an administrator
+ * explicitly revokes an app, tool, account, or bot handoff for an agent, a row is inserted here
+ * so that automated default-grant syncs and startup routines do not re-grant it.
+ */
+export const pluginRevocations = pgTable(
+  "plugin_revocations",
+  {
+    kind: text("kind").notNull(),
+    ref: text("ref").notNull(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    revokedBy: text("revoked_by"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "plugin_revocations_pk",
+      columns: [table.kind, table.ref, table.agentId],
+    }),
+    index("plugin_revocations_agent_idx").on(table.agentId),
   ],
 );
 
@@ -609,6 +639,15 @@ export const sandboxedComponents = pgTable("sandboxed_components", {
   published: boolean("published").notNull().default(false),
   publishedAt: timestamp("published_at", { withTimezone: true }),
   authoredBy: text("authored_by"),
+  /**
+   * Whose component this is. Individual-user SaaS: one user's playground
+   * code must never be drawn, edited or published by another user. Null
+   * means legacy — written before ownership existed — and those rows are
+   * shared read-only history: visible to all, mutable by none.
+   */
+  ownerUserId: text("owner_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });

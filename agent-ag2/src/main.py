@@ -8,7 +8,7 @@ from ag2.config import AnthropicConfig, OpenAIConfig
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-TOKEN_HEADER = "x-openbot-agent-token"
+TOKEN_HEADER = "x-remii-agent-token"
 
 
 def _config() -> AnthropicConfig | OpenAIConfig:
@@ -27,7 +27,7 @@ def _config() -> AnthropicConfig | OpenAIConfig:
 
 
 agent = Agent(
-    name="openbot",
+    name="remii",
     prompt="Answer the question you are asked, briefly and correctly.",
     config=_config(),
 )

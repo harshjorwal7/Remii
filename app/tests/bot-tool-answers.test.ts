@@ -5,6 +5,7 @@ import {
   answerListBots,
   answerReadBot,
 } from "@/lib/agents/answers";
+import { REMII_AGENT_ID } from "@/lib/agents/default-agent";
 
 /**
  * What the three reading tools say, asked cold.
@@ -26,15 +27,12 @@ import {
 
 const AGENTS = [
   {
-    id: "general-assistant",
+    id: REMII_AGENT_ID,
     name: "General Assistant",
     title: "Everyday Work",
     roleDescription: "Help with everyday work.",
-    avatarSeed: "general-assistant",
+    avatarSeed: REMII_AGENT_ID,
     visibility: "public",
-    endpoint: null,
-    hasAuth: false,
-    hasCallbackToken: false,
     hidden: false,
     systemOwned: true,
     canManage: true,
@@ -47,9 +45,6 @@ const AGENTS = [
     roleDescription: "Chase overdue invoices. Never invent a date.",
     avatarSeed: "renewal-desk",
     visibility: "private",
-    endpoint: "https://renewals.example.com/ag-ui",
-    hasAuth: true,
-    hasCallbackToken: false,
     hidden: false,
     systemOwned: false,
     canManage: true,
@@ -110,10 +105,13 @@ test("the roster is fetched when asked, not read off a render", async () => {
   expect(calls.some((path) => path.startsWith("/api/agents"))).toBe(true);
   expect(answer).toContain("2 coworkers already exist here");
   expect(answer).toContain("General Assistant — Everyday Work");
-  // Whose it is and where it runs, which is what stops a duplicate being proposed.
+  // Whose it is, which is what stops a duplicate being proposed.
   expect(answer).toContain("the deployment's");
-  expect(answer).toContain("runs at its own address");
   expect(answer).toContain("Renewal Desk");
+  // No address, and no "runs here": where a coworker runs is the same fact for all of them now, so
+  // it distinguishes none and would only tell a Bot building a new one that it had a choice.
+  expect(answer).not.toContain("runs at its own address");
+  expect(answer).not.toContain("runs here");
   // Role descriptions are deliberately not in the list: a dozen of them is most of a run.
   expect(answer).not.toContain("Never invent a date");
 });
@@ -129,12 +127,14 @@ test("the skills are fetched when asked, so an unloaded list never reads as an e
   expect(answer).toContain("A skill is an instruction, not a capability");
 });
 
-test("one coworker comes back in full, including what it runs on", async () => {
+test("one coworker comes back in full, including how it runs", async () => {
   const answer = await answerReadBot(coldClient(), "renewal desk");
 
   expect(answer).toContain("Renewal Desk — Accounts Receivable (yours)");
   expect(answer).toContain("Chase overdue invoices. Never invent a date.");
-  expect(answer).toContain("Runs at its own address");
+  // Every coworker runs on this deployment's own engine, and the answer says so rather than
+  // describing an address: a Bot asked to make a new coworker must not learn it could pick one.
+  expect(answer).toContain("Runs on this deployment");
 });
 
 test("a coworker that is not here is named rather than guessed at", async () => {

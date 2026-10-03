@@ -1,30 +1,18 @@
 /**
- * What the runtime can do. There is exactly one answer because CopilotKit Intelligence is required
- * for durable threads and memory. Configuration the product cannot function without belongs at the
- * boot boundary.
+ * What the runtime can do. Threads, messages, runs and locks live in this
+ * deployment's own Postgres (see threads/local): nothing cloud to configure,
+ * so there is no boot contract here at all.
  */
+
+import { join } from "node:path";
 import { singleUserEnabled } from "./auth/dev-actor";
+import type { EmailServiceConfig } from "./auth/email";
 import type { ActionPolicy } from "./computer/policy";
 import { parseActionPolicy } from "./computer/policy-store";
 
 export type RuntimeCapabilities = {
-  mode: "intelligence";
+  mode: "local";
   durableHistory: true;
-  intelligence: IntelligenceSettings;
-};
-
-/**
- * The Intelligence contract. Three values are required; see runtimeCapabilities.
- *
- * `licenseToken` is optional. Managed Intelligence derives entitlement from the project key, and
- * `@copilotkit/runtime` declares `licenseToken` optional with a `COPILOTKIT_LICENSE_TOKEN` fallback
- * of its own. A deployment that still holds one keeps passing it; nothing here requires it.
- */
-export type IntelligenceSettings = {
-  apiUrl: string;
-  gatewayWsUrl: string;
-  apiKey: string;
-  licenseToken?: string;
 };
 
 export type DockerComputerConfig = {
@@ -42,6 +30,28 @@ export type SharedComputerConfig = {
   token?: string;
   allowPrivateHosts: boolean;
   policy?: ActionPolicy;
+  /**
+   * Whether this deployment can serve more than one person.
+   *
+   * The gate on a shared computer, and the reason it is a fact rather than a setting. Bots are kept
+   * apart from each other by a per-Bot profile, a per-Bot workspace and a Bot id the computer
+   * verifies; PEOPLE are not, so one computer is safe for one person and unsafe for two. Carried
+   * here so `createComputerProvider` can refuse the multi-user case without reaching back into the
+   * environment.
+   */
+  singleUser: boolean;
+  /**
+   * The operator has said this deployment serves one person, and wants one machine.
+   *
+   * Not inferred from the user count, which is a snapshot that a sign-up would invalidate, and not
+   * inferred from the absence of sign-in, because a real account is how a person keeps their own
+   * history. It is stated, and the refusal is the default, because what it asserts is a fact about
+   * the world outside the software: that nobody else will ever be added to this deployment.
+   *
+   * False or unset keeps a shared computer refused, so nothing changes for anyone who has not
+   * deliberately asked for this.
+   */
+  sharedSingleTenant: boolean;
 };
 
 /**
@@ -62,10 +72,55 @@ export type SandboxComputerConfig = {
   policy?: ActionPolicy;
 };
 
+/**
+ * The hosted desktop, on E2B: one desktop per person.
+ *
+ * One sandbox per PERSON rather than per Bot, and that is the whole tenancy model — a computer
+ * outlives every conversation and belongs to the person, while the Bot driving it is whichever one
+ * holds the wheel. Billing follows the person, which is what makes a flat monthly price honest.
+ *
+ * The template is E2B's own `desktop`, which carries Xvfb, XFCE, x11vnc, noVNC, xdotool, scrot,
+ * ffmpeg, Chrome and Python — everything the desktop and the tools need, with nothing added to it.
+ *
+ * Pause, not delete, is the idle policy: a memory pause restores the desktop exactly as it was and
+ * comes back in seconds. Full internet egress, which free-tier Daytona did not have.
+ */
+export type E2BComputerConfig = {
+  provider: "e2b";
+  apiKey: string;
+  /** E2B's API root. Optional — E2B's own default is correct for the hosted product. */
+  apiUrl?: string;
+  /** The template every desktop is built from. */
+  template: string;
+  /**
+   * The port the agent-computer service listens on inside the sandbox.
+   *
+   * Unused on this path — there is no agent-computer service in an E2B desktop, because the server
+   * drives the machine directly through E2B's own API — but it is kept and validated so an existing
+   * `.env` carrying it does not fail a deployment on a variable nothing reads any more.
+   */
+  computerPort: number;
+  /** Idle minutes before a desktop is paused. 0 never pauses it. */
+  autoStopMinutes: number;
+  /**
+   * Whether each person's files live on their own E2B volume.
+   *
+   * On by default, and this is the persistence question in one boolean: a volume survives the sandbox
+   * being paused, killed or replaced, and sandbox disk does not survive the sandbox being deleted.
+   */
+  volumes: boolean;
+  /** Where the volume appears inside the sandbox. Must be what a tool's relative paths resolve to. */
+  workspaceMountPath: string;
+  token?: string;
+  allowPrivateHosts: boolean;
+  policy?: ActionPolicy;
+};
+
 export type ComputerConfig =
   | DockerComputerConfig
   | SharedComputerConfig
-  | SandboxComputerConfig;
+  | SandboxComputerConfig
+  | E2BComputerConfig;
 
 /**
  * Who a deployment lets in, and through which front door.
@@ -74,17 +129,22 @@ export type ComputerConfig =
  * has Google or Entra or Okta and is not going to acquire another, so the shape here is a set of
  * optional providers rather than one required one, and the deployment turns on whichever it has.
  */
-export type AuthProviderId = "google" | "microsoft" | "okta";
+export type AuthProviderId = "google" | "github" | "microsoft" | "okta";
 
 /** An OAuth client, as every provider here needs one. */
 export type OAuthClient = { clientId: string; clientSecret: string };
+
+export type TurnstileConfig = {
+  secretKey: string;
+  siteKey?: string;
+};
 
 export type AuthConfig = {
   baseUrl: string;
   secret: string;
   trustedOrigins: string[];
-  initialAdminEmails: string[];
   google?: OAuthClient;
+  github?: OAuthClient;
   /**
    * `tenantId` decides who may sign in at all, so it is not a detail. `common` admits any Microsoft
    * account including personal ones, `organizations` any work or school account anywhere, and a GUID
@@ -93,6 +153,15 @@ export type AuthConfig = {
   microsoft?: OAuthClient & { tenantId: string };
   /** Okta is an OIDC provider rather than a named one, so it is identified by its issuer. */
   okta?: OAuthClient & { issuer: string };
+  email?: EmailServiceConfig;
+  /**
+   * Email (or username) plus password sign-in, Remi-style. Enabled explicitly with
+   * `AUTH_EMAIL_PASSWORD=true`; unlike the OAuth providers it needs no vendor client, only
+   * the session secret and base URL below. Counts as an identity provider: setting it turns
+   * single-user mode off and requires sign-in.
+   */
+  emailPassword?: boolean;
+  turnstile?: TurnstileConfig;
 };
 
 /**
@@ -108,9 +177,17 @@ export function configuredAuthProviders(
   if (!auth) return [];
   const providers: AuthProviderId[] = [];
   if (auth.google) providers.push("google");
+  if (auth.github) providers.push("github");
   if (auth.microsoft) providers.push("microsoft");
   if (auth.okta) providers.push("okta");
   return providers;
+}
+
+/** Whether anybody must sign in: an OAuth provider or email-plus-password is configured. */
+export function hasIdentityProvider(auth: AuthConfig | undefined): boolean {
+  return (
+    configuredAuthProviders(auth).length > 0 || auth?.emailPassword === true
+  );
 }
 
 export type ManagedAgentConfig = {
@@ -145,6 +222,31 @@ export type HandoffCaps = {
   maxPerRun: number;
 };
 
+/**
+ * Whether a Bot acts directly or asks first, as a deployment default.
+ *
+ * A closed set on purpose: anything else in the variable is a start-up error rather than a
+ * silent default, because a deployment that typed `auto` and got `direct` would believe it had
+ * configured something it had not.
+ */
+export type ExecutionMode = "direct" | "ask-first";
+
+export function parseExecutionMode(
+  raw: string | undefined,
+): ExecutionMode | null {
+  const value = raw?.trim().toLowerCase();
+  if (!value) return null;
+  if (value === "direct" || value === "ask-first") return value;
+  throw new Error(`BOT_EXECUTION_MODE must be "direct" or "ask-first"`);
+}
+
+/** The deployment default, read from the environment. Direct, the Remi way. */
+function executionMode(environment: Environment): ExecutionMode {
+  return (
+    parseExecutionMode(optional(environment, "BOT_EXECUTION_MODE")) ?? "direct"
+  );
+}
+
 export type DeploymentConfig = {
   /** The port the API listens on. Named `PORT` or `SERVER_PORT`; see `serverPort`. */
   port: number;
@@ -157,20 +259,6 @@ export type DeploymentConfig = {
    * Its presence, not this auth configuration, determines whether a bundled Bot is available.
    */
   managedAgent?: ManagedAgentConfig;
-  /**
-   * Private addresses an agent may be registered at, named one at a time.
-   *
-   * WHY THIS EXISTS. `AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS` is a floor, not a permission: it opens this
-   * deployment's whole network, to browsing and to agent endpoints alike, which is why a production
-   * deployment refuses to start with it on. That left bring-your-own-agent — a headline capability —
-   * unusable in the image people are told to deploy, because a company's own agent legitimately lives
-   * at an internal address and the only way to reach it was to drop the floor.
-   *
-   * So the address is named instead. Nothing else is opened, browsing is not widened, and the
-   * never-allowed list is still checked first, so the metadata address cannot be named back in.
-   * Empty by default, which is the same posture as before for anybody who does not set it.
-   */
-  agentEndpointAllowedHosts: ReadonlySet<string>;
   /**
    * What this deployment calls itself, when more than one shares an Intelligence project.
    *
@@ -186,7 +274,7 @@ export type DeploymentConfig = {
    * Optional, and undefined is the ordinary state rather than a degraded one. A deployment that has
    * not bought Composio is not a deployment missing something: there is nothing to connect, nothing
    * to grant and no Composio tool for a Bot to call, what remains on screen is one row that goes
-   * nowhere under More apps on the admin Plugins page naming this variable, and nothing else it does
+   * nowhere on the App connections page naming this variable, and nothing else it does
    * is any worse for that.
    *
    * Nothing here validates the key. There is no shape to check it against and no call worth making
@@ -198,11 +286,11 @@ export type DeploymentConfig = {
    * Where this deployment is reached from outside, with no trailing slash.
    *
    * Needed because an OAuth redirect URI has to match what an administrator registered with the
-   * vendor character for character, and it is shown on the Plugins page for them to copy. Built from
+   * vendor character for character, and it is shown on App connections for them to copy. Built from
    * configuration rather than from the incoming request: a redirect URI assembled out of a Host
    * header is one an attacker has a say in.
    *
-   * `OPENBOT_PUBLIC_URL` when set, otherwise `BETTER_AUTH_URL`, which is the same public address for
+   * `REMII_PUBLIC_URL` when set, otherwise `BETTER_AUTH_URL`, which is the same public address for
    * every deployment that has real sign-in. Undefined only where neither exists, which is a local
    * deployment running without authentication — and there is nothing to connect there anyway.
    */
@@ -215,7 +303,7 @@ export type DeploymentConfig = {
    * the API and has to send the person back to a page, so a relative redirect would put them on the
    * API's origin, where no page exists.
    *
-   * `OPENBOT_APP_URL` when set, otherwise the first `TRUSTED_ORIGINS` entry, which is already defined
+   * `REMII_APP_URL` when set, otherwise the first `TRUSTED_ORIGINS` entry, which is already defined
    * as where the app is served from. Falls back to the API's own public URL, which is right for a
    * deployment serving both from one origin.
    */
@@ -239,6 +327,16 @@ export type DeploymentConfig = {
    * until it has.
    */
   auditRetentionDays: number | undefined;
+  /**
+   * How long a finished run stays in `run_activity`, in days.
+   *
+   * BOUNDED BY DEFAULT, unlike the audit trail beside it, and the difference is the subject. The
+   * audit trail is what an incident is looked up in, so keeping it forever is a decision somebody
+   * makes. `run_activity` answers one question — what is working right now — and a person answers it
+   * in the roster they are looking at. Rows past that horizon are what the table is asked for by
+   * nobody, and a table nobody reads is still a table somebody pays to store.
+   */
+  activityRetentionDays: number;
   oauth: {
     google?: { clientId: string; clientSecret: string };
   };
@@ -250,7 +348,7 @@ export type DeploymentConfig = {
    * reaching somewhere other people can get to.
    */
   singleUser: boolean;
-  /** Names OpenBot on the analytics the runtime already sends. Off with OPENBOT_ACCESSIBILITY_DISABLED. */
+  /** Names Remii on the analytics the runtime already sends. Off with REMII_ACCESSIBILITY_DISABLED. */
   accessibility: boolean;
   /**
    * Whether a Bot may answer with an interface it wrote itself.
@@ -268,7 +366,7 @@ export type DeploymentConfig = {
    * nothing at all, which is a worse answer than never offering it.
    *
    * On by default. A deployment that cannot allow generated interfaces can explicitly opt out with
-   * OPENBOT_GENERATIVE_UI=false or OPENBOT_GENERATIVE_UI=0.
+   * REMII_GENERATIVE_UI=false or REMII_GENERATIVE_UI=0.
    *
    * What it runs is sandboxed by the SDK, in an iframe with no same-origin access to this app, so a
    * generated interface reaches this deployment's data only through what the host hands it. This
@@ -288,8 +386,20 @@ export type DeploymentConfig = {
    * mounted and failing: a capability that is not configured should be missing, not broken.
    */
   computer?: ComputerConfig;
+  /** Where saved files' bytes live. See `storageConfig`. */
+  storage?: StorageConfig;
   /** How far one Bot handing work to another may go. */
   handoff: HandoffCaps;
+  /**
+   * How a Bot acts on the person's behalf, deployment-wide unless they chose otherwise.
+   *
+   * `direct` means the Remi way: do what was asked, immediately, with the tools held. `ask-first`
+   * means external, side-effecting actions wait for the person's word via `ask_person` first.
+   * Internal work (reading, organizing, remembering, answering) is never gated either way: the
+   * switch is about effects on the world, not about thinking. A person overrides this for
+   * themselves on the General settings screen.
+   */
+  executionMode: ExecutionMode;
   /**
    * The secret a Bot presents when it calls a tool back through this server.
    *
@@ -332,8 +442,24 @@ function handoffCaps(environment: Environment): HandoffCaps {
     return value;
   };
   return {
-    // One level of delegation, which is what most systems allow before anybody asks for more.
-    maxDepth: read("BOT_HANDOFF_MAX_DEPTH", 1),
+    /*
+     * Two levels, which is a chain of three: an orchestrator, the specialist it delegates to, and
+     * whoever that specialist delegates to.
+     *
+     * ONE WAS NOT A POLICY, IT WAS A CEILING, AND IT LANDED ON A REAL WORKFLOW. At one, the only
+     * shape that worked was a single hop — an orchestrator handing to a specialist. The second hop
+     * was refused with "this is already 1 Bot deep", so a chief of staff who delegated research to
+     * a researcher who was supposed to hand the report to a mail owner could not: the researcher was
+     * already at the bottom. The wiring was all correct and the arithmetic stopped it, which reads
+     * from the conversation as the supervisor not supervising and the chain being broken rather than
+     * capped.
+     *
+     * Two is the smallest value that lets a report be gathered by one Bot and delivered by another,
+     * which is the shape almost every delegation is actually in. It is still a hard bound — this is
+     * also what stops A asks B asks C asks A — and every hop is still granted, audited and capped by
+     * `maxPerRun`.
+     */
+    maxDepth: read("BOT_HANDOFF_MAX_DEPTH", 2),
     maxPerRun: read("BOT_HANDOFF_MAX_PER_RUN", 3),
   };
 }
@@ -346,8 +472,26 @@ function required(environment: Environment, name: string): string {
   return value;
 }
 
+/**
+ * Read one setting, by its current name and by the one it had before the rebrand.
+ *
+ * `REMII_*` is what the code asks for from here and what a fresh `.env` writes. `OPENBOT_*` is what
+ * every deployment already has on disk, and a rename that read only the new name would leave each of
+ * them running on built-in defaults without saying so — the exact failure this file exists to refuse,
+ * arrived at quietly. The new name wins when both are set, so a deployment can add `REMII_*` next to
+ * its existing `OPENBOT_*` and move one variable at a time rather than in one restart.
+ *
+ * An empty value counts as unset for both names, matching the behaviour above: `REMII_FOO=` is a
+ * deployment that has not chosen, not one that has chosen the old name's value.
+ */
 function optional(environment: Environment, name: string): string | undefined {
-  return environment[name]?.trim() || undefined;
+  const read = (key: string): string | undefined =>
+    environment[key]?.trim() || undefined;
+  const value = read(name);
+  if (value !== undefined) return value;
+  return name.startsWith("REMII_")
+    ? read(`OPENBOT_${name.slice("REMII_".length)}`)
+    : undefined;
 }
 
 /**
@@ -514,10 +658,35 @@ function commaSeparated(environment: Environment, name: string): string[] {
 }
 
 /**
+ * Outbound email for verification codes and resets (Resend or SendGrid).
+ *
+ * Absent means the dev simulation in auth/email.ts logs instead of sending. Email verification
+ * is only required when this is configured (see createAuth): without a way to deliver a code,
+ * requiring one would lock everybody out on first signup.
+ */
+function emailConfig(environment: Environment): EmailServiceConfig | undefined {
+  const provider = optional(environment, "EMAIL_PROVIDER");
+  const apiKey = optional(environment, "EMAIL_API_KEY");
+  const from = optional(environment, "EMAIL_FROM");
+  if (!provider && !apiKey && !from) return undefined;
+  if (provider !== "resend" && provider !== "sendgrid") {
+    throw new Error(
+      'EMAIL_PROVIDER must be "resend" or "sendgrid" (with EMAIL_API_KEY and EMAIL_FROM).',
+    );
+  }
+  if (!apiKey || !from) {
+    throw new Error(
+      "EMAIL_PROVIDER is set but EMAIL_API_KEY or EMAIL_FROM is missing.",
+    );
+  }
+  return { provider, apiKey, from };
+}
+
+/**
  * Sign-in, if this deployment has an identity provider to sign people in with.
  *
- * Any one of the three turns authentication on. More than one is allowed and is the normal shape
- * for a company mid-migration, where some people are on Entra and some are still on Okta.
+ * Any one of these turns authentication on: Google, Microsoft, Okta, or email-plus-password
+ * (`AUTH_EMAIL_PASSWORD=true`, which needs no vendor client). More than one is allowed.
  *
  * Every combination that cannot work refuses at start-up rather than at somebody's first attempt to
  * sign in, which is the worst moment to discover it: a provider with half its credentials, a
@@ -530,14 +699,17 @@ function authConfig(
 ): AuthConfig | undefined {
   const microsoft = microsoftAuth(environment);
   const okta = oktaAuth(environment);
+  const emailPassword =
+    environment.AUTH_EMAIL_PASSWORD?.trim() === "true" || undefined;
+  const email = emailConfig(environment);
 
   const secret = optional(environment, "BETTER_AUTH_SECRET");
   const baseUrl = url(environment, "BETTER_AUTH_URL");
 
-  if (!google && !microsoft && !okta) {
+  if (!google && !microsoft && !okta && !emailPassword) {
     if (secret || baseUrl) {
       throw new Error(
-        "BETTER_AUTH_SECRET or BETTER_AUTH_URL is set but no identity provider is. Configure GOOGLE_OAUTH_*, MICROSOFT_OAUTH_* or OKTA_OAUTH_*, or unset both",
+        "BETTER_AUTH_SECRET or BETTER_AUTH_URL is set but no identity provider is. Configure GOOGLE_OAUTH_*, MICROSOFT_OAUTH_*, OKTA_OAUTH_* or AUTH_EMAIL_PASSWORD=true, or unset both",
       );
     }
     return undefined;
@@ -553,20 +725,15 @@ function authConfig(
   }
 
   /*
-   * Somebody has to be an administrator, and only this says who.
-   *
-   * The role is written from this list and there is no route anywhere that changes one, so a
-   * deployment that configures sign-in without it admits everybody as a plain user, shows nobody
-   * the admin screens, and offers no way to promote anyone. Refusing at start-up is the only cheap
-   * moment to catch that; the expensive one is after the first person has signed in.
+   * Individual-user SaaS has no administrators: every account that can
+   * authenticate may sign in, and its own data is the only thing it can
+   * reach. INITIAL_ADMIN_EMAILS is retired — if it is still set, it is
+   * ignored rather than honoured, because honouring it would silently grant
+   * one address power over every other user's data.
    */
-  const initialAdminEmails = commaSeparated(
-    environment,
-    "INITIAL_ADMIN_EMAILS",
-  );
-  if (initialAdminEmails.length === 0) {
-    throw new Error(
-      "Sign-in requires INITIAL_ADMIN_EMAILS naming at least one administrator. Nothing else grants the role, and no screen can promote somebody once the deployment is running",
+  if (commaSeparated(environment, "INITIAL_ADMIN_EMAILS").length > 0) {
+    console.warn(
+      "INITIAL_ADMIN_EMAILS is set, but this deployment has no administrator role: every user is sovereign over their own data, and the list is ignored. Remove it from the environment.",
     );
   }
 
@@ -581,10 +748,11 @@ function authConfig(
          * `127.0.0.1:3010`, which is the address the rest of this deployment hands out.
          */
         ["http://127.0.0.1:3010", "http://[::1]:3010", "http://localhost:3010"],
-    initialAdminEmails,
     ...(google ? { google } : {}),
     ...(microsoft ? { microsoft } : {}),
     ...(okta ? { okta } : {}),
+    ...(emailPassword ? { emailPassword } : {}),
+    ...(email ? { email } : {}),
   };
 }
 
@@ -634,44 +802,16 @@ function oktaAuth(
 }
 
 /**
- * Resolve the Intelligence contract, or refuse to start.
+ * The runtime runs locally: durable threads in Postgres, no cloud contract.
  *
- * The three addressing values are required together. A partial set is the more dangerous shape than
- * none at all: it means somebody intended to configure Intelligence and got it wrong, so failing on
- * the partial set alone (as this did) let a completely unconfigured deployment through as if that
- * were a choice.
- *
- * COPILOTKIT_LICENSE_TOKEN IS NO LONGER ONE OF THEM. Managed Intelligence issues a single project
- * key and derives entitlement from it, and requiring a second credential here sent people hunting
- * for a token the platform had stopped handing out. It is still read and still forwarded when a
- * deployment sets one, which is what a self-hosted Intelligence with its own licence needs.
+ * The INTELLIGENCE_* variables of older deployments are ignored when
+ * present, so an env file written for the hosted backend still boots rather
+ * than failing on settings nothing reads anymore.
  */
-function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
-  const settings = {
-    apiUrl: url(environment, "INTELLIGENCE_API_URL"),
-    gatewayWsUrl: url(environment, "INTELLIGENCE_GATEWAY_WS_URL"),
-    apiKey: optional(environment, "INTELLIGENCE_API_KEY"),
-    licenseToken: optional(environment, "COPILOTKIT_LICENSE_TOKEN"),
-  };
-
-  const missing = Object.entries({
-    INTELLIGENCE_API_URL: settings.apiUrl,
-    INTELLIGENCE_GATEWAY_WS_URL: settings.gatewayWsUrl,
-    INTELLIGENCE_API_KEY: settings.apiKey,
-  })
-    .filter(([, value]) => !value)
-    .map(([name]) => name);
-
-  if (missing.length > 0) {
-    throw new Error(
-      `CopilotKit Intelligence is required and is not configured. Missing: ${missing.join(", ")}`,
-    );
-  }
-
+function runtimeCapabilities(_environment: Environment): RuntimeCapabilities {
   return {
-    mode: "intelligence",
+    mode: "local",
     durableHistory: true,
-    intelligence: settings as IntelligenceSettings,
   };
 }
 
@@ -688,74 +828,6 @@ function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
  * cloud metadata addresses are refused underneath this either way — see `computer/target.ts` — but
  * that floor is the last one, not the only one worth keeping.
  */
-/**
- * The private addresses this deployment will let an agent be registered at.
- *
- * A comma-separated list of hosts, each optionally with a port: `agents.internal`,
- * `10.0.0.42:9000`. Matching is exact, so a name with a port pins that port and a name without one
- * covers any port on that host. No suffixes and no wildcards, because a pattern that widens by
- * accident is the usual way a host check fails, and naming three addresses is not onerous.
- *
- * A scheme or a path is a mistake worth catching here rather than at the first registration that
- * silently never matches, so both are refused with the offending entry named.
- */
-function agentEndpointAllowedHosts(
-  environment: NodeJS.ProcessEnv,
-): ReadonlySet<string> {
-  const named = commaSeparated(environment, "AGENT_ENDPOINT_ALLOWED_HOSTS");
-  const hosts = new Set<string>();
-  for (const entry of named) {
-    const host = entry.trim().toLowerCase();
-    if (!host) continue;
-    if (host.includes("/") || host.includes("://")) {
-      throw new Error(
-        `AGENT_ENDPOINT_ALLOWED_HOSTS entry "${entry}" must be a host, optionally with a port, and not a URL.`,
-      );
-    }
-    if (host.includes("*")) {
-      throw new Error(
-        `AGENT_ENDPOINT_ALLOWED_HOSTS entry "${entry}" must name one host. Patterns are not accepted: list each address instead.`,
-      );
-    }
-    hosts.add(normalizeAllowedHost(entry, host));
-  }
-  return hosts;
-}
-
-/**
- * An IPv6 entry, spelled the way the endpoint check will see it.
- *
- * `namedAsAllowed` compares against `URL.hostname`, which the parser canonicalises: compressed,
- * lower-case, in brackets. An entry kept as written matched only when the operator happened to
- * write it that way, so `[0:0:0:0:0:0:0:1]:8443` was a line that silently never matched, which is
- * the failure the URL and wildcard refusals above exist to prevent. Stripping the brackets instead
- * folded two different names into one: `[::1]:8443`, an address and a port, and `[::1:8443]`, an
- * address, both became `::1:8443`, so naming either admitted the other.
- *
- * The address goes through the URL parser rather than a hand-written normaliser, so the spelling
- * here is the parser's own and cannot drift from it. The port is kept as written, since the parser
- * drops a scheme's default port and an operator who wrote `:80` meant that port. A bracketed entry
- * the parser refuses is not an address, and is refused the way a URL is: at boot, naming the entry.
- */
-function normalizeAllowedHost(entry: string, host: string): string {
-  if (!host.startsWith("[")) return host;
-  const close = host.indexOf("]");
-  const address = close === -1 ? host : host.slice(0, close + 1);
-  const port = close === -1 ? "" : host.slice(close + 1);
-  const refusal = () =>
-    new Error(
-      `AGENT_ENDPOINT_ALLOWED_HOSTS entry "${entry}" must be a host, optionally with a port, and not a URL.`,
-    );
-  if (port && !/^:\d{1,5}$/.test(port)) throw refusal();
-  let hostname: string;
-  try {
-    hostname = new URL(`http://${address}`).hostname;
-  } catch {
-    throw refusal();
-  }
-  return `${hostname}${port}`;
-}
-
 function privateHostsAllowed(environment: Environment): boolean {
   if (optional(environment, "AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS") !== "true") {
     return false;
@@ -803,12 +875,46 @@ export function durationMs(value: string): number {
   }
 }
 
-function computerConfig(environment: Environment): ComputerConfig | undefined {
+function computerConfig(
+  environment: Environment,
+  /**
+   * Whether an identity provider is configured, so `singleUserEnabled` can be asked the same
+   * question here as it is asked for the deployment itself. Passed rather than re-read, because the
+   * two must not be able to disagree about whether this deployment has sign-in.
+   */
+  _hasIdentity: boolean,
+): ComputerConfig | undefined {
+  const e2bAddress = optional(environment, "E2B_API_KEY");
   const supervisorAddress = optional(environment, "COMPUTER_SUPERVISOR_URL");
-  const sharedAddress = optional(environment, "AGENT_COMPUTER_URL");
+  /*
+   * Validated like every other provider's address, and this branch returns before the hosted ones
+   * get a look — so without the check a typo would reach the provider and fail on the first request
+   * instead of at startup. The other providers validate further down for the same reason.
+   */
+  const sharedAddress = url(environment, "AGENT_COMPUTER_URL");
   const sandboxNamespace = optional(environment, "COMPUTER_SANDBOX_NAMESPACE");
-  if (!supervisorAddress && !sharedAddress && !sandboxNamespace) {
+  if (
+    !e2bAddress &&
+    !supervisorAddress &&
+    !sharedAddress &&
+    !sandboxNamespace
+  ) {
     return undefined;
+  }
+
+  /*
+   * Strict per-user sandboxing: a shared fallback is refused up front.
+   *
+   * It used to be a resilience feature — a hosted sandbox that could not serve
+   * fell back to the local computer and the turn carried on. That fallback is
+   * user A inside user B's browser: one /workspace, one shell, one set of
+   * logins, on a published port. So naming one stops startup, and the error
+   * names the variable rather than surfacing later as somebody else's data.
+   */
+  if (sharedAddress && e2bAddress) {
+    throw new Error(
+      "AGENT_COMPUTER_URL is set alongside a hosted computer provider, which strict per-user sandboxing forbids: the shared computer is where a user's files, shell and logins would be mixed with every other user's whenever a sandbox could not serve. Unset AGENT_COMPUTER_URL and let the provider fail the turn instead.",
+    );
   }
 
   /*
@@ -822,10 +928,58 @@ function computerConfig(environment: Environment): ComputerConfig | undefined {
   const policy = actionPolicy(environment);
 
   /*
-   * Checked before the other two, because a deployment that named a namespace means the cluster to
-   * make the computers, and a stray `AGENT_COMPUTER_URL` left in an environment would otherwise
-   * quietly put every Bot back on one shared browser.
+   * E2B, and it comes FIRST among the hosted providers.
+   *
+   * There is only one now. This used to read "E2B first: a deployment that named an E2B key means E2B
+   * makes the computers. Daytona below stays as a dormant alternative", which was a precedence rule
+   * between two live options. With one option there is no precedence to get wrong, and a deployment
+   * whose environment still names `DAYTONA_API_URL` finds it simply unused rather than half-honoured —
+   * which is the outcome a stale variable should have, because acting on it would mean talking to a
+   * platform this deployment no longer has a key for.
+   *
+   * The key is the whole trigger. No key means no computer at all, rather than a computer that exists
+   * and cannot be reached.
    */
+  if (e2bAddress) {
+    const portRaw = optional(environment, "E2B_COMPUTER_PORT") ?? "4100";
+    const computerPort = Number(portRaw);
+    if (
+      !Number.isInteger(computerPort) ||
+      computerPort < 1 ||
+      computerPort > 65535
+    ) {
+      throw new Error(
+        `E2B_COMPUTER_PORT is "${portRaw}", which is not a port. Use 1-65535 or unset it for 4100.`,
+      );
+    }
+    const autoStopRaw = optional(environment, "E2B_AUTOSTOP_MINUTES") ?? "10";
+    const autoStopMinutes = Number(autoStopRaw);
+    if (!Number.isFinite(autoStopMinutes) || autoStopMinutes < 0) {
+      throw new Error(
+        `E2B_AUTOSTOP_MINUTES is "${autoStopRaw}", which is not a non-negative number of minutes. Use 0 to keep desktops always on.`,
+      );
+    }
+    return {
+      provider: "e2b",
+      apiKey: e2bAddress,
+      ...(optional(environment, "E2B_API_URL")
+        ? { apiUrl: optional(environment, "E2B_API_URL") }
+        : {}),
+      template: optional(environment, "E2B_TEMPLATE") || "desktop",
+      computerPort,
+      autoStopMinutes,
+      // `false` has to be spelled out rather than defaulted, because `E2B_VOLUMES=false` and an unset
+      // E2B_VOLUMES are different decisions and only one of them is a mistake. A typo stays ON: losing
+      // somebody's files is the worse direction to be wrong in.
+      volumes: optional(environment, "E2B_VOLUMES") !== "false",
+      workspaceMountPath:
+        optional(environment, "E2B_WORKSPACE_MOUNT") || "/workspace",
+      allowPrivateHosts,
+      ...(computerToken ? { token: computerToken } : {}),
+      ...(policy ? { policy } : {}),
+    };
+  }
+
   if (sandboxNamespace) {
     return {
       provider: "sandbox",
@@ -835,7 +989,7 @@ function computerConfig(environment: Environment): ComputerConfig | undefined {
       ),
       templateFile:
         optional(environment, "COMPUTER_SANDBOX_TEMPLATE_FILE") ??
-        "/etc/openbot/sandbox-template.json",
+        "/etc/remii/sandbox-template.json",
       allowPrivateHosts,
       ...(computerToken ? { token: computerToken } : {}),
       ...(policy ? { policy } : {}),
@@ -860,13 +1014,19 @@ function computerConfig(environment: Environment): ComputerConfig | undefined {
     return undefined;
   }
 
-  return {
-    provider: "shared",
-    baseUrl,
-    allowPrivateHosts,
-    ...(computerToken ? { token: computerToken } : {}),
-    ...(policy ? { policy } : {}),
-  };
+  /*
+   * Strict per-user sandboxing: a shared computer is refused, and named at the
+   * variable rather than deep inside the provider factory.
+   *
+   * One shared computer means one /workspace, one shell and one browser
+   * process for every user, which is the mixing this deployment refuses to
+   * serve. The supervisor (one container per (user, Bot) pair) is the local
+   * answer; a hosted provider is the deployment answer.
+   */
+  throw new Error(
+    "AGENT_COMPUTER_URL names a shared computer, which strict per-user sandboxing forbids: every Bot would share one /workspace, one shell and one browser, so one user's files and logins would be another user's. " +
+      "Unset AGENT_COMPUTER_URL and configure E2B_API_KEY (one desktop per person), COMPUTER_SUPERVISOR_URL (one computer per user and Bot), or COMPUTER_SANDBOX_NAMESPACE instead.",
+  );
 }
 
 /**
@@ -908,7 +1068,7 @@ function actionPolicy(environment: Environment): ActionPolicy | undefined {
  * Zero is a legitimate value and means off. It is not the same as a malformed one.
  */
 function accessibilityEnabled(environment: Environment): boolean {
-  const off = optional(environment, "OPENBOT_ACCESSIBILITY_DISABLED");
+  const off = optional(environment, "REMII_ACCESSIBILITY_DISABLED");
   return off !== "true" && off !== "1";
 }
 
@@ -928,7 +1088,7 @@ function accessibilityEnabled(environment: Environment): boolean {
  * interface that nothing renders. See DeploymentConfig.generativeUi.
  */
 function generativeUiEnabled(environment: Environment): boolean {
-  const value = optional(environment, "OPENBOT_GENERATIVE_UI");
+  const value = optional(environment, "REMII_GENERATIVE_UI");
   return value !== "false" && value !== "0";
 }
 
@@ -939,6 +1099,30 @@ function generativeUiEnabled(environment: Environment): boolean {
  * the one you wrote" is a bad answer about a control an auditor will ask to see, and a typo that
  * silently became 0 would delete the trail rather than keep it.
  */
+/**
+ * The window for `run_activity`, defaulting to 30 days.
+ *
+ * A default rather than "unset means forever", because the audit trail's default is the right
+ * default for an audit trail and the wrong one here. Thirty days is long enough to answer "what did
+ * Remii do last Tuesday" and short enough that the table is a window rather than an archive. A
+ * deployment that wants a different one sets `ACTIVITY_RETENTION_DAYS`; setting it to 0 switches the
+ * sweep off entirely and keeps everything, which is the escape hatch for somebody who would rather
+ * decide for themselves.
+ */
+function activityRetentionDays(environment: Environment): number {
+  const raw = optional(environment, "ACTIVITY_RETENTION_DAYS");
+  if (raw === undefined) return 30;
+  if (raw.trim() === "0") return 0;
+
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days < 0) {
+    throw new Error(
+      "ACTIVITY_RETENTION_DAYS must be a whole number of days, 0 or more. Leave it unset for the default of 30, or set 0 to keep every run.",
+    );
+  }
+  return days;
+}
+
 function auditRetentionDays(environment: Environment): number | undefined {
   const raw = optional(environment, "AUDIT_RETENTION_DAYS");
   if (!raw) return undefined;
@@ -1005,6 +1189,110 @@ function serverPort(environment: Environment): number {
   return port ?? serverPort ?? DEFAULT_PORT;
 }
 
+/**
+ * Where saved files' bytes live, and which driver reads them.
+ *
+ * `local` is the default and needs nothing configured, which is the point: a deployment that has
+ * never heard of this should start and work. `s3` is refused unless the bucket and region are both
+ * present, rather than falling back to a half-configured client that fails on the first upload — a
+ * process that starts and then cannot store a file is worse than one that will not start and says
+ * why.
+ */
+export type StorageConfig =
+  | { driver: "local"; rootDirectory: string }
+  | {
+      driver: "s3";
+      bucket: string;
+      region: string;
+      accessKeyId?: string;
+      secretAccessKey?: string;
+      endpoint?: string;
+      forcePathStyle: boolean;
+    };
+
+/**
+ * The storage driver, from `FILE_STORAGE_DRIVER` and the variables that go with it.
+ *
+ * The S3 branch reads PLACEHOLDERS as written and says so by refusing anything that looks like one.
+ * This deployment has no bucket, and a default bucket name is the specific failure this guards: a
+ * process configured with an example value that resolves to a real account would write somebody
+ * else's files into a bucket they do not know they have. So a value that is empty, or that still
+ * contains the placeholder text, is treated as absent and the deployment is told to finish setting
+ * it up.
+ */
+function storageConfig(
+  environment: Record<string, string | undefined>,
+): StorageConfig {
+  const driver = (optional(environment, "FILE_STORAGE_DRIVER") ?? "local")
+    .trim()
+    .toLowerCase();
+
+  if (driver === "local") {
+    return {
+      driver: "local",
+      rootDirectory:
+        (optional(environment, "FILE_STORAGE_ROOT") as string | undefined) ??
+        join(import.meta.dir, "..", "..", ".data", "files"),
+    };
+  }
+
+  if (driver !== "s3") {
+    throw new Error(
+      `FILE_STORAGE_DRIVER is '${driver}', which is not a driver this app has. Use 'local' or 's3'.`,
+    );
+  }
+
+  const bucket = readRealValue(environment, "S3_BUCKET");
+  const region = readRealValue(environment, "S3_REGION");
+  if (!bucket || !region) {
+    throw new Error(
+      "FILE_STORAGE_DRIVER is 's3' but S3_BUCKET and S3_REGION are not both set to real values. " +
+        "Set them, or set FILE_STORAGE_DRIVER=local.",
+    );
+  }
+
+  const accessKeyId = readRealValue(environment, "S3_ACCESS_KEY_ID");
+  const secretAccessKey = readRealValue(environment, "S3_SECRET_ACCESS_KEY");
+  // Half a credential is no credential: a key with no secret would fail at the first request with an
+  // opaque signature error, and the message here is one somebody can act on.
+  if ((accessKeyId && !secretAccessKey) || (!accessKeyId && secretAccessKey)) {
+    throw new Error(
+      "S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together, or both left unset to use " +
+        "the ambient credentials (an instance role, or the SDK's own chain).",
+    );
+  }
+
+  return {
+    driver: "s3",
+    bucket,
+    region,
+    ...(accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : {}),
+    ...(optional(environment, "S3_ENDPOINT")
+      ? { endpoint: optional(environment, "S3_ENDPOINT") as string }
+      : {}),
+    forcePathStyle:
+      (optional(environment, "S3_FORCE_PATH_STYLE") ?? "").trim() === "1",
+  };
+}
+
+/**
+ * An environment value that is actually set, as opposed to set to the placeholder in `.env.example`.
+ *
+ * The placeholder check is deliberately crude — it looks for the words `your` and `changeme`, which
+ * is not a parser and does not need to be. It only has to catch the values this repository ships,
+ * and a variable nobody filled in is caught by the empty check anyway.
+ */
+function readRealValue(
+  environment: Record<string, string | undefined>,
+  name: string,
+): string | undefined {
+  const raw = (optional(environment, name) as string | undefined)?.trim();
+  if (!raw) return undefined;
+  if (/\b(your|changeme|example|placeholder|todo)\b/i.test(raw))
+    return undefined;
+  return raw;
+}
+
 export function loadConfig(
   environment: Environment = process.env,
 ): DeploymentConfig {
@@ -1018,16 +1306,16 @@ export function loadConfig(
     databaseUrl: required(environment, "DATABASE_URL"),
     keyEncryptionKey: keyEncryptionKey(environment),
     ...(managedAgent ? { managedAgent } : {}),
-    agentEndpointAllowedHosts: agentEndpointAllowedHosts(environment),
+
     deploymentId: optional(environment, "DEPLOYMENT_ID"),
     composioApiKey: optional(environment, "COMPOSIO_API_KEY"),
     publicUrl: (
-      optional(environment, "OPENBOT_PUBLIC_URL") ?? auth?.baseUrl
+      optional(environment, "REMII_PUBLIC_URL") ?? auth?.baseUrl
     )?.replace(/\/+$/, ""),
     appUrl: (
-      optional(environment, "OPENBOT_APP_URL") ??
+      optional(environment, "REMII_APP_URL") ??
       commaSeparated(environment, "TRUSTED_ORIGINS")[0] ??
-      optional(environment, "OPENBOT_PUBLIC_URL") ??
+      optional(environment, "REMII_PUBLIC_URL") ??
       auth?.baseUrl
     )?.replace(/\/+$/, ""),
     tenantPackageDirectory:
@@ -1035,19 +1323,19 @@ export function loadConfig(
     runtime: runtimeCapabilities(environment),
     agentStallTimeoutMs: agentStallTimeoutMs(environment),
     auditRetentionDays: auditRetentionDays(environment),
+    activityRetentionDays: activityRetentionDays(environment),
     oauth: { google },
     auth,
-    singleUser: singleUserEnabled(
-      environment,
-      configuredAuthProviders(auth).length > 0,
-    ),
+    singleUser: singleUserEnabled(environment, hasIdentityProvider(auth)),
     accessibility: accessibilityEnabled(environment),
     generativeUi: generativeUiEnabled(environment),
     ...(optional(environment, "APP_DIST_DIR")
       ? { appDistDir: optional(environment, "APP_DIST_DIR") as string }
       : {}),
-    computer: computerConfig(environment),
+    computer: computerConfig(environment, hasIdentityProvider(auth)),
+    storage: storageConfig(environment),
     handoff: handoffCaps(environment),
+    executionMode: executionMode(environment),
     ...(optional(environment, "AGENT_TOOL_TOKEN")
       ? { agentToolToken: optional(environment, "AGENT_TOOL_TOKEN") as string }
       : {}),

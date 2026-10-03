@@ -1,10 +1,13 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { Hono } from "hono";
+import {
+  isMascotColorId,
+  isMascotShapeId,
+  type MascotChoice,
+} from "../../../shared/mascot-ids";
 import type { AuditEventType, AuditStore } from "../audit";
 import { recordAuditEvent } from "../audit";
 import type { AppVariables } from "../auth/guards";
-import { testAgentConnection } from "./connection-test";
-import { checkAgentEndpoint } from "./endpoint";
 import { canManageAgent } from "./profile-policy";
 import {
   AgentNotFoundError,
@@ -30,23 +33,112 @@ type AgentInputObject = {
   visibility?: unknown;
   endpoint?: unknown;
   auth?: unknown;
+  mascot?: unknown;
 };
+
+/**
+ * Read a mascot out of a request body.
+ *
+ * Absent means **the key is left off the parsed value**, and that distinction is load-bearing rather
+ * than tidy. `store.update` treats a missing `mascot` as "not touching it" and a present one as
+ * "replace the row", so a parser that always returned the key would clear somebody's mascot on every
+ * single save — and because the form sends the whole form, that would be every rename and every
+ * endpoint change, which looks exactly like the mascot field silently not saving.
+ *
+ * A field the client sent is checked against the closed vocabulary and **rejected** if it is not in
+ * it, which is the opposite of how every other field in this parser behaves — an unrecognised `name`
+ * length or a bad endpoint is refused, but the point of refusing is that the person finds out. A
+ * mascot id that was quietly dropped would render as a different mascot while the screen said it
+ * saved, and there is no way for anybody to tell the difference by looking. An id from a newer build
+ * is refused for the same reason: refused loudly beats rendered wrongly.
+ *
+ * Omitting a field inside `mascot` is not the same as sending a wrong one, so `{}` and
+ * `{ color: "teal" }` are both accepted, and an omitted axis goes back to the seed. See
+ * `profile-types.ts` on why that produces variety rather than one default.
+ */
+export function parseMascot(
+  input: unknown,
+):
+  | { ok: true; value: Partial<MascotChoice> | undefined }
+  | { ok: false; error: string } {
+  if (input === undefined || input === null)
+    return { ok: true, value: undefined };
+  if (typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, error: "Mascot must be an object." };
+  }
+
+  const raw = input as Record<string, unknown>;
+  const mascot: Partial<MascotChoice> = {};
+
+  if (raw.shape !== undefined && raw.shape !== null) {
+    if (!isMascotShapeId(raw.shape)) {
+      return {
+        ok: false,
+        error: `"${String(raw.shape)}" is not a mascot shape.`,
+      };
+    }
+    mascot.shape = raw.shape;
+  }
+  if (raw.color !== undefined && raw.color !== null) {
+    if (!isMascotColorId(raw.color)) {
+      return {
+        ok: false,
+        error: `"${String(raw.color)}" is not a mascot colour.`,
+      };
+    }
+    mascot.color = raw.color;
+  }
+  /*
+   * An `expression` in the body is ignored rather than refused, and a warning goes out.
+   *
+   * It was a real axis until migration 0070 and a real column until the same change, so a client that
+   * has not been rebuilt — an open tab from before the deploy, a script somebody wrote against the old
+   * API — will still send one. Refusing that would fail the whole request over a field the user cannot
+   * see and did not choose, and it would fail it on every retry, which is a worse outage than the one
+   * the stale field can cause. Ignoring it means the save succeeds, the face follows the work, and
+   * whoever is holding the stale client is told here rather than left wondering.
+   *
+   * The value is not validated. It is not going to be drawn, and a vocabulary check on a value nobody
+   * reads would only be a way to reject a request for the sake of tidiness.
+   */
+  if (raw.expression !== undefined && raw.expression !== null) {
+    console.warn(
+      JSON.stringify({
+        type: "mascot-expression-ignored",
+        value: String(raw.expression),
+        reason:
+          "a mascot's expression follows the agent's work state and is no longer chosen; the value was dropped",
+      }),
+    );
+  }
+
+  return { ok: true, value: mascot };
+}
 
 /**
  * Parse and validate what a user typed into the agent form.
  *
- * `allowPrivateHosts` is passed in rather than read from configuration here so this stays a pure
- * function: a developer's own agent lives on localhost, and a hosted deployment must refuse exactly
- * that, so the answer depends on the deployment and the test suite needs to exercise both.
+ * There is nowhere to run a coworker here — every one of them runs on the engine this deployment
+ * itself runs — so the body is only ever a name, a title, a role, and the mascot. An `endpoint` or an
+ * `auth` sent by a stale client is refused rather than ignored: silently dropping it would let an old
+ * build believe it had pointed a Bot somewhere, which is exactly the belief this feature exists to
+ * remove.
  */
-export function parseAgentInput(
-  input: unknown,
-  allowPrivateHosts = false,
-  /** Private addresses this deployment named as acceptable. Empty is the default posture. */
-  allowedHosts: ReadonlySet<string> = new Set(),
-): AgentInputParseResult {
+export function parseAgentInput(input: unknown): AgentInputParseResult {
   if (!isAgentInputObject(input)) {
     return { ok: false, error: "Agent input must be a JSON object." };
+  }
+
+  for (const refused of ["endpoint", "auth"] as const) {
+    if (input[refused] !== undefined) {
+      return {
+        ok: false,
+        error:
+          refused === "endpoint"
+            ? "Coworkers run on this deployment's own engine, so they cannot be given an address."
+            : "Coworkers run on this deployment's own engine, so they need no key.",
+      };
+    }
   }
 
   const name = boundedText(
@@ -71,58 +163,30 @@ export function parseAgentInput(
   if (typeof roleDescription !== "string") return roleDescription;
 
   if (typeof input.visibility !== "string") {
-    return { ok: false, error: "Visibility must be public or private." };
+    return { ok: false, error: "Visibility must be private." };
   }
   const visibility = input.visibility.trim();
-  if (visibility !== "public" && visibility !== "private") {
-    return { ok: false, error: "Visibility must be public or private." };
+  // Strict per-user SaaS sandbox: public sharing is removed. Every coworker
+  // is private to its owner; system templates are the only shared definitions
+  // and they carry no user data.
+  if (visibility !== "private") {
+    return { ok: false, error: "Visibility must be private." };
   }
 
-  // The endpoint is optional and checked. Absent means the Bot in the box, which is what most people
-  // want on their first go. Present means this server will POST to an address a person chose, so it
-  // goes through the same target check as navigation before it is allowed anywhere near the database.
-  let endpoint: string | undefined;
-  if (input.endpoint !== undefined && input.endpoint !== "") {
-    const verdict = checkAgentEndpoint(input.endpoint, {
-      allowPrivateHosts,
-      allowedHosts,
-    });
-    if (!verdict.allowed) return { ok: false, error: verdict.reason };
-    endpoint = verdict.url;
-  }
-
-  // The key is optional and write-only. An absent field leaves an existing key alone; sending one
-  // replaces it. There is no way to read one back, here or anywhere.
-  let auth: { header: string; value: string } | undefined;
-  if (input.auth !== undefined && input.auth !== null) {
-    const supplied = input.auth as { header?: unknown; value?: unknown };
-    const value =
-      typeof supplied.value === "string" ? supplied.value.trim() : "";
-    if (value) {
-      const header =
-        typeof supplied.header === "string" && supplied.header.trim()
-          ? supplied.header.trim()
-          : "Authorization";
-      if (!/^[A-Za-z0-9-]+$/.test(header)) {
-        return { ok: false, error: "That is not a valid header name." };
-      }
-      // Refused here rather than discovered on the first run. This value is encrypted and stored,
-      // and then sent as a header on every turn the Bot takes; one that cannot be a header value
-      // throws inside `fetch` every one of those times, long after the form said it was saved.
-      const unsendable = unsendableHeaderValue(value);
-      if (unsendable) {
-        return {
-          ok: false,
-          error: `That key contains ${unsendable}, so it cannot be sent as a header.`,
-        };
-      }
-      auth = { header, value };
-    }
-  }
+  const mascot = parseMascot(input.mascot);
+  if (!mascot.ok) return mascot;
 
   return {
     ok: true,
-    value: { name, title, roleDescription, visibility, endpoint, auth },
+    value: {
+      name,
+      title,
+      roleDescription,
+      visibility,
+      // Omitted rather than set to null when the body said nothing, so "not touching it" survives
+      // parsing. See the note on `parseMascot`.
+      ...(mascot.value === undefined ? {} : { mascot: mascot.value }),
+    },
   };
 }
 
@@ -131,121 +195,18 @@ function isAgentInputObject(input: unknown): input is AgentInputObject {
 }
 
 /**
- * What in this value stops it being a header, or null when nothing does.
- *
- * `new Headers()` refuses a line break, a NUL, and any code point above U+00FF, and it refuses them
- * by throwing a TypeError from inside `fetch` — which is not a decision this deployment gets to
- * take part in. Both surfaces below take a header value from the same box on the same form and
- * neither looked, so the throw arrived somewhere that reads as something else entirely: on the
- * connection test it lands in the catch written for a dead host, and the person is told "this server
- * could not reach that address", which sends them to their tunnel and their firewall over a key
- * they had just pasted with a wrapped line in it. A hyphen a document turned into an en dash does
- * the same thing, and looks like nothing at all in a password box.
- *
- * The description never contains the value. This is asked of a credential on one of the two paths,
- * and one character of a secret in an error message is one character too many.
- */
-function unsendableHeaderValue(value: string): string | null {
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    if (code === 0x0a || code === 0x0d) return "a line break";
-    if (code === 0) return "a null character";
-    if (code > 0xff) return "a character that cannot go in a header value";
-  }
-  return null;
-}
-
-/**
- * Parse and validate the headers a person attaches to a connection test.
- *
- * Unvalidated, the route cast any object straight into the probe `fetch`, so an array value, a
- * nested object, or a `__proto__` key travelled into the network call and threw a TypeError 500 —
- * or probed header handling the deployment never meant to exercise. Names follow the same rule as
- * the stored agent auth header; values must be strings; the whole map is capped so a pasted dump
- * cannot balloon the probe.
- */
-export function parseConnectionHeaders(
-  input: unknown,
-):
-  | { ok: true; value: Record<string, string> | undefined }
-  | { ok: false; error: string } {
-  if (input === undefined) return { ok: true, value: undefined };
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    return { ok: false, error: "Headers must be an object of name to value." };
-  }
-  /*
-   * A JSON body carrying `__proto__` does not arrive as an own property: `JSON.parse` sets the
-   * object's prototype instead, so `Object.entries` never sees it and a name block-list below
-   * would pass it straight through into the probe fetch. Refuse any headers object whose prototype
-   * is not a plain one before reading entries.
-   */
-  if (Object.getPrototypeOf(input) !== Object.prototype) {
-    return { ok: false, error: "Headers must be an object of name to value." };
-  }
-  const entries = Object.entries(input);
-  if (entries.length > 32) {
-    return { ok: false, error: "Headers must have at most 32 entries." };
-  }
-  const headers: Record<string, string> = {};
-  for (const [name, value] of entries) {
-    if (
-      name === "__proto__" ||
-      name === "constructor" ||
-      name === "prototype" ||
-      !/^[A-Za-z0-9-]+$/.test(name) ||
-      name.length > 64
-    ) {
-      return {
-        ok: false,
-        error: `That is not a valid header name: ${name.slice(0, 64)}.`,
-      };
-    }
-    if (typeof value !== "string") {
-      return {
-        ok: false,
-        error: `Header "${name}" must be a string value.`,
-      };
-    }
-    if (value.length > 4096) {
-      return {
-        ok: false,
-        error: `Header "${name}" must be at most 4096 characters.`,
-      };
-    }
-    const unsendable = unsendableHeaderValue(value);
-    if (unsendable) {
-      return {
-        ok: false,
-        error: `Header "${name}" contains ${unsendable}, so it cannot be sent.`,
-      };
-    }
-    headers[name] = value;
-  }
-  return { ok: true, value: entries.length === 0 ? undefined : headers };
-}
-
-/**
  * The local development actor, which is not a row in `users`.
  *
  * The audit table has a foreign key to that table, so writing this id would fail the constraint and
  * lose the row entirely. Who it was is in the payload either way.
  */
-const DEV_ACTOR_EMAIL = "dev@openbot.local";
+const DEV_ACTOR_EMAIL = "dev@remii.local";
 
 export function createAgentRoutes(
   store: AgentProfileStore,
   requireUser: MiddlewareHandler<{ Variables: AppVariables }>,
-  /** Whether this deployment may talk to its own network. True on a laptop, false when hosted. */
-  allowPrivateHosts = false,
   /** Where a Bot's own refusal is recorded. Absent in tests that do not care about the trail. */
   auditStore?: AuditStore,
-  /**
-   * Private addresses this deployment named as acceptable for an agent to live at.
-   *
-   * Separate from `allowPrivateHosts` on purpose: that one opens the network, this one opens an
-   * address. A hosted deployment sets this and leaves the other off.
-   */
-  allowedHosts: ReadonlySet<string> = new Set(),
   /**
    * Which Bots a Bot may hand work to, for the screen that grants it.
    *
@@ -270,31 +231,9 @@ export function createAgentRoutes(
      */
     runsHere?: (agentId: string) => Promise<boolean | undefined>;
   },
-  /**
-   * Whether a coworker can run on this deployment's own Bot, i.e. be created with no endpoint.
-   *
-   * The store already refuses such a create on a deployment with no managed Bot; this exists so a
-   * screen can say so before somebody fills in three steps of a form that was always going to fail.
-   */
-  builtInAvailable = false,
-  /**
-   * The managed Bot's own address, so a coworker created without an endpoint can be told apart.
-   *
-   * Creation bakes this address into the coworker's stored configuration, and afterwards nothing in
-   * the row says whether a person supplied it. The difference matters to exactly one screen: a
-   * coworker running here calls tools back with the deployment's own credential and needs no setup,
-   * while one a person hosts needs a callback token put into their process. Without this flag the
-   * dialog nagged built-in coworkers about a credential they never needed.
-   */
-  managedEndpoint?: string,
 ) {
-  /** The dto with the one fact only this closure knows: whether the coworker runs on our own Bot. */
-  const dto = (actor: AgentActor, agent: AgentProfile) => ({
-    ...agentDto(actor, agent),
-    // A string comparison on purpose: two absent values must not read as "runs on our Bot".
-    builtIn:
-      typeof agent.endpoint === "string" && agent.endpoint === managedEndpoint,
-  });
+  const dto = (actor: AgentActor, agent: AgentProfile) =>
+    agentDto(actor, agent);
   const routes = new Hono<{ Variables: AppVariables }>();
 
   /**
@@ -372,16 +311,6 @@ export function createAgentRoutes(
     }
   });
 
-  /**
-   * What kinds of coworker this deployment can create, for the screen that asks.
-   *
-   * Static per process: whether a managed Bot exists is deployment configuration, not data. Above
-   * the parameterised route on purpose, so "capabilities" can never be read as an agent id.
-   */
-  routes.get("/capabilities", requireUser, (context) =>
-    context.json({ capabilities: { builtInAvailable } }),
-  );
-
   routes.get("/:agentId", requireUser, async (context) => {
     // A whitespace id would reach the store query and answer 500 on some backends instead of a
     // 400 for a malformed call. Existence stays a 404; shape is checked here.
@@ -402,35 +331,7 @@ export function createAgentRoutes(
     }
   });
 
-  /**
-   * Try an endpoint before saving it.
-   *
-   * Deliberately not part of create: a person needs to know whether their agent answers before they
-   * commit to it, and they need to be able to try again without creating dead
-   * Bots on the way. It runs the same target check as saving, so it cannot probe addresses that
-   * registration would refuse.
-   */
-  routes.post("/test-connection", requireUser, async (context) => {
-    const body = (await context.req.json().catch(() => null)) as {
-      endpoint?: unknown;
-      headers?: unknown;
-    } | null;
-    const parsed = parseConnectionHeaders(body?.headers);
-    if (!parsed.ok) {
-      return context.json({ error: parsed.error }, 400);
-    }
-    const headers = parsed.value;
-    const result = await testAgentConnection(body?.endpoint, {
-      headers,
-      allowPrivateHosts,
-      allowedHosts,
-    });
-    // 200 either way: the request succeeded, and the verdict is the payload. A failed connection test
-    // is an answer, not an error, and a 4xx here would have the surface render it as a broken button.
-    return context.json(result);
-  });
-
-  /**
+/*
    * Record something that changed a Bot.
    *
    * One helper rather than eight copies, because the eight routes below all answer the same question
@@ -471,44 +372,33 @@ export function createAgentRoutes(
 
   routes.post("/", requireUser, async (context) => {
     // Malformed JSON is a recoverable client-input error and is validated by the same parser.
-    const parsed = parseAgentInput(
-      await context.req.json().catch(() => null),
-      allowPrivateHosts,
-      allowedHosts,
-    );
+    const parsed = parseAgentInput(await context.req.json().catch(() => null));
     if (!parsed.ok) return context.json({ error: parsed.error }, 400);
 
     try {
       /*
-       * A coworker with no address runs here, on the text this form already requires.
+       * The role description is what this coworker runs on.
        *
-       * "Agent endpoint (optional)" was not optional on the recommended one-container image: with
-       * nothing to bind to, `create` refused with "This deployment has no managed Bot", so a person
-       * could not make a coworker at all on the image the README tells them to deploy. The role
-       * description is what such a coworker runs on — the same field a `built_in` Bot in the tenant
-       * package carries, for the same purpose — and passing it only when no endpoint was given keeps
-       * every other path exactly as it was: give an address and it is a remote Bot, as before.
+       * It is passed on every create rather than only when no endpoint was given, because there is no
+       * longer a "given" case: this deployment has one engine and every coworker runs on it. The
+       * store decides what to write — the deployment's own AG-UI endpoint when it has one, and a
+       * `built_in` row carrying this prompt when it does not.
        */
       const agent = await store.create(context.var.actor, {
         ...parsed.value,
-        ...(parsed.value.endpoint
-          ? {}
-          : { systemPrompt: parsed.value.roleDescription }),
+        systemPrompt: parsed.value.roleDescription,
       });
       /*
-       * The endpoint, because that is where conversation content will be sent, and whether a key was
-       * attached, because "this Bot authenticates" is a fact and the key itself never is.
-       *
-       * And who may reach it. `visibility` is not a display preference: `accessFilter` admits a
-       * `public` coworker to every signed-in person, and `canRunAgent` is `canAccessAgent`, so public
-       * means everybody in the deployment may act as this Bot and spend the grants it holds. A row
-       * that cannot say which it was cannot reconstruct who could use this coworker at the time.
+       * And who may reach it. Strict per-user SaaS sandbox: every coworker is
+       * private to its owner (`accessFilter` admits only the owner's rows plus
+       * deployment system templates), and `canRunAgent` is `canAccessAgent`,
+       * so nothing one user makes is ever reachable by another. A row that
+       * cannot say which it was cannot reconstruct who could use this
+       * coworker at the time.
        */
       await record(context, "bot.created", agent.id, {
         name: parsed.value.name,
         visibility: parsed.value.visibility,
-        ...(parsed.value.endpoint ? { endpoint: parsed.value.endpoint } : {}),
-        hasKey: Boolean(parsed.value.auth),
       });
       return context.json({ agent: dto(context.var.actor, agent) }, 201);
     } catch (error) {
@@ -518,11 +408,7 @@ export function createAgentRoutes(
 
   routes.patch("/:agentId", requireUser, async (context) => {
     // Malformed JSON is a recoverable client-input error and is validated by the same parser.
-    const parsed = parseAgentInput(
-      await context.req.json().catch(() => null),
-      allowPrivateHosts,
-      allowedHosts,
-    );
+    const parsed = parseAgentInput(await context.req.json().catch(() => null));
     if (!parsed.ok) return context.json({ error: parsed.error }, 400);
 
     try {
@@ -532,11 +418,10 @@ export function createAgentRoutes(
         parsed.value,
       );
       /*
-       * What changed, not the new values. Repointing the endpoint is the dangerous edit and is worth
-       * naming; a replaced key is worth knowing about and is never worth recording.
+       * What changed, not the new values.
        *
        * `visibility` is carried the way `name` is — on every row, whether or not this edit moved it —
-       * because it is the second dangerous edit and the route has no before to compare against.
+       * because it is the dangerous edit and the route has no before to compare against.
        * Public admits every signed-in person to this coworker, and `canRunAgent` is `canAccessAgent`,
        * so it hands them the right to act as it and spend what it was granted. Without the value on
        * each row, an edit that opened a coworker to the whole deployment is byte-identical to one
@@ -547,8 +432,6 @@ export function createAgentRoutes(
       await record(context, "bot.updated", agent.id, {
         name: parsed.value.name,
         visibility: parsed.value.visibility,
-        ...(parsed.value.endpoint ? { endpoint: parsed.value.endpoint } : {}),
-        ...(parsed.value.auth ? { keyReplaced: true } : {}),
       });
       return context.json({ agent: dto(context.var.actor, agent) });
     } catch (error) {
@@ -565,8 +448,6 @@ export function createAgentRoutes(
         context.var.actor,
         context.req.param("agentId"),
       );
-      // Recorded against the copy, naming the original: a duplicate inherits an endpoint, so the
-      // reader needs to know a second Bot now points at it.
       await record(context, "bot.duplicated", agent.id, {
         copiedFrom: context.req.param("agentId"),
       });
@@ -686,8 +567,8 @@ export function createAgentRoutes(
       return context.json({
         handoff: {
           enabled: handoff?.enabled ?? false,
-          // Granting is an administrator's, the same as it is on every other grant.
-          canGrant: context.var.actor.role === "admin",
+          // Granting is the owner's: nobody may wire another person's Bot into their own.
+          canGrant: true,
           reachable: handoff ? await handoff.reachableFrom(agentId) : [],
           // Whether this Bot can hold such a grant at all; the write path refuses one that cannot,
           // and the screen should say so before a person flips switches that can only bounce.
@@ -723,20 +604,20 @@ function agentDto(actor: AgentActor, agent: AgentProfile) {
     title: agent.title,
     roleDescription: agent.roleDescription,
     avatarSeed: agent.avatarSeed,
+    // Null when nobody has chosen one, which the client resolves from `avatarSeed` rather than
+    // sending a guess back. Round-tripping a resolved mascot into this field on the next save would
+    // quietly convert every seeded agent into a chosen one, and the person's "reset to random" would
+    // stop working the first time they edited the name.
+    mascot: agent.mascot,
     visibility: agent.visibility,
     hidden: agent.hidden,
     systemOwned: agent.systemOwned,
-    // Published so the edit form can show it. Safe to expose: it is an address the person supplied,
-    // and any credential for it lives in the vault, never in this row.
-    endpoint: agent.endpoint,
-    hasAuth: agent.hasAuth,
-    // Whether one exists, never what it is.
-    hasCallbackToken: agent.hasCallbackToken,
     canManage: canManageAgent(actor, agent),
     // Ownership, kept separate from permission. `canManage` is also true for an administrator on
     // another user's coworker, so a roster that split "mine" on it would file other people's work
     // under yours, and only for administrators, who are the least likely to notice.
     mine: agent.ownerUserId === actor.id,
+    isSystemTemplate: agent.isSystemTemplate,
   };
 }
 

@@ -3,6 +3,7 @@ import type { RunAgentInput } from "@ag-ui/core";
 import { ChatAnthropic } from "@langchain/anthropic";
 import {
   AIMessage,
+  type BaseMessage,
   SystemMessage,
   ToolMessage,
 } from "@langchain/core/messages";
@@ -342,5 +343,169 @@ describe("a provider that takes one system prompt", () => {
         .slice(-3),
     ).toEqual(["Revenue rose 4%.", "system", "Again, shorter."]);
     expect(messages.filter((m) => m instanceof SystemMessage)).toHaveLength(4);
+  });
+});
+
+/**
+ * The repair walks the history instead of collecting ids from all of it.
+ *
+ * Gathering every `tool_call_id` that appears anywhere and calling a call
+ * answered when its id is in that set has no position, so a result sitting
+ * BEFORE the assistant message that declares the call marks it answered, nothing
+ * is written after it, and the provider rejects the request with
+ * "insufficient tool messages following tool_calls message". That is a hard 400
+ * on an ordinary follow-up, with nothing wrong in the transcript to explain it —
+ * a run cut short mid-loop and replayed puts the result ahead of the call.
+ */
+describe("tool results in the wrong place", () => {
+  const asked = {
+    role: "assistant",
+    content: "",
+    toolCalls: [
+      { id: "call_1", function: { name: "run_command", arguments: "{}" } },
+    ],
+  };
+  const result = (id: string, content: string) => ({
+    role: "tool",
+    toolCallId: id,
+    content,
+  });
+  const toolResults = (messages: ReturnType<typeof toLangChainMessages>) =>
+    messages
+      .filter(
+        (message): message is ToolMessage => message instanceof ToolMessage,
+      )
+      .map(
+        (message) => [message.tool_call_id, String(message.content)] as const,
+      );
+
+  /*
+   * The regression. Before the walk, `call_1` was in the set of answered ids
+   * because the result appeared first, so no closing message followed the
+   * assistant message and every later turn failed.
+   */
+  test("a result that arrives before the call still gets the call answered", () => {
+    const messages = toLangChainMessages(
+      input([
+        { role: "user", content: "go" },
+        result("call_1", "the real answer"),
+        asked,
+        { role: "user", content: "and now?" },
+      ]),
+    );
+
+    const answered = toolResults(messages).find(([id]) => id === "call_1");
+    expect(answered?.[1]).toBe(NO_ANSWER_CAME);
+
+    // And the shape the provider requires: the closing message directly after
+    // the assistant message that made the call.
+    const callAt = messages.findIndex(
+      (message) =>
+        message instanceof AIMessage &&
+        (message.tool_calls ?? []).some((call) => call.id === "call_1"),
+    );
+    expect(messages[callAt + 1]).toBeInstanceOf(ToolMessage);
+    expect((messages[callAt + 1] as ToolMessage).tool_call_id).toBe("call_1");
+  });
+
+  test("a run cut off mid-loop still ends with every call answered", () => {
+    // No result at all, and the history simply stops. The transcript looks
+    // normal; the provider rejects it.
+    const messages = toLangChainMessages(
+      input([
+        { role: "user", content: "audit the site" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "a", function: { name: "one", arguments: "{}" } },
+            { id: "b", function: { name: "two", arguments: "{}" } },
+          ],
+        },
+      ]),
+    );
+
+    const last = messages.at(-1);
+    expect(last).toBeInstanceOf(ToolMessage);
+    expect((last as ToolMessage).tool_call_id).toBe("b");
+    expect(toolResults(messages)).toEqual([
+      ["a", NO_ANSWER_CAME],
+      ["b", NO_ANSWER_CAME],
+    ]);
+  });
+
+  test("a person speaking closes the calls the turn left open", () => {
+    const messages = toLangChainMessages(
+      input([
+        { role: "user", content: "go" },
+        asked,
+        { role: "user", content: "never mind" },
+      ]),
+    );
+
+    expect(toolResults(messages)).toEqual([["call_1", NO_ANSWER_CAME]]);
+  });
+
+  test("parallel calls are answered in any order, and only once each", () => {
+    const parallel = {
+      role: "assistant",
+      content: "",
+      toolCalls: [
+        { id: "first", function: { name: "a", arguments: "{}" } },
+        { id: "second", function: { name: "b", arguments: "{}" } },
+      ],
+    };
+    const messages = toLangChainMessages(
+      input([parallel, result("second", "two"), result("first", "one")]),
+    );
+
+    // Real answers, not invented ones, and one result per call.
+    expect(toolResults(messages)).toEqual([
+      ["second", "two"],
+      ["first", "one"],
+    ]);
+  });
+
+  test("a duplicated result is dropped rather than replayed", () => {
+    const messages = toLangChainMessages(
+      input([asked, result("call_1", "real"), result("call_1", "real")]),
+    );
+
+    expect(toolResults(messages)).toEqual([["call_1", "real"]]);
+  });
+
+  test("a result for a call that was never made is dropped", () => {
+    const messages = toLangChainMessages(
+      input([{ role: "user", content: "go" }, result("never_asked", "stray")]),
+    );
+
+    expect(toolResults(messages)).toEqual([]);
+  });
+
+  test("a call with no id is still answered", () => {
+    // Nothing to match a result against, so it has to be named here or it
+    // reaches the provider unanswered and fails the whole run.
+    const messages = toLangChainMessages(
+      input([
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ function: { name: "nameless", arguments: "{}" } }],
+        },
+      ]),
+    );
+
+    const call = messages.find(
+      (message) =>
+        message instanceof AIMessage && (message.tool_calls ?? []).length > 0,
+    ) as AIMessage | undefined;
+    const id = call?.tool_calls?.[0]?.id;
+    expect(typeof id).toBe("string");
+    expect(id).toBeTruthy();
+    // Answered in the position the provider requires, which is not last: a
+    // history with no human turn gets a continuation turn appended.
+    const callAt = messages.indexOf(call as BaseMessage);
+    expect(messages[callAt + 1]).toBeInstanceOf(ToolMessage);
+    expect((messages[callAt + 1] as ToolMessage).tool_call_id).toBe(id);
   });
 });

@@ -25,8 +25,14 @@ function manifest(path: string) {
 const rootManifest = manifest(".");
 const workspaces = rootManifest.workspaces ?? [];
 
-/** Packages with their own manifest that the root install does not reach. */
-const OUTSIDE_THE_WORKSPACES = ["agent-computer", "supervisor"] as const;
+/**
+ * Packages with their own manifest that the root install does not reach.
+ *
+ * `agent-computer` and `supervisor` used to be here and are gone: the first was the Chromium, and
+ * the second started one container per Bot to run it. `agent-bot` and `agent-langgraph` are the two
+ * that remain, and this is the coverage that says a fresh clone can load their tests.
+ */
+const OUTSIDE_THE_WORKSPACES = ["agent-bot", "agent-langgraph"] as const;
 
 describe("a clone that has only run bun install", () => {
   test.each(OUTSIDE_THE_WORKSPACES)(

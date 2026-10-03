@@ -102,20 +102,28 @@ describe("screenPickedFiles", () => {
     expect(result.rejected[0].reason).toMatch(/too large|larger than/);
   });
 
-  test("a claim that names a format it does not accept is still refused here", () => {
-    // The fall-through is only for claims that name NOTHING. `application/zip` names a format, and
-    // `sniffMimeType` hands that name straight back for the server to refuse by name, so refusing
-    // it at pick time is the two halves agreeing rather than disagreeing.
+  test("a file whose type the app does not know is kept, because it can still be handed back", () => {
+    /*
+     * THE DEFAULT IS NO LONGER A REFUSAL, AND THIS IS THE CASE THAT CHANGED.
+     *
+     * A `.zip` used to be turned away here with "not a file type this chat accepts", on the
+     * reasoning that `sniffMimeType` hands a named claim straight back for the server to refuse.
+     * The app now stores and serves files whose format it cannot read, so a zip is `binary`: not
+     * previewed, not read, and offered back whole. Refusing it would refuse a file the app is
+     * perfectly able to keep.
+     */
     const zip = file("archive.zip", "application/zip");
     const result = screenPickedFiles([zip], { alreadyStaged: 0 });
 
-    expect(result.accepted).toEqual([]);
-    expect(result.rejected).toHaveLength(1);
+    expect(result.rejected).toEqual([]);
+    expect(result.accepted).toEqual([zip]);
   });
 
-  test("rejects an unsupported file type with a reason distinct from the SVG one", () => {
-    const zip = file("archive.zip", "application/zip");
-    const result = screenPickedFiles([zip], { alreadyStaged: 0 });
+  test("markup a browser would execute is still refused, and not with the SVG reason", () => {
+    // The types that stay refused are the ones serving them inline would be unsafe, and the reason
+    // a person is shown must distinguish "this format can run" from "this is an SVG".
+    const html = file("page.html", "text/html");
+    const result = screenPickedFiles([html], { alreadyStaged: 0 });
 
     expect(result.accepted).toEqual([]);
     expect(result.rejected[0].reason).not.toMatch(/SVG/);
@@ -123,12 +131,12 @@ describe("screenPickedFiles", () => {
 
   test("reports one rejection per bad file, each naming its own file", () => {
     const svg = file("a.svg", "image/svg+xml");
-    const zip = file("b.zip", "application/zip");
-    const result = screenPickedFiles([svg, zip], { alreadyStaged: 0 });
+    const html = file("b.html", "text/html");
+    const result = screenPickedFiles([svg, html], { alreadyStaged: 0 });
 
     expect(result.rejected).toHaveLength(2);
     expect(result.rejected[0].name).toBe("a.svg");
-    expect(result.rejected[1].name).toBe("b.zip");
+    expect(result.rejected[1].name).toBe("b.html");
   });
 
   test("counts the cap after kind and size, against already-staged files", () => {

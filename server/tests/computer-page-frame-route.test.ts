@@ -19,7 +19,7 @@ import { createComputerRoutes } from "../src/computer/routes";
 
 const actor: AuthenticatedActor = {
   id: "user-1",
-  email: "member@openbot.test",
+  email: "member@remii.test",
   role: "user",
 };
 
@@ -45,6 +45,13 @@ function harness(options?: {
   }> = [];
   const gateway = {
     provider: { isolation: options?.isolation ?? "per-bot" },
+    /*
+     * The (user, Bot) key the frame is filed under, and the real gateway resolves it rather than
+     * assuming the Bot id is it. Without it `keepFrameOf` throws inside its own try, the throw is
+     * caught and logged as "could not keep a frame of ...", and every assertion here — including the
+     * ones that never mention a frame — reported an empty store rather than a missing stub.
+     */
+    keyOf: async () => "bot-9",
     navigate:
       options?.navigate ??
       (async () => ({
@@ -101,7 +108,7 @@ function navigate(
   // `null` means "send no turn at all". `undefined` would take the default, which is the opposite.
   toolCallId: string | null = "call-1",
 ) {
-  return routes.request("http://openbot.test/bot-9/navigate", {
+  return routes.request("http://remii.test/bot-9/navigate", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ url, ...(toolCallId ? { toolCallId } : {}) }),
@@ -153,7 +160,7 @@ describe("the frame a page was opened on", () => {
     await navigate(routes, "https://example.com/story");
 
     const response = await routes.request(
-      "http://openbot.test/bot-9/page-frame/call-1",
+      "http://remii.test/bot-9/page-frame/call-1",
     );
 
     expect(await response.json()).toEqual({
@@ -169,7 +176,7 @@ describe("the frame a page was opened on", () => {
     const { routes } = harness();
 
     const response = await routes.request(
-      "http://openbot.test/bot-9/page-frame/call-never",
+      "http://remii.test/bot-9/page-frame/call-never",
     );
 
     expect(await response.json()).toEqual({ frame: null });
@@ -301,7 +308,7 @@ describe("the frame a page was opened on", () => {
     );
     expect(
       await (
-        await routes.request("http://openbot.test/bot-9/page-frame/call-1")
+        await routes.request("http://remii.test/bot-9/page-frame/call-1")
       ).json(),
     ).toEqual({ frame: null });
   });

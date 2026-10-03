@@ -46,11 +46,7 @@ type AlreadyConfigured = {
 };
 
 function installationKeyFor(root: string, harness: HarnessChoice | null) {
-  return JSON.stringify([
-    root.trim(),
-    harness?.id ?? DEFAULT_HARNESS,
-    harness?.agentUrl?.trim() ?? "",
-  ]);
+  return JSON.stringify([root.trim(), harness?.id ?? DEFAULT_HARNESS]);
 }
 
 const MANAGED_INTELLIGENCE_API_URL = "https://api.intelligence.copilotkit.ai";
@@ -307,7 +303,7 @@ export function App() {
           )
         ) {
           // Already up from a previous window: show it, rather than a screen about it.
-          await invoke("show_openbot");
+          await invoke("show_remii");
           setRunning(true);
           return;
         }
@@ -345,7 +341,7 @@ export function App() {
           if (!active) return;
           setRunning(true);
           setRecoveryFailure(null);
-          await invoke("show_openbot");
+          await invoke("show_remii");
         } catch (error) {
           if (active) setRecoveryFailure(asProblem(error));
         } finally {
@@ -422,7 +418,7 @@ export function App() {
       /*
        * One screen short of the handover, on purpose.
        *
-       * The window used to become OpenBot here, the moment the stack was up. But up is not the
+       * The window used to become Remii here, the moment the stack was up. But up is not the
        * same as working: a refused key or a lapsed plan gives a stack that starts clean and a Bot
        * that cannot answer, and handing over at this point means somebody discovers that inside
        * the product with no idea which of their answers caused it. So the last screen asks a
@@ -449,6 +445,18 @@ export function App() {
         Boolean(model.model?.trim())
       );
     }
+    /*
+     * BOTH SUBSCRIPTION PROVIDERS, AND THE REASON MATTERS.
+     *
+     * This read `model.provider !== "openai"` while the picker has been able to produce
+     * `{ provider: "anthropic", saved: true }` since Claude plan and API-key sign-in landed. So a
+     * SAVED Claude credential left Start disabled: the button was greyed out, permanently, with
+     * nothing on screen explaining why, and the only way out was to sign in again from scratch —
+     * which is the opposite of what a saved credential is for.
+     *
+     * A fresh (unsaved) choice was unaffected, which is why this presented as "saved sessions are
+     * broken on Claude" rather than as "Claude cannot start".
+     */
     if (model.provider !== "openai" && model.provider !== "anthropic") {
       return false;
     }
@@ -487,7 +495,7 @@ export function App() {
   if (blockerFailure) {
     return (
       <main>
-        <h1>OpenBot could not check Windows setup</h1>
+        <h1>Remii could not check Windows setup</h1>
         <Failure problem={blockerFailure} />
       </main>
     );
@@ -496,7 +504,7 @@ export function App() {
   if (blocker) {
     return (
       <main>
-        <h1>OpenBot needs one thing first</h1>
+        <h1>Remii needs one thing first</h1>
         <div className="blocker">
           <h2>{titleFor(blocker)}</h2>
           <p>{instruction}</p>
@@ -508,7 +516,7 @@ export function App() {
   if (resuming || checkingResume) {
     return (
       <main>
-        <h1>{resuming ? "Starting OpenBot" : "Opening OpenBot"}</h1>
+        <h1>{resuming ? "Starting Remii" : "Opening Remii"}</h1>
         <p role="status">
           {resuming
             ? "Opening your saved setup…"
@@ -523,7 +531,7 @@ export function App() {
    * Install local software before showing either sign-in. A completed installation is retained
    * while somebody changes or retries their connection; changing its folder or Bot invalidates it.
    *
-   * Skipped entirely when a stack is already up: somebody returning to a running OpenBot is not
+   * Skipped entirely when a stack is already up: somebody returning to a running Remii is not
    * setting one up, and asking them to pick a Bot again would be the wizard asking twice.
    */
   if (!running && step === "welcome") {
@@ -541,10 +549,7 @@ export function App() {
         <HarnessPicker
           chosen={harness}
           onChoose={(choice) => {
-            if (
-              choice.id !== harness?.id ||
-              choice.agentUrl !== harness?.agentUrl
-            ) {
+            if (choice.id !== harness?.id) {
               setPreparation(null);
               setSteps([]);
             }
@@ -553,11 +558,6 @@ export function App() {
           onContinue={() => {
             recordSetupEvent(
               harnessChoiceEvent(harness?.id ?? DEFAULT_HARNESS),
-            );
-            setHarness((choice) =>
-              choice?.id === "byo-url"
-                ? { ...choice, agentUrl: choice.agentUrl?.trim() }
-                : choice,
             );
             setStep("install");
           }}
@@ -573,12 +573,12 @@ export function App() {
         <div className="sheet">
           <p className="steps-of">Step 2 of 4</p>
           <h1>
-            {installationReady ? "Installation complete" : "Install OpenBot"}
+            {installationReady ? "Installation complete" : "Install Remii"}
           </h1>
           <p className="lede">
             {installationReady
-              ? "OpenBot’s local software is ready. Next, connect your AI and CopilotKit accounts."
-              : "Install the software OpenBot needs on this computer. This can take a few minutes. You’ll sign in after installation finishes."}
+              ? "Remii’s local software is ready. Next, connect your AI and CopilotKit accounts."
+              : "Install the software Remii needs on this computer. This can take a few minutes. You’ll sign in after installation finishes."}
           </p>
           {!installationReady && engine?.responding && (
             <p className="footnote">
@@ -587,7 +587,7 @@ export function App() {
             </p>
           )}
           <div className="field">
-            <label htmlFor="root">Where OpenBot lives</label>
+            <label htmlFor="root">Where Remii lives</label>
             <input
               id="root"
               disabled={busy}
@@ -641,7 +641,7 @@ export function App() {
                   ? "Installing…"
                   : preparation?.status === "failed"
                     ? "Retry installation"
-                    : "Install OpenBot"}
+                    : "Install Remii"}
               </button>
             )}
           </div>
@@ -664,7 +664,7 @@ export function App() {
             invoke<string>("ask_the_bot", { root, question })
           }
           onOpen={() => {
-            invoke("show_openbot").catch((error) =>
+            invoke("show_remii").catch((error) =>
               setFailure(asProblem(error)),
             );
           }}
@@ -704,13 +704,13 @@ export function App() {
       {!running && <p className="steps-of">Step 4 of 4</p>}
       <h1>
         {running && !displayedFailure
-          ? "OpenBot is running"
+          ? "Remii is running"
           : "Connect to CopilotKit"}
       </h1>
       <p className="lede">
         {running && !displayedFailure
-          ? "The stack is up. OpenBot is in this window; the menu bar has it too, and stops it."
-          : "Local installation is complete. Connect CopilotKit, then start OpenBot."}
+          ? "The stack is up. Remii is in this window; the menu bar has it too, and stops it."
+          : "Local installation is complete. Connect CopilotKit, then start Remii."}
       </p>
 
       {!running && (
@@ -723,7 +723,7 @@ export function App() {
 
             This screen used to ask for a key whose only source was two terminal commands, which is
             the one thing the audience rule forbids. Somebody on managed CopilotKit now signs in and
-            OpenBot creates the key for the project they pick. Somebody running their own
+            Remii creates the key for the project they pick. Somebody running their own
             Intelligence has a key this sign-in knows nothing about, so the field moves down there
             with the addresses it belongs with.
           */}
@@ -759,7 +759,7 @@ export function App() {
             </>
           ) : projects ? (
             <>
-              <p className="lede">Which project should OpenBot use?</p>
+              <p className="lede">Which project should Remii use?</p>
               <fieldset className="picker">
                 <legend className="sr-only">Project</legend>
                 {projects.map((project) => (
@@ -794,7 +794,7 @@ export function App() {
           ) : (
             <>
               <p className="lede">
-                OpenBot keeps your conversations in CopilotKit. Sign in and it
+                Remii keeps your conversations in CopilotKit. Sign in and it
                 sets the rest up for you.
               </p>
               <button
@@ -903,19 +903,19 @@ export function App() {
               /*
                * The refusal is shown, not swallowed.
                *
-               * `show_openbot` answers with "OpenBot is not answering on port 3010 yet, so there
+               * `show_remii` answers with "Remii is not answering on port 3010 yet, so there
                * is nothing to show" when the app host process is not up, and this button dropped
-               * it on the floor. Clicking it then did nothing at all, on a screen headed "OpenBot
+               * it on the floor. Clicking it then did nothing at all, on a screen headed "Remii
                * is running", which is the worst of both: a true sentence was available and the
                * window threw it away. The Ask screen's copy of this call always showed it.
                */
               onClick={() =>
-                invoke("show_openbot").catch((error) =>
+                invoke("show_remii").catch((error) =>
                   setFailure(asProblem(error)),
                 )
               }
             >
-              Show OpenBot
+              Show Remii
             </button>
             <button
               type="button"
@@ -923,7 +923,7 @@ export function App() {
               onClick={stop}
               disabled={busy}
             >
-              Stop OpenBot
+              Stop Remii
             </button>
           </>
         ) : (
@@ -942,7 +942,7 @@ export function App() {
               root.trim() === ""
             }
           >
-            {busy ? "Working…" : "Start OpenBot"}
+            {busy ? "Working…" : "Start Remii"}
           </button>
         )}
       </div>

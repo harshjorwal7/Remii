@@ -34,7 +34,7 @@ const TOKEN_PREFIX = "obot_agt_";
 const TOKEN_BYTES = 32;
 
 /** Signed under its own label, so a signature here can never be replayed as a visitor's cookie. */
-const RUN_LABEL = "openbot:agent-run";
+const RUN_LABEL = "remii:agent-run";
 
 /**
  * How long an assertion is good for.
@@ -103,6 +103,20 @@ export type RunAssertion = {
    * Optional on the way in so an assertion minted before this existed still reads, and read as zero.
    */
   depth?: number;
+  /**
+   * The run that handed work to this one, when this run began as a delegation.
+   *
+   * IT TRAVELS HERE FOR THE SAME REASON `depth` DOES, and with the same property that makes it worth
+   * trusting: a hop runs on another pod, so nothing in this process held the asking run, and a chain
+   * assembled from memory would be assembled from whichever hop happened to land here. The signed
+   * assertion is the one statement of a run that crosses every boundary the run itself crosses.
+   *
+   * It is what turns a list of runs into a chain. `depth` says how far down a run is; this says which
+   * run handed to it, and so "what did Remii do, and to whom" is a walk rather than a guess.
+   *
+   * Optional, and absent on a run a person started — which is exactly the root of every chain.
+   */
+  parentRunId?: string;
   /**
    * What started this run, for the audit rows written by whoever holds the assertion.
    *
@@ -213,7 +227,13 @@ function readInitiator(value: unknown): AuditInitiator {
 }
 
 export type CallVerdict =
-  | { ok: true; botId: string; actorId: string; initiator?: AuditInitiator }
+  | {
+      ok: true;
+      botId: string;
+      actorId: string;
+      initiator?: AuditInitiator;
+      threadId?: string;
+    }
   | { ok: false; status: 401 | 403; reason: string };
 
 /**
@@ -287,7 +307,7 @@ export function parseAgentToolCallInput(
  * an agent may only act as the Bot its token was issued for. Everything unclear is a refusal.
  */
 export async function authoriseAgentCall(options: {
-  /** The `x-openbot-agent-token` header, as presented. */
+  /** The `x-remii-agent-token` header, as presented. */
   presented: string;
   /** The `run` field from the body, as presented. */
   run: unknown;
@@ -344,5 +364,6 @@ export async function authoriseAgentCall(options: {
     botId: assertion.botId,
     actorId: assertion.actorId,
     initiator: assertion.initiator,
+    ...(assertion.threadId ? { threadId: assertion.threadId } : {}),
   };
 }

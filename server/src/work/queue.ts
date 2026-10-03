@@ -15,7 +15,7 @@
  * Postgres considered expired on arrival, and the next replica to look took the item straight out
  * from under the first. Both then ran it. Every time this file names a moment it names it in SQL.
  */
-import { and, eq, gte, isNull, like, lt, or, sql } from "drizzle-orm";
+import { and, eq, gt, gte, isNull, like, lt, or, sql } from "drizzle-orm";
 import postgres from "postgres";
 import type { Database } from "../db/client";
 import { workItems } from "../db/schema";
@@ -27,7 +27,7 @@ import { workItems } from "../db/schema";
  * all, and the queue stays the truth either way. A notification is a latency optimisation, never
  * a delivery mechanism — one lost in transit costs up to one poll interval, not the work.
  */
-export const WORK_OFFERED_TOPIC = "openbot_work_offered";
+export const WORK_OFFERED_TOPIC = "remii_work_offered";
 
 /** Inside the offering transaction where there is one, so it fires on commit and never before. */
 const announceOffered = (db: Pick<Database, "execute">, kind: string) =>
@@ -124,12 +124,21 @@ export type WorkQueue = {
     limit?: number;
     maxAttempts?: number;
   }) => Promise<WorkItem[]>;
-  /** Keep a claim alive while the work runs. False means it was already taken away. */
+  /**
+   * Keep a claim alive while the work runs. False means it was already taken away.
+   *
+   * `live` narrows the question from "is this still written as mine" to "is this still MINE TO RUN",
+   * which are different while nobody has claimed it yet. A replica paused past its lease still finds
+   * its own name in `claimed_by` until somebody else claims the item, so the plain answer is `true`
+   * for a claim that has in fact lapsed — and a caller that treats that as permission to start
+   * expensive work runs it a second time on top of the replica that has meanwhile taken it.
+   */
   renew: (input: {
     kind: string;
     key: string;
     owner: string;
     leaseMs: number;
+    live?: boolean;
   }) => Promise<boolean>;
   /**
    * Done. False means the lease had already gone to somebody else, so this was not ours to finish.
@@ -199,6 +208,20 @@ export function createWorkQueue(database: Database): WorkQueue {
       eq(workItems.claimedBy, owner),
       isNull(workItems.finishedAt),
     );
+
+  /*
+   * Ours AND not yet lapsed.
+   *
+   * Kept separate from `ours` on purpose. `finish` and `release` must stay lenient: a worker whose
+   * lease lapsed while it was finishing still has to be able to close out its own item, and refusing
+   * there would strand the row until `purge`. Only the question "may I start or continue this?"
+   * needs the lease to still be running, and only that question asks for this.
+   *
+   * The database's clock, as everywhere else in this file, because a lease compared against a
+   * different machine's `now()` is not a lease.
+   */
+  const liveOurs = (kind: string, key: string, owner: string) =>
+    and(ours(kind, key, owner), gt(workItems.leaseUntil, sql`now()`));
 
   return {
     async offer({ kind, key, payload = {}, runAt, atMost }) {
@@ -331,7 +354,7 @@ export function createWorkQueue(database: Database): WorkQueue {
       });
     },
 
-    async renew({ kind, key, owner, leaseMs }) {
+    async renew({ kind, key, owner, leaseMs, live }) {
       const [renewed] = await database
         .update(workItems)
         .set({ leaseUntil: fromNow(leaseMs), updatedAt: sql`now()` })
@@ -339,8 +362,12 @@ export function createWorkQueue(database: Database): WorkQueue {
          * Only while still ours. A lease that expired and was taken by somebody else must not be
          * renewed back out from under them, which would put two replicas on one item believing they
          * each held it.
+         *
+         * `live` adds the half that decides whether this caller may go on to DO the work rather than
+         * merely close out the row: a claim whose lease has already run out is nobody's to execute,
+         * however the `claimed_by` column still reads.
          */
-        .where(ours(kind, key, owner))
+        .where(live ? liveOurs(kind, key, owner) : ours(kind, key, owner))
         .returning({ key: workItems.key });
       return Boolean(renewed);
     },

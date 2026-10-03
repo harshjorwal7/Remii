@@ -10,6 +10,7 @@ import {
   agentKeys,
   agentListQueryOptions,
 } from "@/lib/agents/queries";
+import { currentUserQueryOptions } from "@/lib/auth/queries";
 import { tryClient } from "@/lib/client";
 import { useActiveBot } from "@/lib/copilot/active-bot";
 import { useBotThread } from "@/lib/copilot/bot-thread";
@@ -28,7 +29,7 @@ export const Route = createFileRoute("/_authed/_app/bot")({
  * WHATEVER THIS DEPLOYMENT ACTUALLY HAS. The default used to be a hardcoded `risk-analyst`, a name
  * from a tenant package this one is not: on a clone that ships anything else, opening this screen
  * without naming a Bot took the whole page down to an unstyled error boundary, because the chat
- * throws when asked for an agent the runtime never synced. OpenBot exists to be forked, so a Bot
+ * throws when asked for an agent the runtime never synced. Remii exists to be forked, so a Bot
  * name written into a route is a defect on every fork but the one it came from.
  *
  * A named Bot that this deployment does not have is answered in a sentence rather than thrown,
@@ -89,9 +90,17 @@ function RouteComponent() {
   const known = bot !== undefined;
 
   if (isPending || (shouldLoadExplicitBot && isDetailPending)) return null;
+  /*
+   * `h-svh`, NOT `h-screen`, ON EVERY BRANCH BELOW AND ON THE MAIN RETURN.
+   *
+   * The shell this screen renders inside is `h-svh overflow-hidden` (`_app.tsx`). `h-screen` is
+   * 100vh, which on a mobile browser is taller than the visible area by the height of the browser
+   * chrome — so the overflow was clipped by the shell rather than scrolled, and the composer at the
+   * bottom of the page was unreachable. Every sibling screen in this shell uses `h-svh`.
+   */
   if (isError && agents === undefined) {
     return (
-      <div className="flex h-screen items-center justify-center p-6">
+      <div className="flex h-svh items-center justify-center p-6">
         <p className="text-destructive text-sm" role="alert">
           Bots couldn't be loaded.
         </p>
@@ -100,7 +109,7 @@ function RouteComponent() {
   }
   if (shouldLoadExplicitBot && isDetailError) {
     return (
-      <div className="flex h-screen items-center justify-center p-6">
+      <div className="flex h-svh items-center justify-center p-6">
         <p className="text-destructive text-sm" role="alert">
           Bot couldn't be loaded.
         </p>
@@ -109,7 +118,7 @@ function RouteComponent() {
   }
   if (!agentId || !known) {
     return (
-      <div className="flex h-screen items-center justify-center p-6">
+      <div className="flex h-svh items-center justify-center p-6">
         <p className="text-muted-foreground text-sm">
           {agent
             ? `This deployment has no Bot called "${agent}".`
@@ -127,6 +136,7 @@ function RouteComponent() {
 }
 
 function BotChat({ agentId, name }: { agentId: string; name: string }) {
+  const { data: currentUser } = useQuery(currentUserQueryOptions());
   // Tool calls here act on this Bot's own computer.
   useActiveBot(agentId);
   /*
@@ -136,7 +146,10 @@ function BotChat({ agentId, name }: { agentId: string; name: string }) {
    * page can say so instead of letting the Bot answer as if nothing were missing. `startNew`
    * mints another fresh thread on demand for the New chat control below.
    */
-  const { threadId, history, startNew } = useBotThread(agentId);
+  const { threadId, history, startNew } = useBotThread(
+    agentId,
+    currentUser?.id,
+  );
   /*
    * A turn that ends without an answer has to be said out loud here, because the packaged chat says
    * nothing. It reports a failed run to an `onError` prop and otherwise carries on as though the
@@ -147,7 +160,7 @@ function BotChat({ agentId, name }: { agentId: string; name: string }) {
   const stopped = useStoppedTurn(agentId);
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-svh flex-col">
       <SidebarToggleBar />
       <header className="border-b px-6 py-3">
         <div className="flex items-baseline justify-between">

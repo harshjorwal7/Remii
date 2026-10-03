@@ -78,8 +78,11 @@ export type Selection<Tool extends SelectableTool> = {
  * Twelve because the reported knee is ten to fifteen and the cost of being slightly under it is
  * nothing, while the cost of being over it is a wrong tool call nobody sees. This is a template's
  * default, not a law: a deployment that measures its own knee somewhere else should move it.
+ *
+ * SaaS mode runs it at 64: modern models choose well from a few dozen tools, and every run under
+ * the floor skips pass one entirely — one fewer model round trip before the Bot starts working.
  */
-export const SELECTION_FLOOR = 12;
+export const SELECTION_FLOOR = 64;
 
 /**
  * What pass one is asked, given the message and the skills the Bot holds.

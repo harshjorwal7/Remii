@@ -16,14 +16,26 @@ import type { AuthProviderId } from "@/lib/auth/queries";
  * All three are drawn into the same 18x18 box so the buttons line up. Google's G is not square, so
  * it is centred in the box rather than stretched to fill it.
  */
-export function ProviderLogo({ provider }: { provider: AuthProviderId }) {
-  if (provider === "google") return <GoogleMark />;
-  if (provider === "microsoft") return <MicrosoftMark />;
-  return <OktaMark />;
+export function ProviderLogo({
+  dataIcon,
+  provider,
+}: {
+  /**
+   * Forwarded to the mark itself rather than wrapped: the Button primitive keys its asymmetric
+   * padding off a descendant carrying `data-icon`, and an unsized `<svg>` inside it is already what
+   * that rule inspects, so wrapping would hide it.
+   */
+  dataIcon?: string;
+  provider: AuthProviderId;
+}) {
+  const attrs = dataIcon === undefined ? {} : { "data-icon": dataIcon };
+  if (provider === "google") return <GoogleMark {...attrs} />;
+  if (provider === "microsoft") return <MicrosoftMark {...attrs} />;
+  return <OktaMark {...attrs} />;
 }
 
 /** Google's four-colour G, at the published path and colours. */
-function GoogleMark() {
+function GoogleMark(attrs: Record<string, string> = {}) {
   return (
     <svg
       aria-hidden="true"
@@ -31,6 +43,7 @@ function GoogleMark() {
       focusable="false"
       viewBox="0 0 48 48"
       xmlns="http://www.w3.org/2000/svg"
+      {...attrs}
     >
       <path
         d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z"
@@ -53,7 +66,7 @@ function GoogleMark() {
 }
 
 /** Microsoft's four squares, at their published colours. */
-function MicrosoftMark() {
+function MicrosoftMark(attrs: Record<string, string> = {}) {
   return (
     <svg
       aria-hidden="true"
@@ -61,6 +74,7 @@ function MicrosoftMark() {
       focusable="false"
       viewBox="0 0 23 23"
       xmlns="http://www.w3.org/2000/svg"
+      {...attrs}
     >
       <path d="M1 1h10v10H1z" fill="#F25022" />
       <path d="M12 1h10v10H12z" fill="#7FBA00" />
@@ -78,7 +92,7 @@ function MicrosoftMark() {
  * company running this deployment happens to use, and their guidelines allow a monochrome mark. It
  * also means it stays legible in both themes without a second asset.
  */
-function OktaMark() {
+function OktaMark(attrs: Record<string, string> = {}) {
   return (
     <svg
       aria-hidden="true"
@@ -86,6 +100,7 @@ function OktaMark() {
       focusable="false"
       viewBox="0 0 24 24"
       xmlns="http://www.w3.org/2000/svg"
+      {...attrs}
     >
       <path
         d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 15a5 5 0 1 1 0-10 5 5 0 0 1 0 10z"

@@ -10,13 +10,13 @@ mod desktop_telemetry;
 #[cfg(test)]
 mod test_support;
 
-use openbot_desktop_lib::{
-    acquire, deployment, deployment_release, engine, env as openbot_env, harness, host_access,
+use remii_desktop_lib::{
+    acquire, deployment, deployment_release, engine, env as remii_env, harness, host_access,
     install, preparation, problem::Problem, provider, pull_metrics, quiet, stack, supervise,
     telemetry, tray, windows as win,
 };
 
-const QUIT_CLEANUP_NOTICE_FILE: &str = ".openbot-quit-cleanup-notice";
+const QUIT_CLEANUP_NOTICE_FILE: &str = ".remii-quit-cleanup-notice";
 const QUIT_MENU_ACCELERATOR: &str = "CmdOrCtrl+KeyQ";
 const QUIT_CLEANUP_NOTICE_LIMIT: usize = 16 * 1024;
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,7 @@ struct Shell {
     /// Going back to the setup screen is a navigation, and a navigation is a fresh page: React
     /// remounts with no progress and the sentence explaining what happened is lost at the one
     /// moment it is worth reading. Held here instead, and asked for on load.
-    last_failure: Mutex<Option<openbot_desktop_lib::problem::Problem>>,
+    last_failure: Mutex<Option<remii_desktop_lib::problem::Problem>>,
     /// Reading the notification must not make a partially running deployment adoptable again.
     recovery_required: Mutex<Option<RecoveryRequired>>,
     selected_root: Mutex<Option<PathBuf>>,
@@ -64,20 +64,20 @@ struct Shell {
     stopped_container_root: Mutex<Option<PathBuf>>,
     /// An Intelligence sign-in waiting for its loopback callback.
     signing_in_to_intelligence:
-        Mutex<Option<openbot_desktop_lib::intelligence::SigningInToIntelligence>>,
+        Mutex<Option<remii_desktop_lib::intelligence::SigningInToIntelligence>>,
     /// The credential that sign-in produced, held so a project can be chosen with it.
     intelligence_credential: Mutex<Option<String>>,
     /// A ChatGPT sign-in waiting for the browser redirect to complete it.
     ///
     /// Held for the same reason the Claude one is: a person leaves and comes back in the middle.
     /// Unlike that one, nothing is typed here — the callback finishes it.
-    signing_in_to_chatgpt: Mutex<Option<openbot_desktop_lib::plan::SigningInToChatGpt>>,
+    signing_in_to_chatgpt: Mutex<Option<remii_desktop_lib::plan::SigningInToChatGpt>>,
     /// A plan sign-in waiting for the code from the browser.
     ///
     /// Held across two commands because a person has to leave and approve in the middle of it, and
     /// the flow that showed the URL is the only one that can redeem the code: each start mints its
     /// own PKCE challenge and state, so a second start invalidates the first.
-    signing_in: Mutex<Option<openbot_desktop_lib::plan::SigningIn>>,
+    signing_in: Mutex<Option<remii_desktop_lib::plan::SigningIn>>,
     /// The configured setup destination, resolved using Tauri's build mode and platform.
     /// WebView2's current URL can still be about:blank during startup; it is never a setup source.
     setup_url: Mutex<Option<String>>,
@@ -143,7 +143,7 @@ impl<'a> StartAttempt<'a> {
     fn begin(shell: &'a Shell) -> Result<Self, Problem> {
         use std::sync::atomic::Ordering::SeqCst;
         shell.starting.compare_exchange(false, true, SeqCst, SeqCst).map_err(|_| {
-            Problem::plain("OpenBot is already starting or finishing a cancelled startup. Wait for it to finish, then try again.")
+            Problem::plain("Remii is already starting or finishing a cancelled startup. Wait for it to finish, then try again.")
         })?;
         Ok(Self {
             shell,
@@ -171,7 +171,7 @@ impl<'a> StartAttempt<'a> {
     }
 
     fn cancelled() -> Problem {
-        Problem::plain("OpenBot startup was cancelled by Stop. Start again when you are ready.")
+        Problem::plain("Remii startup was cancelled by Stop. Start again when you are ready.")
     }
 }
 
@@ -211,7 +211,7 @@ struct SavedConfiguration {
     intelligence_api_key: Option<bool>,
     model_api_keys: SavedModelApiKeys,
     model_sessions: SavedModelSessions,
-    model: Option<openbot_desktop_lib::saved_intent::ModelIntent>,
+    model: Option<remii_desktop_lib::saved_intent::ModelIntent>,
 }
 
 #[derive(Serialize)]
@@ -254,9 +254,9 @@ fn ready_responding_engine_after_compose_repair(
     let Some(address) = ready.address.clone().filter(|_| ready.responding) else {
         return Err(Problem::with(
             if install_missing_native {
-                "OpenBot installed the container software, but the engine is not answering. Try again."
+                "Remii installed the container software, but the engine is not answering. Try again."
             } else {
-                "OpenBot installed Compose, but the container engine is not answering. Try again."
+                "Remii installed Compose, but the container engine is not answering. Try again."
             },
             ready.detail,
         ));
@@ -396,7 +396,7 @@ async fn prepare_installation(
             let _startup = attempt.lock_current()?;
             if shell.containers.lock().unwrap().is_some() || shell.root.lock().unwrap().is_some() {
                 return Err(Problem::plain(
-                    "Stop OpenBot before changing its local installation.",
+                    "Stop Remii before changing its local installation.",
                 ));
             }
             remember_selected_root(&shell, &root);
@@ -442,8 +442,8 @@ async fn prepare_installation(
             .is_some();
         let mut images = stack::installation_images(&address, &root, installed, &settings)?;
         for published in [
-            openbot_desktop_lib::plan::SIGN_IN_IMAGE,
-            openbot_desktop_lib::plan::CHATGPT_SIGN_IN_IMAGE,
+            remii_desktop_lib::plan::SIGN_IN_IMAGE,
+            remii_desktop_lib::plan::CHATGPT_SIGN_IN_IMAGE,
         ] {
             images.push(deployment::reference(&root, published)?);
         }
@@ -507,7 +507,7 @@ async fn engine_ready(app: &tauri::AppHandle) -> Result<engine::Address, Problem
     .await
     .map_err(|error| {
         Problem::with(
-            "OpenBot could not check the software it runs on. Try again.",
+            "Remii could not check the software it runs on. Try again.",
             format!("the engine check did not run: {error}"),
         )
     })?;
@@ -528,7 +528,7 @@ async fn engine_ready(app: &tauri::AppHandle) -> Result<engine::Address, Problem
                 .await
                 .map_err(|error| {
                     Problem::with(
-                        "OpenBot could not start its container service.",
+                        "Remii could not start its container service.",
                         error.to_string(),
                     )
                 })??;
@@ -553,7 +553,7 @@ async fn engine_ready(app: &tauri::AppHandle) -> Result<engine::Address, Problem
         app,
         "install-engine",
         true,
-        "Looking for the software OpenBot runs on.",
+        "Looking for the software Remii runs on.",
     );
     let telemetry_app = app.clone();
     let installed = tauri::async_runtime::spawn_blocking(move || {
@@ -574,7 +574,7 @@ async fn engine_ready(app: &tauri::AppHandle) -> Result<engine::Address, Problem
     .await
     .map_err(|error| {
         Problem::with(
-            "OpenBot could not install the software it needs. Try again.",
+            "Remii could not install the software it needs. Try again.",
             format!("the install task did not run: {error}"),
         )
     })?;
@@ -617,7 +617,7 @@ async fn engine_ready(app: &tauri::AppHandle) -> Result<engine::Address, Problem
         .filter(|_| ready.responding)
         .ok_or_else(|| {
             Problem::with(
-                "OpenBot set up the software it runs on, but it is still not answering. Try again.",
+                "Remii set up the software it runs on, but it is still not answering. Try again.",
                 ready.detail,
             )
         })
@@ -628,7 +628,7 @@ async fn engine_ready(app: &tauri::AppHandle) -> Result<engine::Address, Problem
 fn ensure_linux_podman_api(shell: &Shell, address: &engine::Address) -> Result<(), Problem> {
     if !matches!(*shell.quit.phase.lock().unwrap(), QuitPhase::Idle) {
         return Err(Problem::plain(
-            "OpenBot is quitting. Start it again to continue.",
+            "Remii is quitting. Start it again to continue.",
         ));
     }
     shell
@@ -664,7 +664,7 @@ async fn deployment_ready<R: tauri::Runtime>(
     .map_err(|error| {
         report(app, "deployment", false, error.clone());
         Problem::with(
-            "OpenBot could not download what it needs to run. Check the internet \
+            "Remii could not download what it needs to run. Check the internet \
              connection and try again.",
             error,
         )
@@ -701,8 +701,8 @@ fn sign_in_reference(
 ) -> Result<String, Problem> {
     reference(root, published).map_err(|error| {
         Problem::with(
-            "This version of OpenBot cannot sign in to that plan. Use an API key instead, or \
-             update OpenBot.",
+            "This version of Remii cannot sign in to that plan. Use an API key instead, or \
+             update Remii.",
             error,
         )
     })
@@ -729,7 +729,7 @@ struct ChosenModel {
 }
 
 impl ChosenModel {
-    fn into_credential(self, root: &Path) -> Result<openbot_env::ModelCredential, Problem> {
+    fn into_credential(self, root: &Path) -> Result<remii_env::ModelCredential, Problem> {
         self.into_credential_with(root, saved_secret)
     }
 
@@ -737,7 +737,7 @@ impl ChosenModel {
         self,
         root: &Path,
         mut saved_secret: impl FnMut(&Path, &str) -> Result<String, Problem>,
-    ) -> Result<openbot_env::ModelCredential, Problem> {
+    ) -> Result<remii_env::ModelCredential, Problem> {
         let given = |value: Option<String>| value.unwrap_or_default().trim().to_string();
         let saved = self.saved.unwrap_or(false);
         match (self.provider.as_str(), self.login.as_str()) {
@@ -750,7 +750,7 @@ impl ChosenModel {
                 if saved && api_key.is_empty() {
                     return Err("That saved OpenAI API key is no longer available.".into());
                 }
-                Ok(openbot_env::ModelCredential::OpenAi { api_key })
+                Ok(remii_env::ModelCredential::OpenAi { api_key })
             }
             ("anthropic", "api-key") => {
                 let api_key = if saved {
@@ -761,7 +761,7 @@ impl ChosenModel {
                 if saved && api_key.is_empty() {
                     return Err("That saved Anthropic API key is no longer available.".into());
                 }
-                Ok(openbot_env::ModelCredential::Anthropic { api_key })
+                Ok(remii_env::ModelCredential::Anthropic { api_key })
             }
             ("anthropic", "plan") => {
                 let token = if saved {
@@ -774,7 +774,7 @@ impl ChosenModel {
                     // comes up and a Bot that cannot answer, which reads as a broken product.
                     return Err("That Claude plan was not signed in to.".into());
                 }
-                Ok(openbot_env::ModelCredential::ClaudePlan { token })
+                Ok(remii_env::ModelCredential::ClaudePlan { token })
             }
             /*
              * The sign-in hands back the vendor's whole token store, not one token, and it travels
@@ -783,11 +783,11 @@ impl ChosenModel {
              */
             ("openai", "plan") => {
                 let store = if saved {
-                    openbot_env::read_plan_store(root)
+                    remii_env::read_plan_store(root)
                         .map_err(|error| {
                             Problem::with(
-                                "OpenBot could not read the saved ChatGPT sign-in.",
-                                format!("{}: {error}", root.join(openbot_env::CHATGPT_STORE_FILE).display()),
+                                "Remii could not read the saved ChatGPT sign-in.",
+                                format!("{}: {error}", root.join(remii_env::CHATGPT_STORE_FILE).display()),
                             )
                         })?
                         .unwrap_or_default()
@@ -797,7 +797,7 @@ impl ChosenModel {
                 if store.is_empty() {
                     return Err("That ChatGPT plan was not signed in to.".into());
                 }
-                Ok(openbot_env::ModelCredential::ChatGptPlan { store })
+                Ok(remii_env::ModelCredential::ChatGptPlan { store })
             }
             ("openai-compatible", "endpoint") => {
                 let base_url = given(self.base_url);
@@ -822,7 +822,7 @@ impl ChosenModel {
                     return Err("Enter the model name your endpoint serves.".into());
                 }
                 let api_key = if saved {
-                    use openbot_desktop_lib::saved_intent::{
+                    use remii_desktop_lib::saved_intent::{
                         compatible_key_from_record, SavedIntent, COMPATIBLE_CREDENTIAL,
                     };
                     if !SavedIntent::read(root).has_compatible_key_for(&base_url) {
@@ -833,7 +833,7 @@ impl ChosenModel {
                 } else {
                     given(self.api_key)
                 };
-                Ok(openbot_env::ModelCredential::Compatible {
+                Ok(remii_env::ModelCredential::Compatible {
                     base_url,
                     container_base_url: (!container_base_url.is_empty())
                         .then_some(container_base_url),
@@ -852,7 +852,7 @@ impl ChosenModel {
 fn start_stack_credential(
     root: &Path,
     model: ChosenModel,
-) -> Result<openbot_env::ModelCredential, Problem> {
+) -> Result<remii_env::ModelCredential, Problem> {
     model.into_credential(root)
 }
 
@@ -861,12 +861,12 @@ fn start_stack_credential_with(
     root: &Path,
     model: ChosenModel,
     saved_secret: impl FnMut(&Path, &str) -> Result<String, Problem>,
-) -> Result<openbot_env::ModelCredential, Problem> {
+) -> Result<remii_env::ModelCredential, Problem> {
     model.into_credential_with(root, saved_secret)
 }
 
 fn saved_secret(root: &Path, key: &str) -> Result<String, Problem> {
-    openbot_desktop_lib::vault::already_given_no_ui(root, &root.join(".env"), &[key])
+    remii_desktop_lib::vault::already_given_no_ui(root, &root.join(".env"), &[key])
         .map(|found| found.get(key).cloned().unwrap_or_default())
 }
 
@@ -890,18 +890,18 @@ fn require_existing_encryption_key(
     root: &Path,
     secrets: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), Problem> {
-    let configured = openbot_desktop_lib::saved_intent::SavedIntent::read(root)
+    let configured = remii_desktop_lib::saved_intent::SavedIntent::read(root)
         .model
         .is_some()
-        || openbot_env::already_set(&root.join(".env"), &["DATABASE_URL"])
+        || remii_env::already_set(&root.join(".env"), &["DATABASE_URL"])
             .contains_key("DATABASE_URL");
     if configured
         && !secrets
             .get("KEY_ENCRYPTION_KEY")
-            .is_some_and(|value| openbot_env::usable_encryption_key(value))
+            .is_some_and(|value| remii_env::usable_encryption_key(value))
     {
         return Err(Problem::plain(
-            "This installation's saved encryption key is missing, invalid, or public. Restore its original private key from backup, or get help preserving its saved data. OpenBot will not replace the key automatically.",
+            "This installation's saved encryption key is missing, invalid, or public. Restore its original private key from backup, or get help preserving its saved data. Remii will not replace the key automatically.",
         ));
     }
     Ok(())
@@ -920,7 +920,7 @@ async fn start_stack<R: tauri::Runtime>(
     harness: Option<harness::HarnessChoice>,
     // Both registers on the way out: see `problem.rs`. Anything that still returns a bare string
     // converts to the plain half, so a path without its own sentence reads as it always did.
-) -> Result<(), openbot_desktop_lib::problem::Problem> {
+) -> Result<(), remii_desktop_lib::problem::Problem> {
     let root = stack::root_from(&root);
     start_stack_inner(app, root, api_url, gateway_ws_url, api_key, model, harness).await
 }
@@ -946,7 +946,7 @@ async fn start_stack_inner<R: tauri::Runtime>(
             .is_some_and(|owned| owned.root != root)
         {
             return Err(Problem::plain(
-                "OpenBot still has services from another installation to stop. Choose Stop OpenBot before starting in a different folder.",
+                "Remii still has services from another installation to stop. Choose Stop Remii before starting in a different folder.",
             ));
         }
         // A rejected concurrent Start must not replace the accepted attempt's selection.
@@ -983,26 +983,20 @@ async fn start_stack_inner<R: tauri::Runtime>(
     let requested_harness = harness.clone();
     let harness =
         match &credential {
-            openbot_env::ModelCredential::ClaudePlan { .. } => harness::speaking_for("anthropic")
-                .map(|id| harness::HarnessChoice {
-                    id: id.into(),
-                    agent_url: None,
-                }),
-            openbot_env::ModelCredential::ChatGptPlan { .. } => harness::speaking_for("openai")
-                .map(|id| harness::HarnessChoice {
-                    id: id.into(),
-                    agent_url: None,
-                }),
+            remii_env::ModelCredential::ClaudePlan { .. } => harness::speaking_for("anthropic")
+                .map(|id| harness::HarnessChoice { id: id.into() }),
+            remii_env::ModelCredential::ChatGptPlan { .. } => harness::speaking_for("openai")
+                .map(|id| harness::HarnessChoice { id: id.into() }),
             _ => harness,
         };
     let picked = harness::picked(harness.as_ref(), &root).map_err(|error| {
         // Two registers, because one of these refusals is about a release and the other is
-        // about a pick. "OpenBot v0.0.8 does not include agent-langgraph-agui" is the
+        // about a pick. "Remii v0.0.8 does not include agent-langgraph-agui" is the
         // evidence, not the sentence: it names a published image, which is not a thing the
         // person chose or can change.
         Problem::with(
-            "This version of OpenBot does not include the Bot you picked. Go back and choose \
-                 another, or update OpenBot.",
+            "This version of Remii does not include the Bot you picked. Go back and choose \
+                 another, or update Remii.",
             error,
         )
     })?;
@@ -1048,24 +1042,24 @@ async fn start_stack_inner<R: tauri::Runtime>(
         }
 
         let api_key = intelligence_key_for_start(&root, api_key, saved_secret)?;
-        let existing_secrets = openbot_desktop_lib::vault::already_given_no_ui(
+        let existing_secrets = remii_desktop_lib::vault::already_given_no_ui(
             &root,
             &root.join(".env"),
-            &openbot_env::MINTED[..],
+            &remii_env::MINTED[..],
         )?;
         require_existing_encryption_key(&root, &existing_secrets)?;
 
-        let settings = openbot_env::compose(
-            &openbot_env::Intelligence {
+        let settings = remii_env::compose(
+            &remii_env::Intelligence {
                 api_url,
                 gateway_ws_url,
                 api_key,
             },
-            &openbot_env::Model {
+            &remii_env::Model {
                 credential: credential.clone(),
             },
             &status,
-            &openbot_env::Ports::default(),
+            &remii_env::Ports::default(),
             &deployment::image_variables(&root)?,
             picked.as_ref(),
             // What a previous start of this deployment already minted. Without it every Start writes a
@@ -1081,7 +1075,7 @@ async fn start_stack_inner<R: tauri::Runtime>(
          * store, and travel from there to the processes that need them as environment, which is where
          * a secret can live without being written down. See `vault` for what each platform gets.
          */
-        let (settings, mut secrets) = openbot_desktop_lib::vault::split(settings);
+        let (settings, mut secrets) = remii_desktop_lib::vault::split(settings);
         /*
          * The credentials, plus any setting this answer dropped.
          *
@@ -1096,7 +1090,7 @@ async fn start_stack_inner<R: tauri::Runtime>(
                 purge.insert(key.into(), String::new());
             }
         }
-        openbot_desktop_lib::saved_intent::persist_configuration(
+        remii_desktop_lib::saved_intent::persist_configuration(
             &root,
             &settings,
             &secrets,
@@ -1182,7 +1176,7 @@ async fn start_stack_inner<R: tauri::Runtime>(
         let reclaimed = cleanup_before_start(&app, &attempt, &root, stack::stop_processes_under)?;
 
         // Before spawning: if these are still held, whatever answers later is not ours.
-        let ports = openbot_env::Ports::default();
+        let ports = remii_env::Ports::default();
         if reclaimed > 0 {
             // A kill is not instant and the check is. Without this the socket of a process this run
             // just stopped reads as somebody else's, and the refusal names a process that no longer
@@ -1208,7 +1202,7 @@ async fn start_stack_inner<R: tauri::Runtime>(
     use base64::Engine as _;
     let host_token =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
-    secrets.insert("OPENBOT_DESKTOP_HOST_TOKEN".into(), host_token.clone());
+    secrets.insert("REMII_DESKTOP_HOST_TOKEN".into(), host_token.clone());
 
     let logs_for_wait = logs.clone();
     let generation = start_host_processes(
@@ -1223,8 +1217,8 @@ async fn start_stack_inner<R: tauri::Runtime>(
                 started,
                 &logs_for_wait,
                 &stack::Ready {
-                    api: openbot_env::Ports::default().server,
-                    app: openbot_env::Ports::default().app,
+                    api: remii_env::Ports::default().server,
+                    app: remii_env::Ports::default().app,
                 },
                 std::time::Duration::from_secs(180),
             )
@@ -1243,7 +1237,7 @@ async fn start_stack_inner<R: tauri::Runtime>(
         .map(|owned| owned.address.clone())
         .ok_or_else(|| Problem::plain("The local container runtime is unavailable."))?;
     let config = host_access::HostAccessConfig::new(
-        format!("http://127.0.0.1:{}", openbot_env::Ports::default().server),
+        format!("http://127.0.0.1:{}", remii_env::Ports::default().server),
         host_token,
         address,
         deployment::reference(&root, "agent-computer")?,
@@ -1258,7 +1252,7 @@ async fn start_stack_inner<R: tauri::Runtime>(
     preparation::record_launch(&root, requested_harness.as_ref())?;
     let config = app.path().app_config_dir().map_err(|error| {
         Problem::with(
-            "OpenBot could not remember this installation for next time.",
+            "Remii could not remember this installation for next time.",
             error.to_string(),
         )
     })?;
@@ -1327,7 +1321,7 @@ fn stop_everything_with<C, D>(
     down: D,
 ) -> Result<(), String>
 where
-    C: FnOnce(&Path) -> Result<usize, openbot_desktop_lib::problem::Problem>,
+    C: FnOnce(&Path) -> Result<usize, remii_desktop_lib::problem::Problem>,
     D: FnOnce(&Path) -> Result<(), String>,
 {
     shell
@@ -1386,7 +1380,7 @@ fn down_owned_containers(shell: &Shell, root: &Path) -> Result<(), String> {
         Some(owned) => stack::down(&owned.address, root),
         None if shell.stopped_container_root.lock().unwrap().as_deref() == Some(root) => Ok(()),
         None if root.join("docker-compose.yml").exists() => Err(
-            "OpenBot has no runtime ownership for this installation. Stop its containers using the original engine and context before starting OpenBot again.".into(),
+            "Remii has no runtime ownership for this installation. Stop its containers using the original engine and context before starting Remii again.".into(),
         ),
         None => Ok(()),
     }
@@ -1425,7 +1419,7 @@ fn stop_held_process_handles(
     for (name, child) in children.iter_mut() {
         let failure = |error| {
             Problem::with(
-                "OpenBot could not stop one of its host processes.",
+                "Remii could not stop one of its host processes.",
                 format!("could not finish stopping held {name}: {error}"),
             )
         };
@@ -1520,11 +1514,11 @@ where
     let result = match (host_access_result, result) {
         (Ok(()), result) => result,
         (Err(error), Ok(_)) => Err(Problem::with(
-            "OpenBot could not stop a folder operation.",
+            "Remii could not stop a folder operation.",
             error,
         )),
         (Err(error), Err(problem)) => Err(Problem::with(
-            "OpenBot could not finish stopping its work.",
+            "Remii could not finish stopping its work.",
             format!("{error}\n{}", problem_detail(problem)),
         )),
     };
@@ -1714,7 +1708,7 @@ fn require_no_exited_compose_services(
         report_failure(line.to_string());
     }
     Err(Problem::with(
-        "Part of OpenBot stopped during startup.",
+        "Part of Remii stopped during startup.",
         detail,
     ))
 }
@@ -1724,10 +1718,10 @@ fn cleanup_before_start<R, C>(
     attempt: &StartAttempt<'_>,
     root: &Path,
     cleanup: C,
-) -> Result<usize, openbot_desktop_lib::problem::Problem>
+) -> Result<usize, remii_desktop_lib::problem::Problem>
 where
     R: tauri::Runtime,
-    C: FnOnce(&Path) -> Result<usize, openbot_desktop_lib::problem::Problem>,
+    C: FnOnce(&Path) -> Result<usize, remii_desktop_lib::problem::Problem>,
 {
     attempt.require_current()?;
     // Preflight can fail while the previous run still owns live hosts. Retire that watcher only
@@ -1742,7 +1736,7 @@ where
     })
 }
 
-fn problem_detail(problem: openbot_desktop_lib::problem::Problem) -> String {
+fn problem_detail(problem: remii_desktop_lib::problem::Problem) -> String {
     match problem.detail {
         Some(detail) => format!("{}\n{}", problem.said, detail),
         None => problem.said,
@@ -1776,8 +1770,8 @@ fn known_safe_quit_cleanup_failure(line: &str) -> QuitCleanupFailure {
 
 fn quit_cleanup_failure_summary(failure: QuitCleanupFailure) -> &'static str {
     match failure {
-        QuitCleanupFailure::HostProcesses => "OpenBot could not confirm all app processes stopped.",
-        QuitCleanupFailure::Containers => "OpenBot could not confirm all containers stopped.",
+        QuitCleanupFailure::HostProcesses => "Remii could not confirm all app processes stopped.",
+        QuitCleanupFailure::Containers => "Remii could not confirm all containers stopped.",
     }
 }
 
@@ -1821,7 +1815,7 @@ fn read_quit_cleanup_notice(root: &Path) -> Result<Option<Problem>, Problem> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(Problem::with(
-                "OpenBot could not read its previous shutdown notice.",
+                "Remii could not read its previous shutdown notice.",
                 format!("{}: {error}", path.display()),
             ))
         }
@@ -1830,14 +1824,14 @@ fn read_quit_cleanup_notice(root: &Path) -> Result<Option<Problem>, Problem> {
         .metadata()
         .map_err(|error| {
             Problem::with(
-                "OpenBot could not read its previous shutdown notice.",
+                "Remii could not read its previous shutdown notice.",
                 format!("{}: {error}", path.display()),
             )
         })?
         .len();
     if size > QUIT_CLEANUP_NOTICE_LIMIT as u64 {
         return Err(Problem::with(
-            "OpenBot could not read its previous shutdown notice.",
+            "Remii could not read its previous shutdown notice.",
             format!(
                 "{}: shutdown notice exceeded its size limit",
                 path.display()
@@ -1846,13 +1840,13 @@ fn read_quit_cleanup_notice(root: &Path) -> Result<Option<Problem>, Problem> {
     }
     let notice: QuitCleanupNotice = serde_json::from_reader(file).map_err(|error| {
         Problem::with(
-            "OpenBot could not read its previous shutdown notice.",
+            "Remii could not read its previous shutdown notice.",
             format!("{}: {error}", path.display()),
         )
     })?;
     std::fs::remove_file(&path).map_err(|error| {
         Problem::with(
-            "OpenBot could not clear its previous shutdown notice.",
+            "Remii could not clear its previous shutdown notice.",
             format!("{}: {error}", path.display()),
         )
     })?;
@@ -1866,7 +1860,7 @@ fn read_quit_cleanup_notice(root: &Path) -> Result<Option<Problem>, Problem> {
         return Ok(None);
     }
     Ok(Some(Problem::with(
-        "OpenBot had trouble shutting down last time.",
+        "Remii had trouble shutting down last time.",
         detail,
     )))
 }
@@ -1885,7 +1879,7 @@ fn recovery_required_or_pending_quit_notice(shell: &Shell, root: &Path) -> bool 
 
 fn exit_cleanup_with<C, D>(shell: &Shell, fallback_root: &Path, cleanup: C, down: D) -> Vec<String>
 where
-    C: FnOnce(&Path) -> Result<usize, openbot_desktop_lib::problem::Problem>,
+    C: FnOnce(&Path) -> Result<usize, remii_desktop_lib::problem::Problem>,
     D: FnOnce(&Path) -> Result<(), String>,
 {
     shell
@@ -2005,11 +1999,11 @@ where
     Ok(())
 }
 
-/// Show OpenBot itself in this window.
+/// Show Remii itself in this window.
 ///
 /// The point of a desktop application is that it is the application. A window that sets things up
 /// and then sends somebody to a browser tab is a launcher, and nobody wanted a launcher: they
-/// double-clicked OpenBot to get OpenBot.
+/// double-clicked Remii to get Remii.
 ///
 /// So the window navigates to the running app, and the tray keeps the controls that would otherwise
 /// have nowhere to live. Setup comes back if the stack is stopped, because then there is something
@@ -2020,13 +2014,13 @@ where
 /// and naming one guesses wrong half the time. Never the word `localhost`: it does not resolve the
 /// same way on every operating system, which is the whole reason both are asked.
 #[tauri::command]
-fn show_openbot<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
-    show_openbot_on(app, &openbot_env::Ports::default())
+fn show_remii<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    show_remii_on(app, &remii_env::Ports::default())
 }
 
-fn show_openbot_on<R: tauri::Runtime>(
+fn show_remii_on<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-    ports: &openbot_env::Ports,
+    ports: &remii_env::Ports,
 ) -> Result<(), String> {
     let port = ports.app;
     // Where it answered, not where it was asked to listen. A dev server binds whichever loopback
@@ -2036,21 +2030,21 @@ fn show_openbot_on<R: tauri::Runtime>(
     let _startup = shell.startup.lock().unwrap();
     let root = cleanup_root(&shell, &stack::default_root());
     if recovery_required_or_pending_quit_notice(&shell, &root) {
-        return Err("Part of OpenBot needs recovery. Try starting OpenBot once more.".into());
+        return Err("Part of Remii needs recovery. Try starting Remii once more.".into());
     }
     let url = owned_app_url(&root, ports).ok_or_else(|| {
-        format!("OpenBot could not verify its app on port {port} belongs to this installation. Try starting OpenBot again.")
+        format!("Remii could not verify its app on port {port} belongs to this installation. Try starting Remii again.")
     })?;
     eprintln!("[show] navigating the window to {url}");
     let window = app
         .get_webview_window("main")
-        .ok_or("the OpenBot window is not there to show it in")?;
+        .ok_or("the Remii window is not there to show it in")?;
     let outcome = window
         .navigate(
             url.parse()
                 .map_err(|error| format!("{url} is not a URL: {error}"))?,
         )
-        .map_err(|error| format!("could not show OpenBot: {error}"));
+        .map_err(|error| format!("could not show Remii: {error}"));
     eprintln!("[show] navigate returned {outcome:?}");
     outcome
 }
@@ -2069,7 +2063,7 @@ fn configured_setup_url(
         .windows
         .iter()
         .find(|window| window.label == "main")
-        .ok_or("the OpenBot setup window is not configured")?;
+        .ok_or("the Remii setup window is not configured")?;
     match &window.url {
         tauri::WebviewUrl::External(url) | tauri::WebviewUrl::CustomProtocol(url) => {
             Ok(url.clone())
@@ -2108,7 +2102,7 @@ fn configured_setup_url(
                     .map_err(|error| format!("invalid setup page path: {error}"))
             }
         }
-        _ => Err("the OpenBot setup window URL is not supported".into()),
+        _ => Err("the Remii setup window URL is not supported".into()),
     }
 }
 
@@ -2134,7 +2128,7 @@ fn setup_destination<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<tau
 fn show_setup<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
-        .ok_or("the OpenBot window is not there")?;
+        .ok_or("the Remii window is not there")?;
     window
         .navigate(setup_destination(&app)?)
         .map_err(|error| format!("could not go back to setup: {error}"))
@@ -2153,7 +2147,7 @@ fn show_setup_and_focus<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(
     show_setup(app.clone())?;
     let window = app
         .get_webview_window("main")
-        .ok_or("the OpenBot window is not there")?;
+        .ok_or("the Remii window is not there")?;
     window
         .show()
         .map_err(|error| format!("could not show setup: {error}"))?;
@@ -2169,7 +2163,7 @@ fn show_setup_and_focus<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(
 ///
 /// The shell keeps what it started in memory, so closing the window and opening it again forgets a
 /// stack that is still up. Without asking, the second launch offers to set up something already
-/// running, and the port check then reports OpenBot as a foreign process holding its own port.
+/// running, and the port check then reports Remii as a foreign process holding its own port.
 ///
 /// Asked of the deployment rather than of a file: a stamp says a deployment was installed, and only
 /// an answer on the port says one is running now.
@@ -2204,15 +2198,15 @@ fn already_running<R: tauri::Runtime>(app: tauri::AppHandle<R>, root: String) ->
     let shell = app.state::<Shell>();
     let _startup = shell.startup.lock().unwrap();
     !recovery_required_or_pending_quit_notice(&shell, &root)
-        && already_running_at(&root, &openbot_env::Ports::default())
+        && already_running_at(&root, &remii_env::Ports::default())
 }
 
-fn already_running_at(root: &Path, ports: &openbot_env::Ports) -> bool {
+fn already_running_at(root: &Path, ports: &remii_env::Ports) -> bool {
     owned_app_url(root, ports).is_some()
 }
 
 /// Neither an owned API nor an answering app port alone authorizes showing a deployment.
-fn owned_app_url(root: &Path, ports: &openbot_env::Ports) -> Option<String> {
+fn owned_app_url(root: &Path, ports: &remii_env::Ports) -> Option<String> {
     if !already_running_on(root, ports.server, stack::recorded_server_owns_port)
         || !stack::recorded_process_owns_port(root, "app", ports.app).unwrap_or(false)
     {
@@ -2227,7 +2221,7 @@ fn owned_app_url(root: &Path, ports: &openbot_env::Ports) -> Option<String> {
 #[tauri::command]
 fn last_failure<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-) -> Option<openbot_desktop_lib::problem::Problem> {
+) -> Option<remii_desktop_lib::problem::Problem> {
     let shell = app.state::<Shell>();
     if let Some(problem) = shell.last_failure.lock().unwrap().take() {
         return Some(problem);
@@ -2274,7 +2268,7 @@ async fn ask_the_bot<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     root: String,
     question: String,
-) -> Result<String, openbot_desktop_lib::problem::Problem> {
+) -> Result<String, remii_desktop_lib::problem::Problem> {
     let result = ask_the_bot_inner(stack::root_from(&root), question).await;
     if result.is_ok() {
         desktop_telemetry::record(&app, telemetry::EventData::Activated);
@@ -2292,7 +2286,7 @@ async fn ask_the_bot_inner(root: PathBuf, question: String) -> Result<String, Pr
 }
 
 fn ask_saved_settings(root: &Path) -> Result<std::collections::BTreeMap<String, String>, Problem> {
-    openbot_desktop_lib::vault::already_given_no_ui(
+    remii_desktop_lib::vault::already_given_no_ui(
         root,
         &root.join(".env"),
         &[
@@ -2310,8 +2304,8 @@ async fn ask_the_bot_with_settings(
     root: PathBuf,
     question: String,
     settings: std::collections::BTreeMap<String, String>,
-) -> Result<String, openbot_desktop_lib::problem::Problem> {
-    // The picked harness if there is one, and the Bot that ships with OpenBot if there is not.
+) -> Result<String, remii_desktop_lib::problem::Problem> {
+    // The picked harness if there is one, and the Bot that ships with Remii if there is not.
     // Both speak AG-UI at the same address shape, so this screen does not care which it got.
     let picked_endpoint = settings
         .get("PICKED_HARNESS_URL")
@@ -2341,19 +2335,19 @@ async fn ask_the_bot_with_settings(
         .cloned()
         .unwrap_or_default();
     if endpoint.trim().is_empty() || token.trim().is_empty() {
-        return Err(openbot_desktop_lib::problem::Problem::plain(
-            "OpenBot cannot find the Bot it just set up. Stop OpenBot and start it again.",
+        return Err(remii_desktop_lib::problem::Problem::plain(
+            "Remii cannot find the Bot it just set up. Stop Remii and start it again.",
         ));
     }
 
     let question = if question.trim().is_empty() {
-        openbot_desktop_lib::ask::SUGGESTED.to_string()
+        remii_desktop_lib::ask::SUGGESTED.to_string()
     } else {
         question
     };
 
     let asked = tauri::async_runtime::spawn_blocking(move || {
-        match openbot_desktop_lib::ask::ask_harness(
+        match remii_desktop_lib::ask::ask_harness(
             &endpoint,
             &token,
             &question,
@@ -2375,7 +2369,7 @@ async fn ask_the_bot_with_settings(
     })
     .await
     .map_err(|error| {
-        openbot_desktop_lib::problem::Problem::plain(format!(
+        remii_desktop_lib::problem::Problem::plain(format!(
             "The question could not be asked: {error}"
         ))
     })?;
@@ -2391,7 +2385,7 @@ async fn ask_the_bot_with_settings(
                         .map(|found| stack::service_log(&found, &root, service, 40))
                 })
                 .unwrap_or_default();
-            Err(openbot_desktop_lib::ask::why_nothing_came_back(&log))
+            Err(remii_desktop_lib::ask::why_nothing_came_back(&log))
         }
     }
 }
@@ -2422,7 +2416,7 @@ fn already_configured<R: tauri::Runtime>(
 fn already_configured_for_root(root: String) -> AlreadyConfigured {
     let root = stack::root_from(&root);
     let env_file = root.join(".env");
-    let mut values = openbot_desktop_lib::vault::already_given_file_only(
+    let mut values = remii_desktop_lib::vault::already_given_file_only(
         &env_file,
         &[
             "INTELLIGENCE_API_KEY",
@@ -2445,7 +2439,7 @@ fn already_configured_for_root(root: String) -> AlreadyConfigured {
         ],
     );
 
-    use openbot_desktop_lib::saved_intent::{Category, SavedIntent};
+    use remii_desktop_lib::saved_intent::{Category, SavedIntent};
     let intent = SavedIntent::read(&root);
     let hint = |category, file_present| {
         (file_present || intent.categories.contains(&category)).then_some(true)
@@ -2475,7 +2469,7 @@ fn already_configured_for_root(root: String) -> AlreadyConfigured {
             model_sessions: SavedModelSessions {
                 openai: hint(
                     Category::ChatGptPlan,
-                    openbot_env::saved_chatgpt_plan_store(&root),
+                    remii_env::saved_chatgpt_plan_store(&root),
                 ),
                 anthropic: hint(Category::ClaudePlan, claude_plan),
             },
@@ -2508,14 +2502,14 @@ async fn begin_claude_sign_in(app: tauri::AppHandle, root: String) -> Result<Str
     #[cfg(target_os = "linux")]
     let service_app = app.clone();
     let (signing, url) = tauri::async_runtime::spawn_blocking(move || {
-        let (address, image) = prepared_sign_in(&root, openbot_desktop_lib::plan::SIGN_IN_IMAGE)?;
+        let (address, image) = prepared_sign_in(&root, remii_desktop_lib::plan::SIGN_IN_IMAGE)?;
         #[cfg(target_os = "linux")]
         {
             let shell = service_app.state::<Shell>();
             let _startup = shell.startup.lock().unwrap();
             ensure_linux_podman_api(&shell, &address)?;
         }
-        openbot_desktop_lib::plan::SigningIn::begin(&address, &image).map_err(Problem::from)
+        remii_desktop_lib::plan::SigningIn::begin(&address, &image).map_err(Problem::from)
     })
     .await
     .map_err(|error| {
@@ -2564,21 +2558,21 @@ async fn finish_claude_sign_in(app: tauri::AppHandle, code: String) -> Result<St
 async fn begin_chatgpt_sign_in(
     app: tauri::AppHandle,
     root: String,
-) -> Result<String, openbot_desktop_lib::problem::Problem> {
+) -> Result<String, remii_desktop_lib::problem::Problem> {
     let root = stack::root_from(&root);
     remember_selected_root(&app.state::<Shell>(), &root);
     #[cfg(target_os = "linux")]
     let service_app = app.clone();
     let (signing, url) = tauri::async_runtime::spawn_blocking(move || {
         let (address, image) =
-            prepared_sign_in(&root, openbot_desktop_lib::plan::CHATGPT_SIGN_IN_IMAGE)?;
+            prepared_sign_in(&root, remii_desktop_lib::plan::CHATGPT_SIGN_IN_IMAGE)?;
         #[cfg(target_os = "linux")]
         {
             let shell = service_app.state::<Shell>();
             let _startup = shell.startup.lock().unwrap();
             ensure_linux_podman_api(&shell, &address)?;
         }
-        openbot_desktop_lib::plan::SigningInToChatGpt::begin(&address, &image)
+        remii_desktop_lib::plan::SigningInToChatGpt::begin(&address, &image)
     })
     .await
     .map_err(|error| {
@@ -2615,7 +2609,7 @@ async fn finish_chatgpt_sign_in(app: tauri::AppHandle) -> Result<String, String>
 /// Start signing in to Intelligence and return the address a browser has to open.
 #[tauri::command]
 async fn begin_intelligence_sign_in(app: tauri::AppHandle) -> Result<String, String> {
-    let (signing, url) = openbot_desktop_lib::intelligence::SigningInToIntelligence::begin()?;
+    let (signing, url) = remii_desktop_lib::intelligence::SigningInToIntelligence::begin()?;
     *app.state::<Shell>()
         .signing_in_to_intelligence
         .lock()
@@ -2631,7 +2625,7 @@ async fn begin_intelligence_sign_in(app: tauri::AppHandle) -> Result<String, Str
 #[tauri::command]
 async fn finish_intelligence_sign_in(
     app: tauri::AppHandle,
-) -> Result<Vec<openbot_desktop_lib::intelligence::Project>, openbot_desktop_lib::problem::Problem>
+) -> Result<Vec<remii_desktop_lib::intelligence::Project>, remii_desktop_lib::problem::Problem>
 {
     let signing = app
         .state::<Shell>()
@@ -2640,14 +2634,14 @@ async fn finish_intelligence_sign_in(
         .unwrap()
         .take()
         .ok_or_else(|| {
-            openbot_desktop_lib::problem::Problem::plain(
+            remii_desktop_lib::problem::Problem::plain(
                 "That sign-in is no longer running. Start it again.",
             )
         })?;
     let (credential, projects) = tauri::async_runtime::spawn_blocking(move || signing.finish())
         .await
         .map_err(|error| {
-            openbot_desktop_lib::problem::Problem::plain(format!(
+            remii_desktop_lib::problem::Problem::plain(format!(
                 "The sign-in did not finish: {error}"
             ))
         })??;
@@ -2660,7 +2654,7 @@ async fn finish_intelligence_sign_in(
 async fn intelligence_key_for(
     app: tauri::AppHandle,
     project: String,
-) -> Result<String, openbot_desktop_lib::problem::Problem> {
+) -> Result<String, remii_desktop_lib::problem::Problem> {
     let credential = app
         .state::<Shell>()
         .intelligence_credential
@@ -2668,14 +2662,14 @@ async fn intelligence_key_for(
         .unwrap()
         .clone()
         .ok_or_else(|| {
-            openbot_desktop_lib::problem::Problem::plain("Sign in to CopilotKit first.")
+            remii_desktop_lib::problem::Problem::plain("Sign in to CopilotKit first.")
         })?;
     tauri::async_runtime::spawn_blocking(move || {
-        openbot_desktop_lib::intelligence::provision_key(&credential, &project)
+        remii_desktop_lib::intelligence::provision_key(&credential, &project)
     })
     .await
     .map_err(|error| {
-        openbot_desktop_lib::problem::Problem::plain(format!("A key could not be created: {error}"))
+        remii_desktop_lib::problem::Problem::plain(format!("A key could not be created: {error}"))
     })?
 }
 
@@ -2791,17 +2785,17 @@ fn supervise_host_processes<R: tauri::Runtime>(
                     /*
                      * Both registers here too. `gave_up` names the process and quotes the tail of
                      * its log, which is the developer half; the person needs to know a piece of
-                     * OpenBot stopped and that starting again is the thing to try.
+                     * Remii stopped and that starting again is the thing to try.
                      */
                     *shell.last_failure.lock().unwrap() =
-                        Some(openbot_desktop_lib::problem::Problem::with(
+                        Some(remii_desktop_lib::problem::Problem::with(
                             format!(
-                                "Part of OpenBot ({name}) stopped and could not be started again. \
-                                 Try starting OpenBot once more."
+                                "Part of Remii ({name}) stopped and could not be started again. \
+                                 Try starting Remii once more."
                             ),
                             reason,
                         ));
-                    // Back to the setup screen. By now the window is showing OpenBot, and OpenBot
+                    // Back to the setup screen. By now the window is showing Remii, and Remii
                     // is not running: leaving it there is a window that lies.
                     let _ = show_setup(app.clone());
                     continue;
@@ -2862,7 +2856,7 @@ where
     }
     let child = spawn().map_err(|error| {
         Problem::with(
-            format!("OpenBot could not restart {name}."),
+            format!("Remii could not restart {name}."),
             error.to_string(),
         )
     })?;
@@ -2879,15 +2873,15 @@ where
     Ok(shell.generation.load(std::sync::atomic::Ordering::SeqCst) == generation)
 }
 
-/// Point the window at OpenBot if it is up, and at the setup screen if it is not.
+/// Point the window at Remii if it is up, and at the setup screen if it is not.
 ///
 /// Used by the tray and by a second launch, both of which happen at moments when the caller has no
 /// idea which of the two the person should be looking at.
 fn show_whichever_applies(app: &tauri::AppHandle) {
-    restore_window_on(app, &openbot_env::Ports::default());
+    restore_window_on(app, &remii_env::Ports::default());
 }
 
-fn restore_window_on<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ports: &openbot_env::Ports) {
+fn restore_window_on<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ports: &remii_env::Ports) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -2926,7 +2920,7 @@ where
     F: FnOnce(T) + Send + 'static,
 {
     std::thread::Builder::new()
-        .name("openbot-second-instance-restore".into())
+        .name("remii-second-instance-restore".into())
         .spawn(move || restore(context))
 }
 
@@ -2941,13 +2935,13 @@ fn restore_after_second_instance(app: &tauri::AppHandle) {
             &reporting_app,
             "open",
             false,
-            format!("OpenBot could not show the existing window: {error}"),
+            format!("Remii could not show the existing window: {error}"),
         );
     }
 }
 
 fn publish_quit_notice_failure<R: tauri::Runtime>(app: tauri::AppHandle<R>, error: String) {
-    let problem = Problem::with("OpenBot could not record a shutdown problem.", error);
+    let problem = Problem::with("Remii could not record a shutdown problem.", error);
     let shell = app.state::<Shell>();
     {
         let _startup = shell.startup.lock().unwrap();
@@ -2967,14 +2961,14 @@ fn stop_from_menu<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         match stop_everything(&app, &root_path) {
             Ok(()) => {
                 eprintln!("[menu] stopped");
-                report(&app, "stopped", true, "OpenBot has been stopped");
+                report(&app, "stopped", true, "Remii has been stopped");
             }
             // Said rather than swallowed. A menu item that fails silently is worse than one
             // that is not there: the person believes the stack is down and it is not.
             Err(detail) => {
                 eprintln!("[menu] stop failed: {detail}");
                 let problem = Problem::with(
-                    "OpenBot could not finish stopping. Try Stop OpenBot again.",
+                    "Remii could not finish stopping. Try Stop Remii again.",
                     detail,
                 );
                 let shell = app.state::<Shell>();
@@ -3036,7 +3030,7 @@ fn main() {
             prepare_installation,
             start_stack,
             stop_stack,
-            show_openbot,
+            show_remii,
             show_setup,
             already_running,
             last_failure,
@@ -3055,11 +3049,11 @@ fn main() {
             ask_the_bot,
         ])
         // A packaged application is not a browser tab. Left alone, WebView2 answers a right-click
-        // with Back, Refresh, Save as and Print: Back walks the window out of OpenBot with nothing
+        // with Back, Refresh, Save as and Print: Back walks the window out of Remii with nothing
         // to walk it home, and Save as offers to write the page to disk as `Webpage, complete`.
         // macOS never showed this because Tauri suppresses it there in release builds; Windows has
         // no such setting, and Tauri has no configuration option for it either, so the page is
-        // asked to refuse. Every navigation, because the window navigates to OpenBot and back.
+        // asked to refuse. Every navigation, because the window navigates to Remii and back.
         .on_page_load(|window, _| {
             let _ = window
                 .eval("document.addEventListener('contextmenu', e => e.preventDefault(), true)");
@@ -3084,7 +3078,7 @@ fn main() {
             {
                 remember_selected_root(&app.state::<Shell>(), &root);
             }
-            // Where the Compose provider OpenBot installs itself lives, told once so every engine
+            // Where the Compose provider Remii installs itself lives, told once so every engine
             // command can put it on the child's PATH. Before anything asks for an engine.
             engine::tools_live_in(engine::tools_dir_under(&acquire::download_dir(
                 &stack::default_root(),
@@ -3096,15 +3090,15 @@ fn main() {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::TrayIconBuilder;
 
-            let open = MenuItem::with_id(app, "open", "Open OpenBot", true, None::<&str>)?;
-            let stop = MenuItem::with_id(app, "stop", "Stop OpenBot", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open Remii", true, None::<&str>)?;
+            let stop = MenuItem::with_id(app, "stop", "Stop Remii", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, quit_menu_accelerator())?;
             let menu = Menu::with_items(app, &[&open, &stop, &quit])?;
 
-            TrayIconBuilder::with_id("openbot")
+            TrayIconBuilder::with_id("remii")
                 .icon(tray::icon())
                 .icon_as_template(false)
-                .tooltip("OpenBot")
+                .tooltip("Remii")
                 .menu(&menu)
                 .build(app)?;
 
@@ -3117,14 +3111,14 @@ fn main() {
             // Its own items, not the tray's: a menu item belongs to one menu, and the two menus
             // outlive each other. The ids match so both arrive at the same function.
             use tauri::menu::Submenu;
-            let window_open = MenuItem::with_id(app, "open", "Open OpenBot", true, None::<&str>)?;
-            let window_stop = MenuItem::with_id(app, "stop", "Stop OpenBot", true, None::<&str>)?;
+            let window_open = MenuItem::with_id(app, "open", "Open Remii", true, None::<&str>)?;
+            let window_stop = MenuItem::with_id(app, "stop", "Stop Remii", true, None::<&str>)?;
             let window_quit =
                 MenuItem::with_id(app, "quit", "Quit", true, quit_menu_accelerator())?;
             // A submenu, because a top-level entry in a menu bar has to be one to open at all.
-            let openbot = Submenu::with_items(
+            let remii = Submenu::with_items(
                 app,
-                "OpenBot",
+                "Remii",
                 true,
                 &[&window_open, &window_stop, &window_quit],
             )?;
@@ -3156,12 +3150,12 @@ fn main() {
                     &PredefinedMenuItem::select_all(app, None)?,
                 ],
             )?;
-            app.set_menu(Menu::with_items(app, &[&openbot, &edit])?)?;
+            app.set_menu(Menu::with_items(app, &[&remii, &edit])?)?;
             app.on_menu_event(|app, event| chose(app, event.id().as_ref()));
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("the OpenBot window could not be created")
+        .expect("the Remii window could not be created")
         .run(|app, event| {
             match event {
                 #[cfg(target_os = "macos")]
@@ -3206,7 +3200,7 @@ fn main() {
                         move |code| exiting_app.exit(code),
                         |work| {
                             std::thread::Builder::new()
-                                .name("openbot-quit-cleanup".into())
+                                .name("remii-quit-cleanup".into())
                                 .spawn(work)
                                 .map(|_| ())
                         },
@@ -3216,7 +3210,7 @@ fn main() {
                             app,
                             "quit",
                             false,
-                            "OpenBot could not start shutting down. Try Quit again.",
+                            "Remii could not start shutting down. Try Quit again.",
                         );
                     }
                 }
@@ -3476,10 +3470,10 @@ mod tests {
 
     #[test]
     fn quit_cleanup_notice_is_known_safe_bounded_and_consumed_once() {
-        let root = temp_root("openbot-quit-cleanup-notice");
+        let root = temp_root("remii-quit-cleanup-notice");
         let lines = vec![
-            "[exit] cleanup failed: Compose down failed: /Users/alice/OpenBot/docker-compose.yml refused token=secret".to_string(),
-            "[exit] cleanup failed: C:\\Users\\alice\\OpenBot\\owned.exe OAuth password".to_string(),
+            "[exit] cleanup failed: Compose down failed: /Users/alice/Remii/docker-compose.yml refused token=secret".to_string(),
+            "[exit] cleanup failed: C:\\Users\\alice\\Remii\\owned.exe OAuth password".to_string(),
         ];
 
         write_quit_cleanup_notice(&root, &lines).unwrap();
@@ -3487,7 +3481,7 @@ mod tests {
             .unwrap()
             .expect("notice should be present");
         let detail = first.detail.unwrap();
-        assert_eq!(first.said, "OpenBot had trouble shutting down last time.");
+        assert_eq!(first.said, "Remii had trouble shutting down last time.");
         assert!(detail.contains("containers stopped"), "{detail}");
         assert!(detail.contains("app processes stopped"), "{detail}");
         assert!(!detail.contains("Compose down failed"), "{detail}");
@@ -3600,7 +3594,7 @@ mod tests {
             ),
         ] {
             if let Some(metadata) = metadata {
-                std::fs::write(root.join(openbot_desktop_lib::saved_intent::FILE), metadata)
+                std::fs::write(root.join(remii_desktop_lib::saved_intent::FILE), metadata)
                     .unwrap();
             }
             for legacy in ["", "INTELLIGENCE_API_KEY=synthetic-cpk\nOPENAI_API_KEY=synthetic-openai\nANTHROPIC_API_KEY=synthetic-anthropic\nCLAUDE_CODE_OAUTH_TOKEN=synthetic-claude\n"] {
@@ -3661,7 +3655,7 @@ mod tests {
 
         let image = sign_in_reference(
             &selected,
-            openbot_desktop_lib::plan::CHATGPT_SIGN_IN_IMAGE,
+            remii_desktop_lib::plan::CHATGPT_SIGN_IN_IMAGE,
             |root, published| {
                 *reference_root.borrow_mut() = Some((root.to_path_buf(), published.to_string()));
                 Ok(format!("{}@{}", published, root.display()))
@@ -3673,7 +3667,7 @@ mod tests {
             reference_root.into_inner(),
             Some((
                 selected.clone(),
-                openbot_desktop_lib::plan::CHATGPT_SIGN_IN_IMAGE.to_string()
+                remii_desktop_lib::plan::CHATGPT_SIGN_IN_IMAGE.to_string()
             ))
         );
         assert!(image.contains(&selected.to_string_lossy().to_string()));
@@ -3688,7 +3682,7 @@ mod tests {
 
     #[test]
     fn command_roots_trim_paste_padding_and_preserve_interior_spaces() {
-        let root = temp_root("openbot-command-root My Files");
+        let root = temp_root("remii-command-root My Files");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("settings-marker"), "this deployment").unwrap();
         for typed in [
@@ -3727,7 +3721,7 @@ mod tests {
 
     #[test]
     fn already_configured_trims_pasted_root_and_preserves_interior_spaces() {
-        let root = temp_root("openbot-pasted-root My Files");
+        let root = temp_root("remii-pasted-root My Files");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join(".env"),
@@ -3747,7 +3741,7 @@ mod tests {
 
     #[test]
     fn already_configured_returns_file_values_and_saved_indicators() {
-        let root = temp_root("openbot-already-configured");
+        let root = temp_root("remii-already-configured");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join(".env"),
@@ -3756,7 +3750,7 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(root.join(".langchain")).unwrap();
         std::fs::write(
-            root.join(openbot_env::CHATGPT_STORE_FILE),
+            root.join(remii_env::CHATGPT_STORE_FILE),
             "{\"refresh_token\":\"stored\"}\n",
         )
         .unwrap();
@@ -3780,7 +3774,7 @@ mod tests {
 
     #[test]
     fn already_configured_reports_legacy_anthropic_plan_without_returning_token() {
-        let root = temp_root("openbot-already-configured-anthropic-session");
+        let root = temp_root("remii-already-configured-anthropic-session");
         std::fs::create_dir_all(&root).unwrap();
 
         std::fs::write(
@@ -3839,14 +3833,14 @@ mod tests {
             Some(r#"{"version":42,"categories":["intelligence"],"model":null}"#),
         ] {
             if let Some(input) = input {
-                std::fs::write(root.join(openbot_desktop_lib::saved_intent::FILE), input).unwrap();
+                std::fs::write(root.join(remii_desktop_lib::saved_intent::FILE), input).unwrap();
             }
             let unknown = already_configured_for_root(root.to_string_lossy().into_owned());
             assert_eq!(unknown.saved.intelligence_api_key, None);
             assert_eq!(unknown.saved.model_sessions.anthropic, None);
         }
         std::fs::write(
-            root.join(openbot_desktop_lib::saved_intent::FILE),
+            root.join(remii_desktop_lib::saved_intent::FILE),
             r#"{"version":1,"categories":["intelligence","claude-plan"],"model":"claude-plan"}"#,
         )
         .unwrap();
@@ -3923,7 +3917,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         for unreadable in [false, true] {
             if unreadable {
-                std::fs::create_dir_all(root.join(openbot_env::CHATGPT_STORE_FILE)).unwrap();
+                std::fs::create_dir_all(root.join(remii_env::CHATGPT_STORE_FILE)).unwrap();
             }
             let choice = ChosenModel {
                 provider: "openai".into(),
@@ -3954,13 +3948,13 @@ mod tests {
                 format!("MANAGED_AGENT_AG_UI_URL=https://agent-{label}.example\n"),
             )
             .unwrap();
-            openbot_desktop_lib::vault::remember(
+            remii_desktop_lib::vault::remember(
                 root,
                 "OPENAI_API_KEY",
                 &format!("openai-{label}"),
             )
             .unwrap();
-            openbot_desktop_lib::vault::remember(
+            remii_desktop_lib::vault::remember(
                 root,
                 "MANAGED_AGENT_TOKEN",
                 &format!("agent-{label}"),
@@ -3985,7 +3979,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             credential,
-            openbot_env::ModelCredential::OpenAi {
+            remii_env::ModelCredential::OpenAi {
                 api_key: "openai-b".into()
             }
         );
@@ -4024,7 +4018,7 @@ mod tests {
         )
         .expect_err("unreadable .env must stop saved-key resolution");
 
-        assert_eq!(problem.said, "OpenBot could not read its settings.");
+        assert_eq!(problem.said, "Remii could not read its settings.");
         assert!(
             problem
                 .detail
@@ -4045,7 +4039,7 @@ mod tests {
             tauri::async_runtime::block_on(ask_the_bot_inner(root.clone(), "hello".into()))
                 .expect_err("unreadable .env must stop Ask before transport");
 
-        assert_eq!(problem.said, "OpenBot could not read its settings.");
+        assert_eq!(problem.said, "Remii could not read its settings.");
         assert!(
             problem
                 .detail
@@ -4070,11 +4064,11 @@ mod tests {
                 .unwrap();
             } else {
                 std::fs::write(
-                    root.join(openbot_desktop_lib::saved_intent::FILE),
+                    root.join(remii_desktop_lib::saved_intent::FILE),
                     r#"{"version":1,"categories":[],"model":"open-ai-api-key"}"#,
                 )
                 .unwrap();
-                assert!(openbot_desktop_lib::saved_intent::SavedIntent::read(&root)
+                assert!(remii_desktop_lib::saved_intent::SavedIntent::read(&root)
                     .model
                     .is_some());
             }
@@ -4133,7 +4127,7 @@ mod tests {
                 "That saved Anthropic API key is no longer available.",
             ),
         ] {
-            let root = temp_root(&format!("openbot-missing-saved-{provider}"));
+            let root = temp_root(&format!("remii-missing-saved-{provider}"));
             std::fs::create_dir_all(&root).unwrap();
             let mut trace = Vec::new();
 
@@ -4175,7 +4169,7 @@ mod tests {
             ("openai", "sk-openai-still-saved"),
             ("anthropic", "sk-ant-still-saved"),
         ] {
-            let root = temp_root(&format!("openbot-present-saved-{provider}"));
+            let root = temp_root(&format!("remii-present-saved-{provider}"));
             std::fs::create_dir_all(&root).unwrap();
 
             let credential = start_stack_credential_with(
@@ -4198,8 +4192,8 @@ mod tests {
             .expect("saved key should be accepted");
 
             match credential {
-                openbot_env::ModelCredential::OpenAi { api_key }
-                | openbot_env::ModelCredential::Anthropic { api_key } => {
+                remii_env::ModelCredential::OpenAi { api_key }
+                | remii_env::ModelCredential::Anthropic { api_key } => {
                     assert_eq!(api_key, expected_key);
                     println!(
                         "DTA-004 present provider={provider} saved_key_len={}",
@@ -4233,14 +4227,14 @@ mod tests {
         }
     }
 
-    fn persist_endpoint_fixture(root: &Path, credential: &openbot_env::ModelCredential) {
-        let settings = openbot_env::compose(
-            &openbot_env::Intelligence {
+    fn persist_endpoint_fixture(root: &Path, credential: &remii_env::ModelCredential) {
+        let settings = remii_env::compose(
+            &remii_env::Intelligence {
                 api_url: "https://api.example.test".into(),
                 gateway_ws_url: "wss://api.example.test".into(),
                 api_key: "synthetic-intelligence".into(),
             },
-            &openbot_env::Model {
+            &remii_env::Model {
                 credential: credential.clone(),
             },
             &engine::EngineStatus {
@@ -4250,13 +4244,13 @@ mod tests {
                 engine_socket: None,
                 detail: "synthetic".into(),
             },
-            &openbot_env::Ports::default(),
+            &remii_env::Ports::default(),
             &[],
             None,
             &Default::default(),
         );
-        let (public, secrets) = openbot_desktop_lib::vault::split(settings);
-        openbot_desktop_lib::saved_intent::persist_configuration(
+        let (public, secrets) = remii_desktop_lib::vault::split(settings);
+        remii_desktop_lib::saved_intent::persist_configuration(
             root, &public, &secrets, &secrets, credential,
         )
         .unwrap();
@@ -4316,7 +4310,7 @@ mod tests {
     fn stale_endpoint_hint_cannot_relabel_another_endpoints_stored_key() {
         let root = temp_root("compatible-stale-record");
         std::fs::create_dir_all(&root).unwrap();
-        let credential = openbot_env::ModelCredential::Compatible {
+        let credential = remii_env::ModelCredential::Compatible {
             base_url: "https://models.example/v1".into(),
             container_base_url: None,
             api_key: "synthetic-old-key".into(),
@@ -4331,7 +4325,7 @@ mod tests {
                 reads += 1;
                 assert_eq!(
                     key,
-                    openbot_desktop_lib::saved_intent::COMPATIBLE_CREDENTIAL
+                    remii_desktop_lib::saved_intent::COMPATIBLE_CREDENTIAL
                 );
                 Ok(
                     r#"{"base_url":"https://other.example/v1","api_key":"synthetic-other-key"}"#
@@ -4352,7 +4346,7 @@ mod tests {
         let credential =
             start_stack_credential(Path::new("synthetic-unused-compatible-root"), choice)
                 .expect("a valid container endpoint may be stored with the compatible credential");
-        let openbot_env::ModelCredential::Compatible {
+        let remii_env::ModelCredential::Compatible {
             base_url,
             container_base_url,
             model,
@@ -4430,7 +4424,7 @@ mod tests {
                 let credential =
                     start_stack_credential(Path::new("synthetic-unused-compatible-root"), choice)
                         .expect("a valid endpoint may run without an API key");
-                let openbot_env::ModelCredential::Compatible {
+                let remii_env::ModelCredential::Compatible {
                     base_url: actual_url,
                     api_key: actual_key,
                     model,
@@ -4524,11 +4518,11 @@ mod tests {
             engine: Some(engine::Engine::Podman),
             address: Some(engine::Address::new(
                 engine::Engine::Podman,
-                Some("openbot".into()),
+                Some("remii".into()),
             )),
             responding: true,
             engine_socket: None,
-            detail: "podman is answering on openbot.".into(),
+            detail: "podman is answering on remii.".into(),
         };
         let trace = std::cell::RefCell::new(Vec::new());
         let mut compose_checks = 0;
@@ -4554,7 +4548,7 @@ mod tests {
 
         assert_eq!(&*trace.borrow(), &["install-engine", "re-detect"]);
         assert_eq!(ready.installed.as_deref(), Some("Compose installed."));
-        assert_eq!(ready.address.connection.as_deref(), Some("openbot"));
+        assert_eq!(ready.address.connection.as_deref(), Some("remii"));
     }
 
     #[test]
@@ -4624,8 +4618,8 @@ mod tests {
             return;
         }
         let _path = SerializedPath::set();
-        let active = temp_root("openbot-active-stop-root");
-        let fallback = temp_root("openbot-default-stop-root");
+        let active = temp_root("remii-active-stop-root");
+        let fallback = temp_root("remii-default-stop-root");
         std::fs::create_dir_all(&active).unwrap();
         std::fs::write(active.join("docker-compose.yml"), "services: {}\n").unwrap();
         std::fs::create_dir_all(&fallback).unwrap();
@@ -4633,7 +4627,7 @@ mod tests {
         *shell.root.lock().unwrap() = Some(active.clone());
         let selected = shutdown_root(&shell, &fallback);
 
-        let record = temp_root("openbot-stop-record").join("commands.log");
+        let record = temp_root("remii-stop-record").join("commands.log");
         let engine = fake_engine(&record);
         stack::down(&engine, &selected).expect("fake compose down");
 
@@ -4651,8 +4645,8 @@ mod tests {
             return;
         }
         let _path = SerializedPath::set();
-        let active = temp_root("openbot-active-quit-root");
-        let fallback = temp_root("openbot-default-quit-root");
+        let active = temp_root("remii-active-quit-root");
+        let fallback = temp_root("remii-default-quit-root");
         std::fs::create_dir_all(&active).unwrap();
         std::fs::write(active.join("docker-compose.yml"), "services: {}\n").unwrap();
         std::fs::create_dir_all(&fallback).unwrap();
@@ -4660,7 +4654,7 @@ mod tests {
         *shell.root.lock().unwrap() = Some(active.clone());
         let selected = shutdown_root(&shell, &fallback);
 
-        let record = temp_root("openbot-quit-record").join("commands.log");
+        let record = temp_root("remii-quit-record").join("commands.log");
         let engine = fake_engine(&record);
         stack::down(&engine, &selected).expect("fake compose down");
 
@@ -4672,8 +4666,8 @@ mod tests {
 
     #[test]
     fn stop_reports_cleanup_and_down_failures_after_using_the_active_root() {
-        let active = temp_root("openbot-active-stop-failures");
-        let fallback = temp_root("openbot-default-stop-failures");
+        let active = temp_root("remii-active-stop-failures");
+        let fallback = temp_root("remii-default-stop-failures");
         std::fs::create_dir_all(&active).unwrap();
         std::fs::write(active.join("docker-compose.yml"), "services: {}\n").unwrap();
         std::fs::create_dir_all(&fallback).unwrap();
@@ -4689,7 +4683,7 @@ mod tests {
                     .borrow_mut()
                     .push(format!("cleanup:{}", root.display()));
                 Err(Problem::with(
-                    "OpenBot could not inspect or stop its host processes.",
+                    "Remii could not inspect or stop its host processes.",
                     "lsof exited with status 2",
                 ))
             },
@@ -4708,7 +4702,7 @@ mod tests {
             ]
         );
         assert!(
-            problem.contains("OpenBot could not inspect or stop its host processes."),
+            problem.contains("Remii could not inspect or stop its host processes."),
             "{problem}"
         );
         assert!(problem.contains("lsof exited with status 2"), "{problem}");
@@ -4723,8 +4717,8 @@ mod tests {
 
     #[test]
     fn exit_cleanup_body_records_cleanup_and_down_failures_after_using_the_active_root() {
-        let active = temp_root("openbot-active-exit-failures");
-        let fallback = temp_root("openbot-default-exit-failures");
+        let active = temp_root("remii-active-exit-failures");
+        let fallback = temp_root("remii-default-exit-failures");
         std::fs::create_dir_all(&active).unwrap();
         std::fs::write(active.join("docker-compose.yml"), "services: {}\n").unwrap();
         std::fs::create_dir_all(&fallback).unwrap();
@@ -4740,7 +4734,7 @@ mod tests {
                     .borrow_mut()
                     .push(format!("cleanup:{}", root.display()));
                 Err(Problem::with(
-                    "OpenBot could not inspect or stop its host processes.",
+                    "Remii could not inspect or stop its host processes.",
                     "taskkill exited with status 5",
                 ))
             },
@@ -4773,8 +4767,8 @@ mod tests {
 
     #[test]
     fn production_stop_root_selection_retains_resolved_root_not_menu_fallback() {
-        let selected = temp_root("openbot-production-stop-selected-root");
-        let fallback = temp_root("openbot-production-stop-default-root");
+        let selected = temp_root("remii-production-stop-selected-root");
+        let fallback = temp_root("remii-production-stop-default-root");
         let shell = Shell::default();
         *shell.root.lock().unwrap() = Some(selected.clone());
         remember_selected_root(&shell, &fallback);
@@ -4792,8 +4786,8 @@ mod tests {
 
     #[test]
     fn production_stop_root_selection_retains_stopped_selected_root_not_menu_fallback() {
-        let selected = temp_root("openbot-production-stop-stopped-selected-root");
-        let fallback = temp_root("openbot-production-stop-stopped-default-root");
+        let selected = temp_root("remii-production-stop-stopped-selected-root");
+        let fallback = temp_root("remii-production-stop-stopped-default-root");
         let shell = Shell::default();
         remember_selected_root(&shell, &selected);
 
@@ -4810,7 +4804,7 @@ mod tests {
 
     #[test]
     fn production_stop_root_selection_uses_menu_fallback_when_no_root_is_known() {
-        let fallback = temp_root("openbot-production-stop-only-default-root");
+        let fallback = temp_root("remii-production-stop-only-default-root");
         let shell = Shell::default();
 
         let stop_root = root_for_stop(&shell, &fallback);
@@ -4825,8 +4819,8 @@ mod tests {
 
     #[test]
     fn successful_stop_then_exit_uses_the_retained_selected_root_not_default() {
-        let selected = temp_root("openbot-selected-stop-exit");
-        let fallback = temp_root("openbot-default-stop-exit");
+        let selected = temp_root("remii-selected-stop-exit");
+        let fallback = temp_root("remii-default-stop-exit");
         std::fs::create_dir_all(&selected).unwrap();
         std::fs::create_dir_all(&fallback).unwrap();
         std::fs::write(fallback.join("sentinel"), "default-root-untouched").unwrap();
@@ -4930,7 +4924,7 @@ fn main() {
     let original:Vec<String>=env::args().skip(1).collect();
     let mut args=original.clone();
     let cwd=env::current_dir().unwrap();
-    let record=PathBuf::from(env::var_os("OPENBOT_TEST_ENGINE_RECORD").unwrap());
+    let record=PathBuf::from(env::var_os("REMII_TEST_ENGINE_RECORD").unwrap());
     let base=record.parent().unwrap();
     let engine=PathBuf::from(env::args().next().unwrap()).file_name().unwrap().to_string_lossy().into_owned();
     let default=if engine=="docker" {"docker-context"} else {"podman-connection"};
@@ -5030,8 +5024,15 @@ fn main() {
                 std::fs::write(base.join("podman-connection"), "alpha").unwrap();
                 crate::test_support::compile_fixture(&source, &path.bin().join("docker"));
                 std::fs::copy(path.bin().join("docker"), path.bin().join("podman")).unwrap();
-                std::env::set_var("OPENBOT_TEST_ENGINE_RECORD", base.join("commands.log"));
-                let app = tauri::test::mock_builder()
+                std::env::set_var("REMII_TEST_ENGINE_RECORD", base.join("commands.log"));
+if case == "remote-stale-image" {
+            std::fs::write(
+                root.join(".env"),
+                "PICKED_HARNESS_IMAGE=localhost/old-image@sha256:00\nPICKED_HARNESS_PORT=4206\n",
+            )
+            .unwrap();
+        }
+        let app = tauri::test::mock_builder()
                     .manage(Shell::default())
                     .invoke_handler(tauri::generate_handler![
                         start_stack,
@@ -5896,7 +5897,7 @@ fn main() {
                 }
             }
         }
-        let root = temp_root("openbot-harness-start-ipc");
+        let root = temp_root("remii-harness-start-ipc");
         write_installed_deployment(&root);
         let mut images: deployment::Images =
             serde_json::from_str(&std::fs::read_to_string(deployment::images_path(&root)).unwrap())
@@ -5917,30 +5918,22 @@ fn main() {
         let _path = SerializedPath::set_only_with("docker", "harness");
         let _cleanup = Cleanup(vec![root.clone(), _path.bin().to_path_buf()]);
         let record = root.join("commands.log");
-        std::env::set_var("OPENBOT_TEST_ENGINE_RECORD", &record);
-        // Reserve only an owned ephemeral loopback endpoint; no service thread until Start returns.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let remote = format!("http://{}/ag-ui", listener.local_addr().unwrap());
+        std::env::set_var("REMII_TEST_ENGINE_RECORD", &record);
         let mut model = serde_json::json!({
             "provider":"openai", "login":"api-key", "apiKey":"synthetic-provider-key"
         });
-        let mut choice = serde_json::json!({"id":"byo-url", "agentUrl":remote});
+        let mut choice = serde_json::json!({"id":"langgraph"});
         let (expected_up, expected_image) = match case {
-            "remote" | "remote-stale-image" => (
-                "compose up -d --no-build --pull never postgres supervisor agent-computer agent-bot agent-langgraph",
-                None,
-            ),
             "anthropic-api" => {
                 model = serde_json::json!({"provider":"anthropic", "login":"api-key", "apiKey":"synthetic-anthropic-key"});
-                choice = serde_json::json!({"id":"langgraph"});
                 ("compose --profile harness up -d --no-build --pull never postgres supervisor agent-computer agent-langgraph agent-harness", Some("agent-langgraph-agui"))
             }
             "compatible" => {
                 model = serde_json::json!({"provider":"openai-compatible", "login":"endpoint", "baseUrl":"http://127.0.0.1:11434/v1", "model":"synthetic-model", "apiKey":""});
+                choice = serde_json::Value::Null;
                 ("compose up -d --no-build --pull never postgres supervisor agent-computer agent-bot agent-langgraph", None)
             }
             "installed" => {
-                choice = serde_json::json!({"id":"langgraph"});
                 ("compose --profile harness up -d --no-build --pull never postgres supervisor agent-computer agent-bot agent-langgraph agent-harness", Some("agent-langgraph-agui"))
             }
             "none" => {
@@ -5964,14 +5957,7 @@ fn main() {
             )
             .unwrap();
         }
-        if case == "remote-stale-image" {
-            std::fs::write(
-                root.join(".env"),
-                "PICKED_HARNESS_IMAGE=localhost/old-image@sha256:00\nPICKED_HARNESS_PORT=4206\n",
-            )
-            .unwrap();
-        }
-        let app = tauri::test::mock_builder()
+let app = tauri::test::mock_builder()
             .manage(Shell::default())
             .invoke_handler(tauri::generate_handler![start_stack, ask_the_bot])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -6034,7 +6020,7 @@ fn main() {
         );
         assert!(commands.contains("\tcompose run --rm --pull never migrate\n"));
         assert!(!root.join(".logs").exists(), "no host runtime was launched");
-        let settings = openbot_env::read_already_set(
+        let settings = remii_env::read_already_set(
             &root.join(".env"),
             &[
                 "TENANT_PACKAGE_DIR",
@@ -6061,70 +6047,24 @@ fn main() {
                 .any(|service| service == "agent-langgraph"),
             "case={case}, persisted advertisement must match actual Start services"
         );
-        let mut asked = false;
-        if case.starts_with("remote") || case == "compatible" {
-            assert_eq!(settings.get("PICKED_HARNESS_URL"), Some(&remote));
-            assert_eq!(
-                settings.get("PICKED_HARNESS_KIND").map(String::as_str),
-                Some("remote-ag-ui")
-            );
-            let server = TestServer::from_listener(listener,
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
-                 data: {\"type\":\"TEXT_MESSAGE_CONTENT\",\"messageId\":\"m1\",\"delta\":\"D53-BYO-REMOTE-ANSWER\"}\n\n\
-                 data: {\"type\":\"RUN_FINISHED\",\"threadId\":\"t1\",\"runId\":\"r1\"}\n\n");
-            let answer = invoke(
-                "ask_the_bot",
-                serde_json::json!({"root":root,"question":"D53 remote IPC question"}),
-            )
-            .unwrap();
-            let request = server.request();
-            assert_eq!(answer, "D53-BYO-REMOTE-ANSWER");
-            assert_eq!(request.path, "/ag-ui");
-            assert!(request.body.contains("D53 remote IPC question"));
-            assert!(request
-                .headers
-                .iter()
-                .any(|line| line.starts_with("x-openbot-agent-token: ")));
-            asked = true;
-        } else if let Some(image) = expected_image {
+        if let Some(image) = expected_image {
             assert_eq!(
                 settings.get("PICKED_HARNESS_IMAGE"),
                 Some(&format!("localhost/{image}@sha256:00"))
             );
-            assert_ne!(settings.get("PICKED_HARNESS_URL"), Some(&remote));
         } else {
             assert!(!settings.contains_key("PICKED_HARNESS_URL"));
+            assert!(!settings.contains_key("PICKED_HARNESS_IMAGE"));
         }
         println!(
             "D53_START_IPC={}",
             serde_json::json!({
                 "case":case, "composeUp":up, "commands":commands, "intentionalMigrationBarrier":true,
                 "publicSettings":settings,
-                "defaultPackage":"../examples/fintech", "remoteEndpointPersistedAndConsumed":asked,
-                "actualAskIpcResponse":asked.then_some("D53-BYO-REMOTE-ANSWER"),
+                "defaultPackage":"../examples/fintech",
                 "noHostStartup":true, "nativeGui":false, "realEngineOrDatabase":false,
             })
         );
-    }
-
-    #[test]
-    fn remote_harness_start_ipc_skips_local_service_and_asks_persisted_endpoint() {
-        if crate::test_support::isolated_process(
-            "tests::remote_harness_start_ipc_skips_local_service_and_asks_persisted_endpoint",
-        ) {
-            return;
-        }
-        harness_start_ipc_case("remote");
-    }
-
-    #[test]
-    fn remote_harness_start_ipc_ignores_stale_local_image() {
-        if crate::test_support::isolated_process(
-            "tests::remote_harness_start_ipc_ignores_stale_local_image",
-        ) {
-            return;
-        }
-        harness_start_ipc_case("remote-stale-image");
     }
 
     #[test]
@@ -6194,12 +6134,12 @@ fn main() {
         ) {
             return;
         }
-        let root = temp_root("openbot-dead-compose-start");
+        let root = temp_root("remii-dead-compose-start");
         write_installed_deployment(&root);
-        let record = temp_root("openbot-dead-compose-record").join("commands.log");
+        let record = temp_root("remii-dead-compose-record").join("commands.log");
         std::fs::create_dir_all(record.parent().expect("record parent")).unwrap();
         let _path = SerializedPath::set_only_with("docker", "dead-service");
-        std::env::set_var("OPENBOT_TEST_ENGINE_RECORD", &record);
+        std::env::set_var("REMII_TEST_ENGINE_RECORD", &record);
         let app = tauri::test::mock_builder()
             .manage(Shell::default())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -6227,7 +6167,7 @@ fn main() {
 
         let commands = std::fs::read_to_string(&record).expect("command record");
         assert_eq!(
-            problem.said, "Part of OpenBot stopped during startup.",
+            problem.said, "Part of Remii stopped during startup.",
             "problem={problem:?} commands={commands}"
         );
         assert_eq!(
@@ -6272,12 +6212,12 @@ fn main() {
         ) {
             return;
         }
-        let root = temp_root("openbot-anthropic-bot-selection-start");
+        let root = temp_root("remii-anthropic-bot-selection-start");
         write_installed_deployment(&root);
-        let record = temp_root("openbot-anthropic-bot-selection-record").join("commands.log");
+        let record = temp_root("remii-anthropic-bot-selection-record").join("commands.log");
         std::fs::create_dir_all(record.parent().expect("record parent")).unwrap();
         let _path = SerializedPath::set_only_with("docker", "anthropic");
-        std::env::set_var("OPENBOT_TEST_ENGINE_RECORD", &record);
+        std::env::set_var("REMII_TEST_ENGINE_RECORD", &record);
         let app = tauri::test::mock_builder()
             .manage(Shell::default())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -6315,7 +6255,7 @@ fn main() {
                 .contains("compose up -d --no-build --pull never postgres supervisor agent-computer agent-bot"),
             "Anthropic Start must not target the OpenAI-only agent-bot: {commands}"
         );
-        assert_eq!(problem.said, "Part of OpenBot stopped during startup.");
+        assert_eq!(problem.said, "Part of Remii stopped during startup.");
         let detail = problem.detail.as_deref().unwrap_or_default();
         assert!(
             detail.contains("agent-langgraph stopped: langgraph died after boot"),
@@ -6344,7 +6284,7 @@ fn main() {
              data: {\"type\":\"text-delta\",\"payload\":{\"text\":\"391\"}}\n\n\
              data: {\"type\":\"finish\",\"payload\":{\"stepResult\":{\"reason\":\"stop\"}}}\n\n",
         );
-        let root = temp_root("openbot-mastra-ask");
+        let root = temp_root("remii-mastra-ask");
         let answer = tauri::async_runtime::block_on(ask_the_bot_with_settings(
             root.clone(),
             "What is 17 times 23?".to_string(),
@@ -6354,7 +6294,7 @@ fn main() {
                     "PICKED_HARNESS_KIND".to_string(),
                     "remote-mastra".to_string(),
                 ),
-                ("PICKED_HARNESS_AGENT_ID".to_string(), "openbot".to_string()),
+                ("PICKED_HARNESS_AGENT_ID".to_string(), "remii".to_string()),
                 (
                     "MANAGED_AGENT_TOKEN".to_string(),
                     "managed-token".to_string(),
@@ -6365,12 +6305,12 @@ fn main() {
 
         let request = server.request();
         assert_eq!(answer, "391");
-        assert_eq!(request.path, "/api/agents/openbot/stream");
+        assert_eq!(request.path, "/api/agents/remii/stream");
         assert!(
             request
                 .headers
                 .iter()
-                .any(|line| line == "x-openbot-agent-token: managed-token"),
+                .any(|line| line == "x-remii-agent-token: managed-token"),
             "{:?}",
             request.headers
         );
@@ -6383,13 +6323,13 @@ fn main() {
     }
 
     #[test]
-    fn ask_the_bot_uses_the_picked_byo_ag_ui_endpoint_before_managed_fallback() {
+    fn ask_the_bot_uses_the_picked_harness_endpoint_before_managed_fallback() {
         let server = TestServer::new(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
              data: {\"type\":\"TEXT_MESSAGE_CONTENT\",\"messageId\":\"m1\",\"delta\":\"391\"}\n\n\
              data: {\"type\":\"RUN_FINISHED\",\"threadId\":\"t1\",\"runId\":\"r1\"}\n\n",
         );
-        let root = temp_root("openbot-byo-ask");
+        let root = temp_root("remii-picked-harness-ask");
         let answer = tauri::async_runtime::block_on(ask_the_bot_with_settings(
             root.clone(),
             "What is 17 times 23?".to_string(),
@@ -6418,7 +6358,7 @@ fn main() {
             request
                 .headers
                 .iter()
-                .any(|line| line == "x-openbot-agent-token: managed-token"),
+                .any(|line| line == "x-remii-agent-token: managed-token"),
             "{:?}",
             request.headers
         );
@@ -6433,7 +6373,7 @@ fn main() {
             body.len() + 64
         );
         let server = TestServer::new(response);
-        let root = temp_root("openbot-body-read-ask");
+        let root = temp_root("remii-body-read-ask");
 
         let problem = tauri::async_runtime::block_on(ask_the_bot_with_settings(
             root.clone(),
@@ -6488,27 +6428,19 @@ fn main() {
             .build()
             .unwrap();
         let mut failures = Vec::new();
-        for case in [
-            "byo",
-            "installed-to-byo",
-            "legacy",
-            "unknown",
-            "installed-ag-ui",
-            "installed-mastra",
-            "managed",
-        ] {
+        for case in ["installed-ag-ui", "installed-mastra", "managed"] {
             let root = temp_root(&format!("ask-provenance-{case}"));
             std::fs::create_dir_all(&root).unwrap();
             let record = root.join("commands.log");
             std::fs::write(&record, "").unwrap();
-            std::env::set_var("OPENBOT_TEST_ENGINE_RECORD", &record);
+            std::env::set_var("REMII_TEST_ENGINE_RECORD", &record);
             let server = TestServer::new(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
                  data: {\"type\":\"RUN_STARTED\",\"threadId\":\"t1\",\"runId\":\"r1\"}\n\n\
                  data: {\"type\":\"RUN_FINISHED\",\"threadId\":\"t1\",\"runId\":\"r1\"}\n\n",
             );
             let endpoint = format!("{}/ag-ui", server.url);
-            let installed = openbot_env::PickedHarness::Installed {
+            let installed = remii_env::PickedHarness::Installed {
                 image: "localhost/synthetic-old-harness@sha256:00".into(),
                 port: test_server_port(&server),
                 name: "Installed fixture".into(),
@@ -6516,24 +6448,19 @@ fn main() {
                 run_path: "/ag-ui".into(),
                 remote_agent_id: "fixture-agent".into(),
             };
-            let byo = openbot_env::PickedHarness::RemoteAgUi {
-                url: format!("  {endpoint}  "),
-                name: "An agent you already run".into(),
-                remote_agent_id: String::new(),
-            };
-            let ports = openbot_env::Ports {
+            let ports = remii_env::Ports {
                 langgraph: test_server_port(&server),
                 ..Default::default()
             };
             let compose = |harness| {
-                openbot_env::compose(
-                    &openbot_env::Intelligence {
+                remii_env::compose(
+                    &remii_env::Intelligence {
                         api_url: "https://intelligence.example.test".into(),
                         gateway_ws_url: "wss://gateway.example.test".into(),
                         api_key: String::new(),
                     },
-                    &openbot_env::Model {
-                        credential: openbot_env::ModelCredential::OpenAi {
+                    &remii_env::Model {
+                        credential: remii_env::ModelCredential::OpenAi {
                             api_key: "synthetic-provider-key".into(),
                         },
                     },
@@ -6555,35 +6482,16 @@ fn main() {
             };
             let file = root.join(".env");
             let write_settings = |values: &std::collections::BTreeMap<String, String>| {
-                openbot_env::write(&file, values, &Default::default()).unwrap();
+                remii_env::write(&file, values, &Default::default()).unwrap();
             };
-            if ["installed-to-byo", "legacy", "unknown"].contains(&case) {
+            if ["installed-ag-ui", "installed-mastra"].contains(&case) {
                 write_settings(&compose(Some(&installed)));
             }
             write_settings(&compose(match case {
                 "managed" => None,
-                "installed-ag-ui" | "installed-mastra" => Some(&installed),
-                _ => Some(&byo),
+                _ => Some(&installed),
             }));
-            // Simulate older/unknown metadata only after the real installed -> BYO writes. The
-            // image/port remain stale, and KIND is the same as an installed AG-UI selection.
-            if case == "legacy" {
-                let text = std::fs::read_to_string(&file).unwrap();
-                std::fs::write(
-                    &file,
-                    text.lines()
-                        .filter(|line| !line.starts_with("PICKED_HARNESS_SOURCE="))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                )
-                .unwrap();
-            } else if case == "unknown" {
-                write_settings(&std::collections::BTreeMap::from([(
-                    "PICKED_HARNESS_SOURCE".into(),
-                    "future-source".into(),
-                )]));
-            }
-            let public_settings = openbot_env::read_already_set(
+            let public_settings = remii_env::read_already_set(
                 &file,
                 &[
                     "PICKED_HARNESS_URL",
@@ -6621,8 +6529,7 @@ fn main() {
             let problem = result.expect_err("completed stream without text is a Problem");
             let said = problem["said"].as_str().unwrap();
             let detail = problem["detail"].as_str().unwrap_or("");
-            let local =
-                case.starts_with("installed-") && case != "installed-to-byo" || case == "managed";
+            let local = case != "managed";
             let expected_service = if case == "managed" {
                 "agent-langgraph"
             } else {
@@ -6654,7 +6561,7 @@ fn main() {
                 && request
                     .headers
                     .iter()
-                    .any(|header| header == "x-openbot-agent-token: synthetic-ask-token");
+                    .any(|header| header == "x-remii-agent-token: synthetic-ask-token");
             std::fs::remove_dir_all(&root).unwrap();
             println!(
                 "F5499_ASK_IPC={}",
@@ -6683,15 +6590,15 @@ fn main() {
             return;
         }
         let _path = SerializedPath::set_with("docker", "empty-answer");
-        let record = temp_root("openbot-managed-empty-answer-record").join("commands.log");
+        let record = temp_root("remii-managed-empty-answer-record").join("commands.log");
         std::fs::create_dir_all(record.parent().expect("record parent")).unwrap();
-        std::env::set_var("OPENBOT_TEST_ENGINE_RECORD", &record);
+        std::env::set_var("REMII_TEST_ENGINE_RECORD", &record);
         let server = TestServer::new(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
              data: {\"type\":\"RUN_STARTED\",\"threadId\":\"t1\",\"runId\":\"r1\"}\n\n\
              data: {\"type\":\"RUN_FINISHED\",\"threadId\":\"t1\",\"runId\":\"r1\"}\n\n",
         );
-        let root = temp_root("openbot-managed-empty-answer");
+        let root = temp_root("remii-managed-empty-answer");
         std::fs::create_dir_all(&root).unwrap();
 
         let problem = tauri::async_runtime::block_on(ask_the_bot_with_settings(
@@ -6744,15 +6651,15 @@ fn main() {
             return;
         }
         let _path = SerializedPath::set_with("docker", "empty-answer");
-        let record = temp_root("openbot-picked-empty-answer-record").join("commands.log");
+        let record = temp_root("remii-picked-empty-answer-record").join("commands.log");
         std::fs::create_dir_all(record.parent().expect("record parent")).unwrap();
-        std::env::set_var("OPENBOT_TEST_ENGINE_RECORD", &record);
+        std::env::set_var("REMII_TEST_ENGINE_RECORD", &record);
         let server = TestServer::new(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
              data: {\"type\":\"RUN_STARTED\",\"threadId\":\"t1\",\"runId\":\"r1\"}\n\n\
              data: {\"type\":\"RUN_FINISHED\",\"threadId\":\"t1\",\"runId\":\"r1\"}\n\n",
         );
-        let root = temp_root("openbot-picked-empty-answer");
+        let root = temp_root("remii-picked-empty-answer");
         std::fs::create_dir_all(&root).unwrap();
 
         let problem = tauri::async_runtime::block_on(ask_the_bot_with_settings(
@@ -6820,31 +6727,31 @@ fn main() {
                 (
                     "server".into(),
                     deployment::Image {
-                        reference: "localhost/openbot-server@sha256:00".into(),
+                        reference: "localhost/remii-server@sha256:00".into(),
                     },
                 ),
                 (
                     "supervisor".into(),
                     deployment::Image {
-                        reference: "localhost/openbot-supervisor@sha256:00".into(),
+                        reference: "localhost/remii-supervisor@sha256:00".into(),
                     },
                 ),
                 (
                     "agent-computer".into(),
                     deployment::Image {
-                        reference: "localhost/openbot-agent-computer@sha256:00".into(),
+                        reference: "localhost/remii-agent-computer@sha256:00".into(),
                     },
                 ),
                 (
                     "agent-bot".into(),
                     deployment::Image {
-                        reference: "localhost/openbot-agent-bot@sha256:00".into(),
+                        reference: "localhost/remii-agent-bot@sha256:00".into(),
                     },
                 ),
                 (
                     "agent-langgraph".into(),
                     deployment::Image {
-                        reference: "localhost/openbot-agent-langgraph@sha256:00".into(),
+                        reference: "localhost/remii-agent-langgraph@sha256:00".into(),
                     },
                 ),
             ]),
@@ -7322,7 +7229,7 @@ fn main() {
             .manage(Shell::default())
             .invoke_handler(tauri::generate_handler![
                 already_running,
-                show_openbot,
+                show_remii,
                 last_failure
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -7443,9 +7350,9 @@ fn main() {
             .unwrap()
             .is_null());
         assert!(recovery_required(&shell, &fixture.host.root));
-        let show_error = invoke("show_openbot", serde_json::json!({})).unwrap_err();
+        let show_error = invoke("show_remii", serde_json::json!({})).unwrap_err();
         assert!(show_error.as_str().unwrap().contains("needs recovery"));
-        restore_window_on(fixture.app.handle(), &openbot_env::Ports::default());
+        restore_window_on(fixture.app.handle(), &remii_env::Ports::default());
         assert_eq!(window.url().unwrap().as_str(), setup);
         println!(
             "WORKER_RECOVERY_COMMANDS={}",
@@ -7589,7 +7496,7 @@ fn main() {
         )
         .unwrap();
         let notice = last_failure(app.handle().clone()).expect("persisted Quit notice");
-        assert_eq!(notice.said, "OpenBot had trouble shutting down last time.");
+        assert_eq!(notice.said, "Remii had trouble shutting down last time.");
         assert!(notice
             .detail
             .as_ref()
@@ -7624,7 +7531,7 @@ fn main() {
             owned_app_url(&f.owned, &f.ports).is_some(),
             "survivors must still answer"
         );
-        assert!(show_openbot_on(app.handle().clone(), &f.ports).is_err());
+        assert!(show_remii_on(app.handle().clone(), &f.ports).is_err());
         restore_window_on(app.handle(), &f.ports);
         assert_eq!(window.url().unwrap().as_str(), setup);
         // Reclaim may advance the active generation before a later Start failure. It still
@@ -7665,7 +7572,7 @@ fn main() {
             "restore must not consume the persisted notice before React asks for it"
         );
         let notice = last_failure(app.handle().clone()).expect("persisted Quit notice");
-        assert_eq!(notice.said, "OpenBot had trouble shutting down last time.");
+        assert_eq!(notice.said, "Remii had trouble shutting down last time.");
         assert!(notice
             .detail
             .as_ref()
@@ -7696,7 +7603,7 @@ fn main() {
 
         assert!(recovery_required(&shell, &f.owned));
         let failure = last_failure(app.handle().clone()).expect("volatile sink failure");
-        assert_eq!(failure.said, "OpenBot could not record a shutdown problem.");
+        assert_eq!(failure.said, "Remii could not record a shutdown problem.");
         assert!(failure
             .detail
             .as_ref()
@@ -7712,7 +7619,7 @@ fn main() {
         let app = f.app(&f.owned, "tauri://localhost/recovery");
         std::fs::write(f.owned.join("pause-response"), "").unwrap();
         let restoring = app.handle().clone();
-        let ports = openbot_env::Ports {
+        let ports = remii_env::Ports {
             server: f.ports.server,
             app: f.ports.app,
             ..Default::default()
@@ -8059,7 +7966,7 @@ fn main() {
         let result = finish_host_start(&attempt, &root, children, Ok(())).unwrap_err();
         assert_eq!(
             result.said,
-            "OpenBot could not verify its host process ownership."
+            "Remii could not verify its host process ownership."
         );
         assert!(
             result
@@ -8367,8 +8274,8 @@ fn main() {
             static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let previous = std::env::var_os("PATH");
-            let previous_record = std::env::var_os("OPENBOT_TEST_ENGINE_RECORD");
-            let bin = temp_root("openbot-fake-engine-bin");
+            let previous_record = std::env::var_os("REMII_TEST_ENGINE_RECORD");
+            let bin = temp_root("remii-fake-engine-bin");
             std::fs::create_dir_all(&bin).unwrap();
             Self::write_binary_under(&bin, binary, scenario);
             Self::write_binary_under(&bin, "bun", "runtime");
@@ -8438,16 +8345,16 @@ fn main() {
                 std::env::remove_var("PATH");
             }
             if let Some(previous) = &self.previous_record {
-                std::env::set_var("OPENBOT_TEST_ENGINE_RECORD", previous);
+                std::env::set_var("REMII_TEST_ENGINE_RECORD", previous);
             } else {
-                std::env::remove_var("OPENBOT_TEST_ENGINE_RECORD");
+                std::env::remove_var("REMII_TEST_ENGINE_RECORD");
             }
         }
     }
 
     fn fake_engine(record: &Path) -> engine::Address {
         std::fs::create_dir_all(record.parent().expect("record parent")).unwrap();
-        std::env::set_var("OPENBOT_TEST_ENGINE_RECORD", record);
+        std::env::set_var("REMII_TEST_ENGINE_RECORD", record);
         engine::Address::new(engine::Engine::Docker, None)
     }
 
@@ -8472,7 +8379,7 @@ fn main() {
         child: std::process::Child,
         app_child: std::process::Child,
         app_descendant_pid: Option<u32>,
-        ports: openbot_env::Ports,
+        ports: remii_env::Ports,
     }
 
     impl RestoreFixture {
@@ -8583,7 +8490,7 @@ fn main() {
                 child,
                 app_child,
                 app_descendant_pid,
-                ports: openbot_env::Ports {
+                ports: remii_env::Ports {
                     server: numbers[0],
                     app: app_numbers[1],
                     ..Default::default()
@@ -8643,9 +8550,9 @@ fn main() {
             return;
         }
         let path = SerializedPath::set_only_with("docker", "shutdown");
-        let root = temp_root("openbot-restricted-path-credential-store");
+        let root = temp_root("remii-restricted-path-credential-store");
         std::fs::create_dir_all(&root).unwrap();
-        let saved = openbot_desktop_lib::vault::remember(
+        let saved = remii_desktop_lib::vault::remember(
             &root,
             "OPENAI_API_KEY",
             "synthetic-path-regression-key",
@@ -8731,7 +8638,7 @@ fn main() {
         config.app.windows[0].label = "another-window".into();
         assert_eq!(
             configured_setup_url(&config, true, true).unwrap_err(),
-            "the OpenBot setup window is not configured",
+            "the Remii setup window is not configured",
         );
     }
 
@@ -8940,7 +8847,7 @@ fn main() {
         assert!(stack::app_url(f.ports.app).is_some());
         let initial_adoption = already_running_at(&f.owned, &f.ports);
         let app = f.app(&f.owned, "tauri://localhost/");
-        let shown = show_openbot_on(app.handle().clone(), &f.ports);
+        let shown = show_remii_on(app.handle().clone(), &f.ports);
         restore_window_on(app.handle(), &f.ports);
         let destination = app.get_webview_window("main").unwrap().url().unwrap();
         assert!(!initial_adoption && shown.is_err() && destination.as_str() == "tauri://localhost/",
@@ -8957,7 +8864,7 @@ fn main() {
             }
             assert!(already_running_at(&f.owned, &f.ports));
             let app = f.app(&f.owned, "tauri://localhost/");
-            show_openbot_on(app.handle().clone(), &f.ports).unwrap();
+            show_remii_on(app.handle().clone(), &f.ports).unwrap();
             restore_window_on(app.handle(), &f.ports);
             assert_eq!(
                 app.get_webview_window("main")

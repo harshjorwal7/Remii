@@ -15,10 +15,25 @@ describe("computer routes", () => {
       },
     } as unknown as ComputerGateway;
     const policyStore = {} as PolicyStore;
+    /*
+     * Sets the actor, which it did not used to.
+     *
+     * The middleware was `(_context, next) => next()`, so `context.var.actor` was never assigned and
+     * every acting route that reads it — the gateway key is built from `actor.id` — threw on the way
+     * past. The 500 the test then reported read as a broken gateway seam when it was a stub that had
+     * stopped matching what a signed-in caller looks like.
+     */
     const requireUser: MiddlewareHandler<{ Variables: AppVariables }> = async (
-      _context,
+      context,
       next,
-    ) => next();
+    ) => {
+      context.set("actor", {
+        id: "user-1",
+        email: "member@remii.test",
+        role: "user",
+      });
+      await next();
+    };
     // Permissive: what this covers is the gateway seam, not who may act as the Bot. That question
     // has its own suite in bot-access.test.ts.
     const routes = createComputerRoutes(
@@ -29,7 +44,7 @@ describe("computer routes", () => {
     );
 
     const response = await routes.request(
-      "http://openbot.test/bot-17/screenshot",
+      "http://remii.test/bot-17/screenshot",
     );
 
     expect(response.status).toBe(200);
@@ -50,13 +65,13 @@ describe("computer routes", () => {
  */
 const member: AuthenticatedActor = {
   id: "user-1",
-  email: "member@openbot.test",
+  email: "member@remii.test",
   role: "user",
 };
 
 const administrator: AuthenticatedActor = {
   id: "admin-1",
-  email: "admin@openbot.test",
+  email: "admin@remii.test",
   role: "admin",
 };
 
@@ -91,44 +106,50 @@ function appFor(actor: AuthenticatedActor, computers: () => Promise<unknown>) {
   };
 }
 
-describe("computer fleet listing", () => {
-  test("refuses a signed-in user the fleet, and does not ask the gateway", async () => {
-    const { app, listed } = appFor(member, async () => ({
-      isolation: "per-bot",
-      computers: [
-        { botId: "private-coworker", running: true, startedAt: null },
-      ],
-    }));
-
-    const response = await app.request("http://openbot.test/any-bot/computers");
-
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toEqual({
-      error: "Administrator access required.",
-    });
-    // Refused before the gateway is asked: a check that runs after the fleet has been read is not a
-    // check, it is a filter on the response.
-    expect(listed()).toBe(0);
-  });
-
-  test("lets an administrator see the fleet", async () => {
+/*
+ * WAS two tests about `/:botId/computers`: a signed-in member refused with 403 and
+ * "Administrator access required.", an administrator handed the whole fleet.
+ *
+ * Neither route nor role exists now. `/:botId/computers` is gone with the admin surface, and there
+ * is no administrator to be refused — every signed-in person is a user. So both were 404ing against
+ * assertions about an authorization decision nobody makes.
+ *
+ * What replaced it is `GET /fleet`, which answers with the caller's OWN computers and filters on
+ * `owner`; `computer-fleet-route.test.ts` holds that down in full. What is worth keeping here is the
+ * gateway: it must be asked exactly once, and only for the caller, so a coworker's computer can never
+ * reach them even by omission.
+ */
+describe("the fleet the caller owns", () => {
+  test("answers with their own computers, and asks the gateway once", async () => {
     const fleet = {
       isolation: "per-bot" as const,
       computers: [
         {
-          botId: "private-coworker",
+          botId: "their-computer",
           running: true,
           startedAt: "2026-08-20T00:00:00.000Z",
+          owner: member.id,
+          egress: null,
+        },
+        {
+          botId: "a-coworkers-computer",
+          running: true,
+          startedAt: "2026-08-20T00:00:00.000Z",
+          owner: "somebody-else",
           egress: null,
         },
       ],
     };
-    const { app, listed } = appFor(administrator, async () => fleet);
+    const { app, listed } = appFor(member, async () => fleet);
 
-    const response = await app.request("http://openbot.test/any-bot/computers");
+    const response = await app.request("http://remii.test/fleet");
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual(fleet);
+    await expect(response.json()).resolves.toEqual({
+      isolation: "per-bot",
+      computers: [fleet.computers[0]],
+    });
+    // Once. Two reads would mean the list was assembled by asking twice and hoping.
     expect(listed()).toBe(1);
   });
 });
@@ -168,7 +189,7 @@ describe("human input", () => {
   async function send(body: unknown, kind = "click") {
     const { app, calls } = recordingGateway();
     const response = await app.request(
-      `http://openbot.test/bot-1/human/${kind}`,
+      `http://remii.test/bot-1/human/${kind}`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },

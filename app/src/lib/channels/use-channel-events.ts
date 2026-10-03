@@ -1,8 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { type ChannelPage, type ChannelSummary, channelKeys } from "./queries";
 import { socketUrl as buildSocketUrl } from "@/lib/socket-url";
+import {
+  type ChannelActivityBrief,
+  type ChannelPage,
+  type ChannelSummary,
+  channelKeys,
+} from "./queries";
 
 /**
  * Keep the roster live.
@@ -90,6 +95,15 @@ export type ChannelActivityEvent = {
    * indicator without disturbing the preview or the order.
    */
   busy?: boolean;
+  /**
+   * What a run is doing in this channel, or — as an explicit `null` — that nothing is.
+   *
+   * The key is what makes a finished run different from a missing field: `null` is the server
+   * saying a run ended and the mark should go, and an absent key is a different event entirely.
+   * Collapsing the two would leave a roster showing "Working" long after the run that caused it
+   * finished, which is the one outcome this whole feed exists to prevent.
+   */
+  activity?: ChannelActivityBrief | null;
 };
 
 /** The infinite query's cache, which holds pages rather than one array. */
@@ -171,6 +185,27 @@ export function applyChannelEvent(
    * is also not activity — a channel does not jump to the top of the roster because a turn started
    * in it — so the order is left exactly as it was.
    */
+  /*
+   * A run's state patches the one field it is about, and never re-sorts.
+   *
+   * Same two rules as `busy` above, and for the same reasons: a state change is not something
+   * anybody said in the channel, so it must not wipe the preview by spreading the event over the
+   * row, and it must not move the row to the top of the roster.
+   *
+   * Compared by value rather than by identity, because the server sends a fresh object every time
+   * and a client that re-rendered on each would animate the whole roster on every tool call of
+   * every run.
+   */
+  if (Object.hasOwn(activity, "activity")) {
+    const next = activity.activity ?? null;
+    if (sameActivity(previous.activity ?? null, next)) return data;
+    const channels = page.channels.slice();
+    channels[index] = { ...previous, activity: next };
+    const pages = data.pages.slice();
+    pages[holdingPage] = { ...page, channels };
+    return { ...data, pages };
+  }
+
   if (activity.busy !== undefined) {
     if ((previous.busy ?? false) === activity.busy) return data;
     const channels = page.channels.slice();
@@ -192,6 +227,26 @@ export function applyChannelEvent(
   const pages = data.pages.slice();
   pages[holdingPage] = { ...page, channels: next };
   return { ...data, pages };
+}
+
+/**
+ * Whether two briefs say the same thing.
+ *
+ * Field by field, so a state that arrives again unchanged returns the same cache and React renders
+ * nothing. The bot is part of it: a channel with two Bots hands work between them, and the same
+ * state from a different Bot is a different thing happening.
+ */
+function sameActivity(
+  a: ChannelActivityBrief | null,
+  b: ChannelActivityBrief | null,
+): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.state === b.state &&
+    a.label === b.label &&
+    a.detail === b.detail &&
+    a.botId === b.botId
+  );
 }
 
 const FIRST_RETRY_MS = 500;

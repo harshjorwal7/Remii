@@ -6,11 +6,11 @@ export function canAccessAgent(
 ): boolean {
   if (agent.deletedAt !== null) return false;
 
-  return (
-    agent.visibility === "public" ||
-    agent.ownerUserId === actor.id ||
-    actor.role === "admin"
-  );
+  // Strict per-user SaaS: no public sharing and no administrator override. A
+  // coworker is reachable only by its owner. System templates shipped with the
+  // deployment (systemOwned) are definitions, not shared computers: every user
+  // still gets their own sandbox, workspace and connections when they use one.
+  return agent.systemOwned || agent.ownerUserId === actor.id;
 }
 
 export function canManageAgent(
@@ -19,7 +19,7 @@ export function canManageAgent(
 ): boolean {
   if (agent.systemOwned || agent.deletedAt !== null) return false;
 
-  return agent.ownerUserId === actor.id || actor.role === "admin";
+  return agent.ownerUserId === actor.id;
 }
 
 export const canRunAgent = canAccessAgent;

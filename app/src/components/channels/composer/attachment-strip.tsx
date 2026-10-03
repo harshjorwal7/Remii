@@ -1,6 +1,7 @@
 import { IconFile, IconX } from "@tabler/icons-react";
 import { motion, useReducedMotion } from "motion/react";
 
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EASE_OUT, ENTRANCE_SECONDS } from "@/lib/motion";
 import { Collapse } from "./collapse";
@@ -191,14 +192,16 @@ function RemoveButton({
   onRemove: () => void;
 }) {
   return (
-    <button
+    <Button
       aria-label={`Remove ${name}`}
-      className="absolute top-1 right-1 grid size-5 place-items-center rounded-full border border-border bg-background/90 text-muted-foreground shadow-sm transition-colors hover:text-foreground"
+      className="absolute top-1 right-1 rounded-full border border-border bg-background/90 text-muted-foreground shadow-sm hover:text-foreground"
       onClick={onRemove}
+      size="icon-xs"
       type="button"
+      variant="ghost"
     >
-      <IconX className="size-3" />
-    </button>
+      <IconX />
+    </Button>
   );
 }
 

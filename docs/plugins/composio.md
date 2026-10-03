@@ -8,20 +8,18 @@ consents to Composio, and Composio holds what comes back. A Bot with a brokered 
 reaches the app **as the person asking**, the same as every other per-person connector here, so two
 people asking the same question get the answers their own accounts can see.
 
-Setting it up takes three hands, and none of them can do another's:
+Setting it up takes two hands, and neither can do the other's:
 
-| Who              | Does                                   | Where                                                            |
-| ---------------- | -------------------------------------- | ---------------------------------------------------------------- |
-| Whoever deploys  | Sets `COMPOSIO_API_KEY`                | The deployment's environment. There is no screen for it           |
-| An administrator | Enables an app                         | `/admin/plugins/composio`                                         |
-| An administrator | Grants its actions to a Bot            | `/admin/plugins/composio-<slug>`, then that page's per-Bot screen |
-| Each person      | Connects their own account to that app | `/settings/connected-accounts`                                    |
+| Who             | Does                                          | Where                                                   |
+| --------------- | --------------------------------------------- | ------------------------------------------------------- |
+| Whoever deploys | Sets `COMPOSIO_API_KEY`                       | The deployment's environment. There is no screen for it |
+| You             | Adds an app, then grants its actions to a Bot | `/settings/connected-accounts`                          |
+| You             | Connects your own account to that app         | `/settings/connected-accounts`                          |
+and nothing else. Nobody, however much they can change in the environment, can turn Composio on from
+a page. `/settings/connected-accounts` is where a key that is already set gets used rather than where
+one is set.
 
-The key is the row that is easiest to misread, so it is stated twice: it is an environment variable
-and nothing else. No administrator, however permissioned, can turn Composio on from a page, and
-`/admin/plugins/composio` is where a key that is already set gets used rather than where one is set.
-
-There is deliberately no endpoint for an administrator to connect an account on somebody's behalf.
+There is deliberately no endpoint for one person to connect an account on somebody else's behalf.
 
 ## The key
 
@@ -35,17 +33,17 @@ at boot to find out, so the first real request is what says whether it works. `c
 is how an operator asks that question deliberately rather than by watching somebody else fail.
 
 Unset is a supported, fully described state rather than a degraded one: it is what every deployment
-is today. What is on screen with no key is exactly one row, on `/admin/plugins` under the **More
-apps** heading, titled *Composio* and reading *Add your Composio key to enable a catalogue of tools.
-Set COMPOSIO_API_KEY on this deployment.* It has no chevron and it is not a link, because there is
-nowhere to go until the key is set. It names the setting rather than hiding the feature, so an
-administrator who has heard of Composio can find out what it wants — and because the heading above
-it stays too, the handful of reviewed connectors does not read as the whole story.
+is today. With no key the whole **Composio** section of `/settings/connected-accounts` is not drawn —
+not the sandbox row, not the directory, not a placeholder naming the variable. There is nothing to
+browse, nothing to add, and no Composio tool for a Bot to call.
 
-That row is the whole of it. There is no directory to browse, no picker, no brokered app on
-anybody's connected-accounts page, and no Composio tool for a Bot to call.
+This is worth recording as a decision rather than a simplification, because the previous behaviour was
+the opposite and was worse twice over: a dead row reading *Add your Composio key to enable a
+catalogue of tools* described a step only somebody with access to the environment could take, on a
+page whose reader was not that person. In a product where every user owns their own data, the only
+person who can act on that sentence is the one who can already see it in `.env`.
 
-An app enabled while a key was set and then left without one keeps its row and its grants. Its page
+An app added while a key was set and then left without one keeps its row and its grants. Its page
 says the key is missing, and its calls refuse with a sentence saying the same — distinguished, as
 everywhere else here, from "the app advertises nothing".
 
@@ -64,13 +62,14 @@ never finished the consent page all leave a product that looks configured and an
 **It separates the key from the person, which is two of those three and not all of them.** The
 catalogue read answers for the key: a key Composio rejects, and a project whose catalogue does not
 carry the app, both stop the run with the vendor's own sentence. The connection read answers for the
-person. What it does not separate is the authorization config — an app no administrator has enabled
-here has no config for anybody to connect against, so it reads exactly like a person who never
-finished consenting, and the no-connection line says so rather than blaming the person. Check the
-app's page under `/admin/plugins` to tell those two apart; enabling an app is what creates the
-config. Making the script itself distinguish them would need a read-only auth-config listing on the
-broker seam, which does not exist yet — the seam has `ensureAuthConfig` and `deleteAuthConfig`, both
-of which write, and a read-only diagnostic must not create the object it was asked to look for.
+person. What it does not separate is the authorization config — an app nobody has added here has no
+config to connect against, so it reads exactly like a person who never finished consenting, and the
+no-connection line says so rather than blaming the person. Check whether the app appears in the
+Composio directory under `/settings/connected-accounts` to tell those two apart; adding an app is what
+creates the config. Making the script itself distinguish them would need a read-only auth-config
+listing on the broker seam, which does not exist yet — the seam has `ensureAuthConfig` and
+`deleteAuthConfig`, both of which write, and a read-only diagnostic must not create the object it was
+asked to look for.
 
 **It names every app's resolved connection kind, and tallies the kinds, because a silent failure
 lives exactly there.** One line per app carries the slug, the kind this deployment resolved it to
@@ -102,13 +101,14 @@ beside it — and an action that ran and failed puts its outcome and its log id 
 those two lines are the whole explanation of the `1` it exits with. The exit codes are `0` for a run
 that finished, `1` for a run that stopped, and `2` for a missing `--user`.
 
-## What an administrator does
+## What you do
 
 ### 1. Find the app, and read its action count
 
-At `/admin/plugins/composio`, search Composio's directory. The directory is read to its end — page
-by page, following Composio's own cursor — and searched in this process rather than at the vendor,
-so what is on screen is a whole listing and not a page of one.
+At `/settings/connected-accounts`, in the **Composio** section below your accounts, search Composio's
+directory. The directory is read to its end — page by page, following Composio's own cursor — and
+searched in this process rather than at the vendor, so what is on screen is a whole listing and not a
+page of one.
 
 **It is the whole CONNECTABLE listing, which is not the whole catalogue.** The apps that want an
 OAuth application registered by whoever runs this deployment are filtered out before the search
@@ -122,7 +122,7 @@ Each row carries the app's **action count**, and that number is worth reading be
 well. There is no cap: grants remain the only ceiling, so a large app is possible and merely never
 accidental.
 
-### 2. Enable the app
+### 2. Add the app
 
 **Add** takes the slug, which has to be one the directory itself answered with — a slug that arrived
 from a caller and was written into a row's url would become the app every future call runs in.
@@ -130,7 +130,7 @@ from a caller and was written into a row's url would become the app every future
 **The authorization config is created here, not on somebody's first click, and it is created
 first.** The SDK's own one-call shortcut would have made one on demand, at Composio's managed
 defaults and under a name of its choosing, the first time any person pressed Connect. Creating it at
-enable time, named for this deployment, makes it an object an operator can see in their Composio
+add time, named for this deployment, makes it an object an operator can see in their Composio
 dashboard from the moment the app exists — and tighten there, without a code change. It comes before
 anything is written here, so a failure leaves no row behind and pressing the button again is the
 whole recovery. Which KIND of config is created depends on how the app connects, and the app that
@@ -139,26 +139,25 @@ next section.
 
 An account is then attached **against that config**, whether by a link minted for a consent screen
 or by a key somebody types, which is why nothing mints a config later: an app whose config was
-deleted at the dashboard refuses at Connect, naming the administrator's step, rather than quietly
+deleted at the dashboard refuses at Connect, naming the step that was missed, rather than quietly
 acquiring a second one that nobody here named or can find.
 
 Then one ordinary `mcp_servers` row — id `composio-<slug>`, url `composio://<slug>`, provenance
 `composio`, vendor Composio, title from the directory, and no credential of any kind — and then the
 app's actions, recorded with each one's effect, destructive marker and version, so a bad key is
-reported to the administrator who just pressed the button rather than the first time a Bot calls
+reported to whoever just pressed the button rather than the first time a Bot calls
 something. The audit row is the existing `configuration.changed` / `mcp_server_added`, marked
 `provenance: "composio"`.
 
-Nothing arrives switched on. Enabling an app names no Bot, and a switch drawn in the on position for
+Nothing arrives switched on. Adding an app names no Bot, and a switch drawn in the on position for
 a grant nobody made is the one thing this codebase is most consistently careful about.
 
 ### 3. Grant actions to a Bot
 
-Enabling the app gives no Bot access to it. From the app's page at `/admin/plugins/composio-<slug>`,
-open one Bot to get a screen listing every action with a switch each — searchable, split into reads
-and writes, with *turn on every read-only action* as the one bulk action, which says how many tools
-that Bot will then carry before it does it. Every call then checks the grant, evaluates the action
-policy, and writes an audit row.
+Adding the app gives no Bot access to it. Open the coworker from `/agents`, and on its **Connection**
+tab find the app: one switch for the whole app, and expanding it lists every action with a switch
+each, split into reads and writes, with the effect and the destructive marker drawn beside each name.
+Every call then checks the grant, evaluates the action policy, and writes an audit row.
 
 A destructive action renders as danger. Nothing renders as reassurance: an action that does not
 claim to be destructive is not claiming to be safe, so the absence of the marker is drawn plain,
@@ -196,8 +195,8 @@ managed OAuth, because it asks the person for nothing; then self-registering OAu
 nobody for anything; then a scheme whose secret the person already holds. Linear publishes managed
 OAuth *and* an API key, and resolves to the consent flow for exactly that reason.
 
-The resolved answer is written onto the app's row (`mcp_servers.auth_scheme`) when an administrator
-enables it, and every later step — the form, the connect call, the disconnect sentence, the call
+The resolved answer is written onto the app's row (`mcp_servers.auth_scheme`) when the app is
+added, and every later step — the form, the connect call, the disconnect sentence, the call
 gate — reads the row rather than the catalogue. A connection is a lasting attachment to the
 authorization config it was made against, so a vendor that starts publishing a new scheme for an app
 next month must not move live connections onto a different flow. Pressing **Add** again therefore
@@ -222,7 +221,7 @@ for.
 ### A secret the person already holds
 
 This is most of the catalogue, and it is the kind that has no consent screen in it. **Connect** on a
-key app does not leave OpenBot: it asks Composio what the app wants, draws those boxes, and the
+key app does not leave Remii: it asks Composio what the app wants, draws those boxes, and the
 press after that carries what was typed in them.
 
 The boxes are the app's own. Their names, labels, help text, defaults and which of them are secret
@@ -327,10 +326,10 @@ of the same thing and a check that has just run must not be overruled by a read 
 re-check the vendor refuses is not an answer at all: it is raised, and Composio's own sentence for
 it reaches the person as a refusal rather than as a row that quietly changed its wording.
 
-While the name was derived on every read, an administrator's Refresh could rewrite what a check had
+While the name was derived on every read, refreshing the app's tool list could rewrite what a check had
 found. Somebody connects a key to an app that publishes nothing safe to try it on, and the row
-honestly says the key was accepted unchecked. Then an administrator presses Refresh, which is the
-very press this transport tells them to make when an action appears or gains the version that makes
+honestly says the key was accepted unchecked. Then a refresh happens, which is the
+very act this transport tells you to run when an action appears or gains the version that makes
 it callable. The derivation names an action, and from that page load on the row draws the sentence
 written for a REFUSED key: checked and rejected, the account it was checked in still standing, so
 disconnect it. Every clause of that is false for somebody whose key nobody had touched, it tells
@@ -389,7 +388,7 @@ year later, from rows where somebody did.
 
 Fifty-six apps want an OAuth application registered by whoever runs this deployment — a client id
 and a client secret, obtained from each vendor in turn, per app. They are filtered out of the
-picker, so an administrator never meets an **Add** button that cannot work; where one is reached
+picker, so nobody meets an **Add** button that cannot work; where one is reached
 anyway, the refusal comes before anything is written and names what the app is asking for.
 
 They are hidden here rather than at the vendor, because the filter is a fact about what this
@@ -403,17 +402,16 @@ app and does not find it knows which question they are asking.
 
 ## What each person does
 
-At `/settings/connected-accounts`, a brokered app appears beside the OAuth connectors once an
-administrator has enabled it. Open it and press **Connect**. On a consent app — and on one whose
-OAuth client registers itself, which is the same trip from here — that leaves OpenBot for Composio's
-consent screen and returns to the same page, or, for an administrator who started from the app's own
-page under `/admin/plugins`, back to that page, because leaving a page mid-task and being returned
-to a different one is the round trip this exists to remove. On an app whose secret the person
+At `/settings/connected-accounts`, a brokered app appears beside the OAuth connectors once it has
+been added. Open it and press **Connect**. On a consent app — and on one whose
+OAuth client registers itself, which is the same trip from here — that leaves Remii for Composio's
+consent screen and returns to the page you started from, because leaving a page mid-task and being
+returned to a different one is the round trip this exists to remove. On an app whose secret the person
 already holds, **Connect** goes nowhere: it opens a form and asks for it. The rest of this section
 is about the trip; the section above is about the form.
 
 **The address they come back to is built here, and a caller has no say in it.** It is this
-deployment's `OPENBOT_APP_URL` plus one of two known pages, so what a request can choose is which
+deployment's `REMII_APP_URL` plus one of two known pages, so what a request can choose is which
 page and never which site: an address taken from a body or a query would be an open redirect with a
 consent screen in front of it, which is the same reason this deployment's own OAuth flow narrows its
 `returnTo` to a name. A deployment with no app URL configured has no absolute address to hand over

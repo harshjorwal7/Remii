@@ -1,5 +1,5 @@
 {
-  "name": "@openbot/example-langgraph-bot",
+  "name": "@remii/example-langgraph-bot",
   "private": true,
   "type": "module",
   "scripts": {

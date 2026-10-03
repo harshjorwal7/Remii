@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { useState } from "react";
 import useMeasure from "react-use-measure";
@@ -18,9 +18,6 @@ import {
 import { Input } from "@/components/ui/input";
 import {
   Questionnaire,
-  QuestionnaireChoice,
-  QuestionnaireChoiceDescription,
-  QuestionnaireChoices,
   QuestionnaireDescription,
   QuestionnaireItem,
   QuestionnaireTitle,
@@ -33,21 +30,15 @@ import {
   emptyAgentForm,
 } from "@/lib/agents/form";
 import { createAgentMutationOptions } from "@/lib/agents/mutations";
-import {
-  agentCapabilitiesQueryOptions,
-  type ConnectionVerdict,
-  testAgentConnection,
-} from "@/lib/agents/queries";
 import { isComposing } from "@/lib/composing";
+import { MascotPicker } from "@/mascot/mascot-picker";
 import { queryClient } from "@/query-client";
 
 /**
- * Creating a coworker, one question at a time.
+ * Creating a coworker.
  *
- * A wizard rather than a form, because the answers are three different kinds of decision: who this
- * coworker is, who may see it, and where it runs. The last one is the fork — a built-in coworker
- * needs nothing more, a managed one needs an endpoint — and a flat form showing endpoint fields to
- * everybody made the common case read like the hard one.
+ * Every coworker runs on Remii's own engine, so the only decision is who it is: a name, a title,
+ * and instructions on how it should assist.
  */
 export function CreateAgentDialog({
   open,
@@ -70,54 +61,11 @@ export function CreateAgentDialog({
   );
 }
 
-/** The steps, in the order they are asked. The name is the questionnaire item's name. */
-const STEPS = ["identity", "visibility", "kind"] as const;
+/** The one and only step. The name is the questionnaire item's name. */
+const STEPS = ["identity"] as const;
 type StepName = (typeof STEPS)[number];
 
-/** The two ways a coworker can be seen. */
-const VISIBILITY_OPTIONS: Array<{
-  value: AgentFormValues["visibility"];
-  title: string;
-  description: string;
-}> = [
-  {
-    value: "private",
-    title: "Private",
-    description: "Only you can see it and start channels with it.",
-  },
-  {
-    value: "public",
-    title: "Public",
-    description: "Everyone in the deployment can find and use it.",
-  },
-];
-
-/**
- * Where the coworker runs. Not a stored field: the server knows only whether an endpoint was
- * given, so "built-in" is the empty endpoint and this choice exists to make that fork explicit.
- */
-type AgentKind = "builtin" | "managed";
-
-const KIND_OPTIONS: Array<{
-  value: AgentKind;
-  title: string;
-  description: string;
-}> = [
-  {
-    value: "builtin",
-    title: "Built-in",
-    description:
-      "Runs on this deployment's own Bot. Nothing to host or connect — it is ready the moment it is created.",
-  },
-  {
-    value: "managed",
-    title: "Managed",
-    description:
-      "Runs on an agent you host, spoken to over AG-UI. This server dials your endpoint on every run.",
-  },
-];
-
-/** The first step's slice of the form contract, so its errors match the server's limits. */
+/** The step's slice of the form contract, so its errors match the server's limits. */
 const identitySchema = agentFormSchema.pick({
   name: true,
   title: true,
@@ -155,24 +103,13 @@ function CreateAgentWizard({
   onCreated: (agentId: string) => void;
 }) {
   const createAgent = useMutation(createAgentMutationOptions(queryClient));
-  /*
-   * Whether "built-in" is a coworker this deployment can actually make. Assumed true while the
-   * answer is loading, so the common deployment never sees the card flash from disabled to
-   * enabled; the server refuses the create either way, so an optimistic card risks nothing.
-   */
-  const { data: capabilities } = useQuery(agentCapabilitiesQueryOptions());
-  const builtInAvailable = capabilities?.builtInAvailable ?? true;
 
   const [step, setStep] = useState(0);
   const [direction, setDirection] = useState(1);
   /** Whether this step's Continue was pressed, which is when its errors become worth showing. */
   const [tried, setTried] = useState(false);
   const [values, setValues] = useState<AgentFormValues>(emptyAgentForm);
-  /** Deliberately unanswered to start with: revealing endpoint fields is the point of asking. */
-  const [kind, setKind] = useState<AgentKind | null>(null);
 
-  const [connection, setConnection] = useState<ConnectionVerdict | null>(null);
-  const [testing, setTesting] = useState(false);
   const [ref, bounds] = useMeasure();
 
   const last = step === STEPS.length - 1;
@@ -181,40 +118,12 @@ function CreateAgentWizard({
     value: AgentFormValues[K],
   ) => setValues((current) => ({ ...current, [key]: value }));
 
-  /** Test endpoint reachability from the server, which is what runs will use. */
-  const testConnection = async () => {
-    setTesting(true);
-    setConnection(null);
-    try {
-      setConnection(
-        await testAgentConnection(values.endpoint, values.authValue),
-      );
-    } finally {
-      setTesting(false);
-    }
-  };
-
   const identityErrors = tried ? identityIssues(values) : {};
-  const endpointError = !tried
-    ? undefined
-    : kind === "managed" && values.endpoint.trim() === ""
-      ? "An endpoint is required for a managed coworker."
-      : agentFormSchema.shape.endpoint.safeParse(values.endpoint).error
-          ?.issues[0]?.message;
 
   const stepValid = (): boolean => {
     if (STEPS[step] === "identity") {
       return identitySchema.safeParse(values).success;
     }
-    if (STEPS[step] === "kind") {
-      if (kind === null) return false;
-      if (kind === "builtin") return true;
-      return (
-        values.endpoint.trim() !== "" &&
-        agentFormSchema.shape.endpoint.safeParse(values.endpoint).success
-      );
-    }
-    // Visibility always holds an answer; the radio starts on private.
     return true;
   };
 
@@ -245,7 +154,7 @@ function CreateAgentWizard({
     <>
       {/* Read aloud, never shown: each step carries its own heading, and a dialog-level title
           above them made two heading sizes compete. The popup still needs an accessible name. */}
-      <DialogTitle className="sr-only">New coworker</DialogTitle>
+      <DialogTitle className="sr-only">New agent</DialogTitle>
       <DialogBody className="overflow-y-auto">
         <Questionnaire
           item={STEPS[step]}
@@ -304,37 +213,11 @@ function CreateAgentWizard({
                     key={STEPS[step]}
                     variants={variants}
                   >
-                    {STEPS[step] === "identity" ? (
-                      <IdentityStep
-                        errors={identityErrors}
-                        set={set}
-                        values={values}
-                      />
-                    ) : STEPS[step] === "visibility" ? (
-                      <VisibilityStep set={set} values={values} />
-                    ) : (
-                      <KindStep
-                        builtInAvailable={builtInAvailable}
-                        endpointError={endpointError}
-                        kind={kind}
-                        onKind={(next) => {
-                          setKind(next);
-                          if (next === "builtin") {
-                            // A built-in coworker has no endpoint; whatever was typed on the way
-                            // past must not ride along into the create.
-                            set("endpoint", "");
-                            set("authValue", "");
-                            setConnection(null);
-                          }
-                        }}
-                        onTest={() => void testConnection()}
-                        connection={connection}
-                        set={set}
-                        showKindError={tried && kind === null}
-                        testing={testing}
-                        values={values}
-                      />
-                    )}
+                    <IdentityStep
+                      errors={identityErrors}
+                      set={set}
+                      values={values}
+                    />
                   </motion.div>
                 </AnimatePresence>
               </div>
@@ -363,7 +246,7 @@ function CreateAgentWizard({
               {last
                 ? createAgent.isPending
                   ? "Creating…"
-                  : "Create coworker"
+                  : "Create agent"
                 : "Continue"}
             </Button>
           </div>
@@ -409,9 +292,10 @@ function IdentityStep({
 }) {
   return (
     <StepItem name="identity">
-      <QuestionnaireTitle>Who is this coworker?</QuestionnaireTitle>
+      <QuestionnaireTitle>Who is this agent?</QuestionnaireTitle>
       <QuestionnaireDescription>
-        The role you write here applies in every channel this coworker works in.
+        Give your agent a name, title, and instructions on how it should assist
+        you.
       </QuestionnaireDescription>
       <FieldGroup>
         <Field data-invalid={errors.name ? true : undefined}>
@@ -420,7 +304,7 @@ function IdentityStep({
             aria-invalid={errors.name ? true : undefined}
             id="create-agent-name"
             onChange={(event) => set("name", event.target.value)}
-            placeholder="Expense Manager"
+            placeholder="Personal Assistant"
             value={values.name}
           />
           {errors.name ? (
@@ -433,7 +317,7 @@ function IdentityStep({
             aria-invalid={errors.title ? true : undefined}
             id="create-agent-title"
             onChange={(event) => set("title", event.target.value)}
-            placeholder="Finance Operations"
+            placeholder="Remii — Chief of Staff"
             value={values.title}
           />
           {errors.title ? (
@@ -446,7 +330,7 @@ function IdentityStep({
             aria-invalid={errors.roleDescription ? true : undefined}
             id="create-agent-role"
             onChange={(event) => set("roleDescription", event.target.value)}
-            placeholder="Review receipts, categorize expenses, and prepare reimbursement reports."
+            placeholder="Help me write content, research topics, organize daily tasks, and answer questions."
             rows={4}
             value={values.roleDescription}
           />
@@ -454,165 +338,24 @@ function IdentityStep({
             <FieldError errors={[{ message: errors.roleDescription }]} />
           ) : null}
         </Field>
+        {/*
+         * On this step rather than a step of its own, and deliberately skippable.
+         *
+         * A new coworker has no id yet, so it cannot be seeded from one, and there is nothing here to
+         * look up: this is the one place in the product where a mascot genuinely has to be chosen or
+         * accepted as-is. It is not a step because a shape is not a decision anybody makes before they
+         * have made the three that matter, and leaving the control as it is means the form still works
+         * for somebody who scrolls past it.
+         */}
+        <Field>
+          <FieldLabel>Mascot</FieldLabel>
+          <MascotPicker
+            seed=""
+            value={values.mascot}
+            onChange={(mascot) => set("mascot", mascot)}
+          />
+        </Field>
       </FieldGroup>
-    </StepItem>
-  );
-}
-
-function VisibilityStep({
-  values,
-  set,
-}: {
-  values: AgentFormValues;
-  set: <K extends keyof AgentFormValues>(
-    key: K,
-    value: AgentFormValues[K],
-  ) => void;
-}) {
-  return (
-    <StepItem name="visibility">
-      <QuestionnaireTitle>Who can see it?</QuestionnaireTitle>
-      <QuestionnaireChoices>
-        {VISIBILITY_OPTIONS.map((option) => (
-          <QuestionnaireChoice
-            checked={values.visibility === option.value}
-            key={option.value}
-            onChange={() => set("visibility", option.value)}
-            value={option.value}
-          >
-            <span className="font-medium">{option.title}</span>
-            <QuestionnaireChoiceDescription>
-              {option.description}
-            </QuestionnaireChoiceDescription>
-          </QuestionnaireChoice>
-        ))}
-      </QuestionnaireChoices>
-    </StepItem>
-  );
-}
-
-function KindStep({
-  builtInAvailable,
-  kind,
-  onKind,
-  showKindError,
-  values,
-  set,
-  endpointError,
-  connection,
-  testing,
-  onTest,
-}: {
-  /** Whether this deployment has a Bot of its own for a coworker to run on. */
-  builtInAvailable: boolean;
-  kind: AgentKind | null;
-  onKind: (kind: AgentKind) => void;
-  showKindError: boolean;
-  values: AgentFormValues;
-  set: <K extends keyof AgentFormValues>(
-    key: K,
-    value: AgentFormValues[K],
-  ) => void;
-  endpointError?: string;
-  connection: ConnectionVerdict | null;
-  testing: boolean;
-  onTest: () => void;
-}) {
-  return (
-    <StepItem name="kind">
-      <QuestionnaireTitle>Where does it run?</QuestionnaireTitle>
-      <QuestionnaireChoices>
-        {KIND_OPTIONS.map((option) => {
-          /*
-           * Shown but not offerable, rather than hidden: a deployment with no managed Bot cannot
-           * back a built-in coworker, and the create would be refused. The card staying visible is
-           * what tells the person the kind exists and why it is not theirs to pick.
-           */
-          const unavailable = option.value === "builtin" && !builtInAvailable;
-          return (
-            <QuestionnaireChoice
-              checked={kind === option.value}
-              disabled={unavailable}
-              key={option.value}
-              onChange={() => onKind(option.value)}
-              value={option.value}
-            >
-              <span className="font-medium">{option.title}</span>
-              <QuestionnaireChoiceDescription>
-                {unavailable
-                  ? "Not available here: this deployment has no Bot of its own for a coworker to run on."
-                  : option.description}
-              </QuestionnaireChoiceDescription>
-            </QuestionnaireChoice>
-          );
-        })}
-      </QuestionnaireChoices>
-      {showKindError ? (
-        <p className="text-sm text-destructive" role="alert">
-          Choose where this coworker runs.
-        </p>
-      ) : null}
-      {kind === "managed" ? (
-        <FieldGroup>
-          <Field data-invalid={endpointError ? true : undefined}>
-            <FieldLabel htmlFor="create-agent-endpoint">
-              Agent endpoint
-            </FieldLabel>
-            <div className="flex gap-2">
-              <Input
-                aria-invalid={endpointError ? true : undefined}
-                id="create-agent-endpoint"
-                onChange={(event) => set("endpoint", event.target.value)}
-                placeholder="https://your-agent.example.com/ag-ui"
-                value={values.endpoint}
-              />
-              <Button
-                disabled={!values.endpoint || testing}
-                onClick={onTest}
-                type="button"
-                variant="outline"
-              >
-                {testing ? "Testing…" : "Test"}
-              </Button>
-            </div>
-            {endpointError ? (
-              <FieldError errors={[{ message: endpointError }]} />
-            ) : null}
-            {connection ? (
-              <p
-                className={`text-sm ${connection.ok ? "text-muted-foreground" : "text-destructive"}`}
-                role="status"
-              >
-                {connection.ok
-                  ? `It answered: ${connection.events.join(", ")}`
-                  : connection.reason}
-              </p>
-            ) : (
-              <p className="text-muted-foreground text-sm">
-                Anything that speaks AG-UI works. This server dials your agent,
-                so an agent on your own machine has to be reachable from here.
-              </p>
-            )}
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="create-agent-key">
-              Key for that agent (optional)
-            </FieldLabel>
-            <Input
-              autoComplete="off"
-              id="create-agent-key"
-              onChange={(event) => set("authValue", event.target.value)}
-              placeholder="Bearer …"
-              type="password"
-              value={values.authValue}
-            />
-            <p className="text-muted-foreground text-sm">
-              Sent as an <code>Authorization</code> header on every run, and
-              kept in the credential vault.
-            </p>
-          </Field>
-        </FieldGroup>
-      ) : null}
     </StepItem>
   );
 }

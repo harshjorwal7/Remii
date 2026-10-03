@@ -1,9 +1,11 @@
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import type { Database } from "../db/client";
 import {
+  agentProfiles,
   componentExclusions,
   componentFunctions,
   components,
+  sandboxedComponents,
 } from "../db/schema";
 import { dataFunction } from "./functions";
 
@@ -94,6 +96,7 @@ export type ComponentStore = {
   callFunction(
     functionName: string,
     args: Record<string, unknown>,
+    actorUserId?: string,
   ): Promise<unknown>;
   publish(name: string, by: string): Promise<void>;
   unpublish(name: string, by: string): Promise<void>;
@@ -211,10 +214,21 @@ export function createComponentStore(database: Database): ComponentStore {
     },
 
     async listForAgent(agentId) {
+      // Whose Bot this is: playground components below are filtered to their
+      // author's Bots, so one user's code is never offered to another user's
+      // model. Unknown Bot (deleted, template addressed directly) offers
+      // nothing playground-authored rather than everything.
+      const [bot] = await database
+        .select({ ownerUserId: agentProfiles.ownerUserId })
+        .from(agentProfiles)
+        .where(eq(agentProfiles.agentId, agentId))
+        .limit(1);
       const rows = await database
         .select({
           name: components.name,
           description: components.publishedDescription,
+          kind: components.kind,
+          sandboxOwner: sandboxedComponents.ownerUserId,
         })
         .from(components)
         // Joined on this Bot specifically, so another Bot's withholding cannot remove a row here.
@@ -224,6 +238,12 @@ export function createComponentStore(database: Database): ComponentStore {
             eq(componentExclusions.componentName, components.name),
             eq(componentExclusions.agentId, agentId),
           ),
+        )
+        // The playground author's owner, in the same row: one query, no
+        // per-component lookup.
+        .leftJoin(
+          sandboxedComponents,
+          eq(sandboxedComponents.name, components.name),
         )
         .where(
           and(
@@ -235,11 +255,18 @@ export function createComponentStore(database: Database): ComponentStore {
 
       // A published row with no description is not a thing the model can be told about, so it is left
       // out rather than sent as an empty string it would have to guess the meaning of.
-      return rows.flatMap((row) =>
-        row.description
-          ? [{ name: row.name, description: row.description }]
-          : [],
-      );
+      return rows.flatMap((row) => {
+        if (!row.description) return [];
+        // A playground component is offered only to its author's Bots (and
+        // legacy shared rows to all). See `decide` for the same rule at call
+        // time: offering and deciding must agree, or the model is told about
+        // a tool every call of which is refused.
+        if (row.kind === "sandboxed") {
+          const owner = row.sandboxOwner ?? null;
+          if (owner && owner !== bot?.ownerUserId) return [];
+        }
+        return [{ name: row.name, description: row.description }];
+      });
     },
 
     async decide(name, agentId) {
@@ -248,6 +275,7 @@ export function createComponentStore(database: Database): ComponentStore {
           published: components.published,
           description: components.publishedDescription,
           title: components.title,
+          kind: components.kind,
           withheldFrom: componentExclusions.agentId,
         })
         .from(components)
@@ -280,6 +308,30 @@ export function createComponentStore(database: Database): ComponentStore {
           allowed: false,
           reason: `${row.title} has been withheld from this Bot in this deployment, though other Bots may use it. Answer in prose instead.`,
         };
+      }
+      // A playground component draws its author's code. It may answer only
+      // for a Bot whose owner is that author: another user's Bot drawing it
+      // would run one user's code in another user's transcript. Legacy
+      // shared rows (no owner) stay drawable by all, as before.
+      if (row.kind === "sandboxed") {
+        const [component] = await database
+          .select({ ownerUserId: sandboxedComponents.ownerUserId })
+          .from(sandboxedComponents)
+          .where(eq(sandboxedComponents.name, name))
+          .limit(1);
+        if (component?.ownerUserId) {
+          const [bot] = await database
+            .select({ ownerUserId: agentProfiles.ownerUserId })
+            .from(agentProfiles)
+            .where(eq(agentProfiles.agentId, agentId))
+            .limit(1);
+          if (bot?.ownerUserId !== component.ownerUserId) {
+            return {
+              allowed: false,
+              reason: `${row.title} belongs to somebody else, so this Bot may not draw it. Answer in prose instead.`,
+            };
+          }
+        }
       }
       return { allowed: true, description: row.description };
     },
@@ -366,13 +418,13 @@ export function createComponentStore(database: Database): ComponentStore {
       return Boolean(row);
     },
 
-    async callFunction(functionName, args) {
+    async callFunction(functionName, args, actorUserId) {
       const fn = dataFunction(functionName);
       // Unreachable through the route, which resolves the function before asking about permission.
       // Kept because a store that runs whatever name it is handed is one refactor away from being the
       // hole this whole file exists to close.
       if (!fn) throw new ComponentNotFoundError(functionName);
-      return fn.run(database, args);
+      return fn.run(database, { ...args, actorUserId });
     },
 
     async saveDraft(name, description, by) {

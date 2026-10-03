@@ -16,13 +16,18 @@ export function setComputerStateMutationOptions(queryClient: QueryClient) {
       botId: string;
       action: ComputerAction;
     }) => {
-      await client(
-        `/api/computers/${encodeURIComponent(variables.botId)}/computers/${variables.action}`,
-        {
-          method: "POST",
-          fallback: `The computer could not be ${variables.action}.`,
-        },
-      );
+      /*
+       * THE PERSON'S COMPUTER, NOT THE BOT'S.
+       *
+       * This posted to `/api/computers/<botId>/computers/<action>`, on the per-Bot router that is not
+       * mounted any more — so the button in Settings answered 404 and reported "The computer could not
+       * be reset", on a computer that was working perfectly. The address is now the one desktop the
+       * signed-in person owns; `botId` stays in the signature so the callers are untouched.
+       */
+      await client(`/api/computers/desktop/computer/${variables.action}`, {
+        method: "POST",
+        fallback: `The computer could not be ${variables.action}.`,
+      });
     },
     /** A reset deletes the profile those commands ran on; a stop keeps it, so only reset forgets. */
     onSuccess: (_result, variables) => {

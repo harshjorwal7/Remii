@@ -59,10 +59,26 @@ async function withFetch(handler: FetchHandler, run: () => Promise<void>) {
 }
 
 beforeAll(() => GlobalRegistrator.register());
-afterEach(() => cleanup());
-afterAll(() => GlobalRegistrator.unregister());
+afterAll(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  GlobalRegistrator.unregister();
+});
 
 describe("channel history notice", () => {
+  /*
+   * Unmount what each case rendered.
+   *
+   * This file imported `afterEach` and never called it: there was no `cleanup` between tests, so every
+   * probe stayed mounted and every one of them kept its `useEffect` subscription alive. Two of those
+   * subscriptions then outlived the test that made them and settled during a LATER one — which is why
+   * "an explicit empty history response renders no notice" passed alone and failed after another file,
+   * failing on a `role="status"` paragraph that belonged to the previous test's still-mounted tree.
+   *
+   * `component-preview.test.tsx` already does this; the absence here is what made the pair
+   * order-dependent.
+   */
+  afterEach(cleanup);
+
   test("failed history retrieval does not claim the CopilotKit project changed", () => {
     const notice = channelHistoryNotice({
       restoring: false,

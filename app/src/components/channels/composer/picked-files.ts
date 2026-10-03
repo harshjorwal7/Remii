@@ -1,8 +1,10 @@
 import {
+  ACCEPTED_KINDS,
+  type AttachmentKind,
   classifyAttachment,
   MAX_ATTACHMENTS_PER_MESSAGE,
-  MAX_FILE_BYTES,
   MAX_IMAGE_BYTES,
+  maxBytesForKind,
   mediaTypeOf,
   namesNoFormat,
 } from "@/lib/channels/attachments";
@@ -14,6 +16,33 @@ import type { RejectedFile } from "./rejected-files";
  * is willing to stage. Nothing here touches state or the network: it only sorts files the caller
  * already has in hand into what to keep and what to refuse, and why.
  */
+
+/**
+ * What to call a kind in a refusal, so the sentence reads as English.
+ *
+ * Not the kind's own name: "too large for a binary attachment" tells somebody holding a `.zip`
+ * nothing, and the limit that refused them is worth more than the category it fell into.
+ */
+const KIND_NOUN: Record<AttachmentKind, string> = {
+  image: "image",
+  text: "text",
+  document: "document",
+  audio: "audio",
+  video: "video",
+  binary: "file",
+  "unsupported-image": "image",
+  unsupported: "file",
+};
+
+/**
+ * "a" or "an" for a kind noun.
+ *
+ * Trivial, and here because the alternative is a refusal that says "too large for a image", which
+ * is the sentence a person reads when they are trying to work out whether the app is working.
+ */
+function article(noun: string): string {
+  return `${"aeiou".includes(noun.charAt(0)) ? "an" : "a"} ${noun}`;
+}
 
 export type ScreenedFiles = {
   accepted: File[];
@@ -81,24 +110,27 @@ export function screenPickedFiles(
       continue;
     }
 
-    if (kind === "image" && file.size > MAX_IMAGE_BYTES) {
-      rejected.push(
-        reject(
-          file,
-          `'${file.name}' is too large for an image attachment (limit ${formatBytes(MAX_IMAGE_BYTES)}).`,
-        ),
-      );
-      continue;
-    }
-
-    if (kind === "text" && file.size > MAX_FILE_BYTES) {
-      rejected.push(
-        reject(
-          file,
-          `'${file.name}' is too large for a text attachment (limit ${formatBytes(MAX_FILE_BYTES)}).`,
-        ),
-      );
-      continue;
+    /*
+     * One size check for every accepted kind, against the table the server also reads.
+     *
+     * This used to be two `if` blocks naming `MAX_IMAGE_BYTES` and `MAX_FILE_BYTES` directly,
+     * because there were two accepted families. There are six now, and a sixth `if` block is not
+     * what the seventh family should need: the ceilings differ in number AND in unit — a document
+     * is bound by an extractor's memory, a media file by nothing but the disk — which is exactly the
+     * thing a hand-written check per family gets wrong. `maxBytesForKind` is the same function the
+     * sentence is written from, so the refusal cannot quote a limit other than the one it applied.
+     */
+    if (ACCEPTED_KINDS.includes(kind as (typeof ACCEPTED_KINDS)[number])) {
+      const limit = maxBytesForKind(kind);
+      if (limit > 0 && file.size > limit) {
+        rejected.push(
+          reject(
+            file,
+            `'${file.name}' is too large for ${article(KIND_NOUN[kind])} attachment (limit ${formatBytes(limit)}).`,
+          ),
+        );
+        continue;
+      }
     }
 
     // The LOOSE ceiling for a file nobody has named yet, because this screen does not know which

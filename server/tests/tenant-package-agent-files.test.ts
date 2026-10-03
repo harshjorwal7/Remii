@@ -7,6 +7,7 @@ import {
   loadTenantPackage,
   validateTenantPackage,
 } from "../src/tenant-package";
+import { REMII_AGENT_ID } from "../../shared/remii";
 
 /**
  * A coworker as a file of its own.
@@ -140,7 +141,7 @@ describe("a coworker declared in a file of its own", () => {
 
 describe("reading the agents directory from disk", () => {
   async function packageWith(files: Record<string, string>) {
-    const directory = await mkdtemp(join(tmpdir(), "openbot-package-"));
+    const directory = await mkdtemp(join(tmpdir(), "remii-package-"));
     await cp(
       fileURLToPath(new URL("../../examples/fintech", import.meta.url)),
       directory,
@@ -154,7 +155,7 @@ describe("reading the agents directory from disk", () => {
   }
 
   test("a package with no agents directory loads exactly as it did", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "openbot-package-"));
+    const directory = await mkdtemp(join(tmpdir(), "remii-package-"));
     await cp(
       fileURLToPath(new URL("../../examples/fintech", import.meta.url)),
       directory,
@@ -165,7 +166,7 @@ describe("reading the agents directory from disk", () => {
     const tenantPackage = await loadTenantPackage(directory);
 
     expect(
-      tenantPackage.agents.some((agent) => agent.id === "general-assistant"),
+      tenantPackage.agents.some((agent) => agent.id === REMII_AGENT_ID),
     ).toBe(true);
     await rm(directory, { recursive: true, force: true });
   });

@@ -1,7 +1,7 @@
 """Google ADK as a Bot, through `ag_ui_adk`, which AG-UI maintains.
 
 ADK is Gemini-first and model-agnostic after that, so the provider stays the person's choice: ADK
-reads LiteLLM model strings, and OpenBot writes the one it was told.
+reads LiteLLM model strings, and Remii writes the one it was told.
 """
 
 import os
@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
-TOKEN_HEADER = "x-openbot-agent-token"
+TOKEN_HEADER = "x-remii-agent-token"
 
 
 def _model_id() -> str:
@@ -43,13 +43,13 @@ add_adk_fastapi_endpoint(
     app,
     ADKAgent(
         adk_agent=Agent(
-            name="openbot",
+            name="remii",
             tools=[AGUIToolset()],
             model=LiteLlm(model=_model_id()),
             instruction="Answer the question you are asked, briefly and correctly.",
         ),
-        app_name="openbot",
-        user_id="openbot",
+        app_name="remii",
+        user_id="remii",
     ),
     path="/",
 )

@@ -182,18 +182,6 @@ export const AI_ACCENT_COLORS: Record<"success" | "danger", string> = {
   success: "oklch(72% 0.17 150)",
 };
 
-/**
- * Colour used by a state's overlay motif: the semantic accent when the state
- * has one, otherwise the component's own secondary colour.
- */
-export const getAIStateAccentColor = (
-  state: AIState | undefined,
-  fallback: string,
-): string => {
-  const accent = AI_STATE_MOTION[state ?? "idle"]?.accent;
-  return accent ? AI_ACCENT_COLORS[accent] : fallback;
-};
-
 /** Motion preset for a state, falling back to `idle` for unknown values. */
 export const getAIStateMotion = (state: AIState | undefined): AIStateMotion =>
   AI_STATE_MOTION[state ?? "idle"] ?? AI_STATE_MOTION.idle;
@@ -364,32 +352,4 @@ export const useAudioAmplitude = (
   });
 
   return { amplitude, start, status, stop };
-};
-
-/**
- * Amplitude generator for demos, docs and previews — no microphone involved.
- *
- * Produces a plausible speech-like envelope whose energy follows the current
- * {@link AIState}, so every example can show the reactive behaviour without
- * asking the visitor for permissions.
- */
-export const useSimulatedAmplitude = (
-  state: AIState = "idle",
-): MotionValue<number> => {
-  const amplitude = useMotionValue(0);
-  const motion = getAIStateMotion(state);
-
-  useAnimationFrame((time) => {
-    const t = time / 1000;
-    // Three detuned sines read as organic; a single sine reads as a metronome.
-    const envelope =
-      0.5 +
-      0.3 * Math.sin(t * 2.1 * motion.speed) +
-      0.14 * Math.sin(t * 5.3 * motion.speed + 1.7) +
-      0.06 * Math.sin(t * 11.7 * motion.speed + 0.4);
-
-    amplitude.set(Math.min(1, Math.max(0, envelope * motion.intensity)));
-  });
-
-  return amplitude;
 };

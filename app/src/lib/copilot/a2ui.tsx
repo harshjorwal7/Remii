@@ -7,8 +7,8 @@ import type { CopilotKitProviderProps } from "@copilotkit/react-core/v2";
 
 /**
  * Keep the SDK's schemas, data bindings and action handlers. The wrapper only supplies a stable
- * styling hook: the 1.70.1 basic catalog uses inline styles and does not consume the theme prop.
- * These are declarative primitives, not the separately granted OpenBot gallery/custom components.
+ * styling hook: the basic catalog uses inline styles and does not consume the theme prop.
+ * These are declarative primitives, not the separately granted Remii gallery/custom components.
  */
 function branded(
   component: ReactComponentImplementation,
@@ -17,21 +17,24 @@ function branded(
   return {
     ...component,
     render: (props) => (
-      <div data-openbot-a2ui={component.name} style={{ display: "contents" }}>
+      <div data-remii-a2ui={component.name} style={{ display: "contents" }}>
         <Render {...props} />
       </div>
     ),
   };
 }
 
-export const OPENBOT_A2UI_CATALOG = new Catalog(
+/**
+ * The full vendor catalog, kept as a named export for tooling and tests.
+ */
+export const REMII_A2UI_CATALOG = new Catalog(
   basicCatalog.id,
   Array.from(basicCatalog.components.values(), branded),
   Array.from(basicCatalog.functions.values()),
   basicCatalog.themeSchema,
 );
 
-const A2UI_OPTIONS = { catalog: OPENBOT_A2UI_CATALOG } satisfies NonNullable<
+const A2UI_OPTIONS = { catalog: REMII_A2UI_CATALOG } satisfies NonNullable<
   CopilotKitProviderProps["a2ui"]
 >;
 

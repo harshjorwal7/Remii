@@ -47,7 +47,7 @@ const otherSkill = `other-skill-${suite}`;
 const heldRef = `${server}/search`;
 const withheldRef = `${server}/delete_everything`;
 
-const actor = { id: author, isAdmin: true };
+const actor = { id: author };
 
 beforeAll(async () => {
   await database
@@ -80,7 +80,7 @@ beforeAll(async () => {
     .onConflictDoNothing();
 
   // The Bot holds exactly one of the two.
-  await store.grant("mcp", heldRef, bot, "admin@openbot.local");
+  await store.grant("mcp", heldRef, bot, "admin@remii.local");
 });
 
 afterAll(async () => {
@@ -100,7 +100,7 @@ async function saveSkill(tools: string[] | undefined, slug = skill) {
     instructions: "Do the thing.",
     ownerUserId: null,
     ...(tools === undefined ? {} : { tools }),
-    by: "admin@openbot.local",
+    by: "admin@remii.local",
   });
 }
 
@@ -160,7 +160,7 @@ describe("declaring a tool is not granting it", () => {
      * become the way around every surface that is.
      */
     await saveSkill([heldRef, withheldRef]);
-    await store.grant("skill", skill, bot, "admin@openbot.local");
+    await store.grant("skill", skill, bot, "admin@remii.local");
 
     const held = await store.listForAgent(bot);
     const callable = held.tools.map((tool) => tool.ref);
@@ -196,7 +196,7 @@ describe("a skill going away", () => {
     await saveSkill([heldRef], otherSkill);
     expect(await declaredBy(otherSkill)).toEqual([heldRef]);
 
-    await store.uninstallSkill(otherSkill, "admin@openbot.local");
+    await store.uninstallSkill(otherSkill, "admin@remii.local");
 
     const left = await database
       .select()

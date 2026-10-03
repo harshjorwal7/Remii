@@ -36,6 +36,7 @@ import {
 import { newId } from "@/lib/new-id";
 import { cn } from "@/lib/utils";
 import { Button } from "../../ui/button";
+import { AttachmentStrip } from "./attachment-strip";
 import {
   attachmentsConfigFor,
   FILE_PICKER_ACCEPT,
@@ -43,14 +44,13 @@ import {
 } from "./attachments";
 import {
   applyCommandChips,
-  canSendDraft,
   type CommandOption,
   type ComposerDraft,
+  canSendDraft,
   enforceSingleAgent,
   toDraft,
 } from "./draft";
 import { screenPickedFiles } from "./picked-files";
-import { AttachmentStrip } from "./attachment-strip";
 import { type RejectedFile, RejectedFiles } from "./rejected-files";
 import { PLACEHOLDER_COMMANDS } from "./sources";
 import { type AgentOption, buildTriggers } from "./triggers";
@@ -1392,7 +1392,7 @@ export function Composer({
              * started it 42px in from the frame's left edge with nothing under it. The strip is
              * its own row across the top now, and the three controls keep their row below it.
              */
-            "flex min-h-14 flex-col rounded-2xl border border-border bg-card px-3 py-3 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
+            "flex min-h-14 flex-col rounded-2xl border border-border bg-card px-3 py-3 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring/50",
             className,
           )}
           onSubmit={handleFormSubmit}
@@ -1424,7 +1424,7 @@ export function Composer({
                 type="button"
                 variant="ghost"
               >
-                <IconPlus className="size-5" />
+                <IconPlus />
               </Button>
             ) : (
               <Button
@@ -1435,7 +1435,7 @@ export function Composer({
                 type="button"
                 variant="ghost"
               >
-                <IconPlus className="size-5" />
+                <IconPlus />
               </Button>
             )}
             <PromptArea
@@ -1458,18 +1458,20 @@ export function Composer({
             {canStop ? (
               <Button
                 aria-label="Stop the Bot"
-                className="size-8 self-end rounded-full p-0"
+                className="self-end rounded-full"
                 data-testid="composer-stop"
                 onClick={onStop}
                 size="icon"
                 type="button"
               >
-                <IconPlayerStopFilled className="size-3" />
+                {/* The two states of this one control, so they get the same glyph size: the
+                    filled stop used to draw a step smaller than the arrow it replaces. */}
+                <IconPlayerStopFilled className="size-3.5" />
               </Button>
             ) : (
               <Button
                 aria-label={sendLabel}
-                className="size-8 self-end rounded-full p-0"
+                className="self-end rounded-full"
                 disabled={!canSend}
                 size="icon"
                 type="submit"
@@ -1486,8 +1488,15 @@ export function Composer({
   return (
     // The same `containerRef`, on the wrapper this branch already had: the paste listener is scoped
     // to whatever holds the ref, so a branch without it can be pasted into and nothing happens.
+    /*
+     * `w-full`, NOT A FIXED WIDTH. This used to hardcode `w-xl` (576px), which meant the wrapper
+     * ignored its container: the home screen drew this composer inside a narrower column and the
+     * box simply overran it, and on onboarding the overflow was clipped by the page's
+     * `overflow-hidden`, so the preview read as off-centre with its right edge cut off. A caller's
+     * own `className` still wins over this.
+     */
     <div
-      className={cn("flex w-xl flex-col", className)}
+      className={cn("flex w-full min-w-0 flex-col", className)}
       ref={containerRef}
       {...dropZone}
     >
@@ -1529,13 +1538,14 @@ export function Composer({
           {attachmentsEnabled ? (
             <Button
               aria-label="Attach a file"
-              className="size-7 rounded-full p-0"
+              className="rounded-full"
               disabled={disabled}
               onClick={() => fileInputRef.current?.click()}
+              size="icon-sm"
               type="button"
               variant="ghost"
             >
-              <IconPlus className="size-4" />
+              <IconPlus />
             </Button>
           ) : (
             <div />
@@ -1545,18 +1555,20 @@ export function Composer({
             {canStop ? (
               <Button
                 aria-label="Stop the Bot"
-                className="size-7 rounded-full bg-primary p-0"
+                className="rounded-full"
                 data-testid="composer-stop"
                 onClick={onStop}
+                size="icon-sm"
                 type="button"
               >
-                <IconPlayerStopFilled className="size-3" />
+                <IconPlayerStopFilled className="size-3.5" />
               </Button>
             ) : (
               <Button
                 aria-label={sendLabel}
-                className="size-7 rounded-full bg-primary p-0 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-full disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!canSend}
+                size="icon-sm"
                 type="submit"
               >
                 <IconArrowUp className="size-3.5 fill-primary" />

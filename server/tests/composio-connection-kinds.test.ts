@@ -603,7 +603,7 @@ const NO_PROBE_APP = {
 
 /** The Bot a brokered call is made as, which is the only way to reach the per-person gate. */
 const botId = `agent_kinds_${suite}`;
-const admin = "admin@openbot.local";
+const admin = "admin@remii.local";
 
 const APP_IDS = [...Object.values(APP).map((app) => app.id), NO_PROBE_APP.id];
 const TOOLKITS = [
@@ -702,7 +702,7 @@ function signedIn(): MiddlewareHandler<{ Variables: AppVariables }> {
   return async (context, next) => {
     context.set("actor", {
       id: person,
-      email: "person@openbot.test",
+      email: "person@remii.test",
       role: "user",
     } as never);
     await next();
@@ -723,8 +723,10 @@ const connectApp = new Hono().route(
     store,
     signedIn(),
     async () => true,
+    // `canManageBot`, a fourth POSITIONAL argument ahead of the options bag.
+    async () => true,
     {
-      publicUrl: "https://openbot.example",
+      publicUrl: "https://remii.example",
       appUrl: "https://app.example",
       encryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
       personHasAccess: async () => true,

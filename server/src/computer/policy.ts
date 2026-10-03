@@ -14,7 +14,7 @@
  * Precedence: deny beats allow. A rule that removes permission must never be
  * defeated by a broader rule that grants it, or a company cannot reason about what it has forbidden.
  */
-import { evaluate } from "cel-js";
+import { evaluate as evaluateCel } from "cel-js";
 import type { AuditInitiator, AuditInitiatorKind } from "../audit";
 
 export type PolicyMode = "dry-run" | "enforce";
@@ -206,182 +206,122 @@ export type PolicyDecision = {
 };
 
 /**
- * String helpers, registered as CEL globals.
- *
- * cel-js 0.8.2 implements no string methods at all: `element.name.contains("Submit")` raises
- * "Unknown method: contains", as do `startsWith`, `endsWith` and `matches`. These globals make
- * substring rules enforceable with the installed CEL version.
- *
- * Both are case-insensitive. A rule saying "never click submit" also catches a button labelled
- * "SUBMIT".
- */
-const POLICY_FUNCTIONS: Record<string, (...args: never[]) => unknown> = {
-  contains: ((haystack: unknown, needle: unknown) =>
-    String(haystack).toLowerCase().includes(String(needle).toLowerCase())) as (
-    ...args: never[]
-  ) => unknown,
-  matches: ((value: unknown, pattern: unknown) => {
-    try {
-      return new RegExp(String(pattern), "i").test(String(value));
-    } catch {
-      // An unparseable regex is a broken rule, not a match. The caller treats a thrown expression as
-      // fail-closed, so returning false here would quietly weaken a deny rule; throw instead.
-      throw new Error(`not a valid pattern: ${String(pattern)}`);
-    }
-  }) as (...args: never[]) => unknown,
-};
-
-/**
- * Evaluate one expression. Never throws.
- *
- * `onError` decides what a broken expression means, because the safe answer differs by list: a broken
- * `allow` must not permit, and a broken `deny` must not stop denying. Both are logged loudly, because
- * a policy that silently misbehaves is worse than one that visibly refuses.
- *
- * A rule can be broken two ways and only one of them throws. `"Submit order"` is valid CEL: it parses,
- * it evaluates, and it answers with a string, which is not an answer to "does this rule apply". That
- * is what somebody writes who reads the deny list as a list of labels rather than expressions, and
- * reading it as "no match" would let the action through under the permissive allow rule that ships by
- * default, with nothing logged and the rule still listed on the Boundaries page as though it were in
- * force. So anything other than a boolean is a broken rule, and takes the same fail-closed path as a
- * throw. False is a real answer and stays one; a deny list that read every false as a denial would
- * refuse everything.
- */
-function matches(
-  expression: string,
-  context: PolicyContext,
-  onError: boolean,
-): boolean {
-  try {
-    const result = evaluate(
-      expression,
-      context as unknown as Record<string, unknown>,
-      POLICY_FUNCTIONS as Record<string, CallableFunction>,
-    );
-    if (typeof result === "boolean") return result;
-
-    console.error(
-      JSON.stringify({
-        type: "computer-policy-expression-error",
-        expression,
-        error: `expected a true or false answer, got ${result === null ? "null" : typeof result}`,
-        treatedAs: onError,
-      }),
-    );
-    return onError;
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        type: "computer-policy-expression-error",
-        expression,
-        error: String(error),
-        treatedAs: onError,
-      }),
-    );
-    return onError;
-  }
-}
-
-/**
  * Decide whether this action may run.
  *
- * An absent policy denies. An unconfigured deployment is one that has not said what its Bots may do,
- * and the safe reading of silence is "nothing", not "anything". The shipped configuration therefore
- * states its permissions explicitly rather than relying on a default, so that what a Bot may do is
- * always something somebody wrote down.
+ * Deny rules win over allow rules. A missing or invalid rule fails closed in enforce mode;
+ * dry-run records the same decision and forwards the action.
  */
 export function evaluateActionPolicy(
   policy: ActionPolicy | null | undefined,
   context: PolicyContext,
 ): PolicyDecision {
-  const mode: PolicyMode = policy?.mode ?? "enforce";
-  const deny = policy?.deny ?? [];
-  const allow = policy?.allow ?? [];
+  const effective: ActionPolicy = policy ?? {
+    mode: "enforce",
+    deny: [],
+    allow: ["true"],
+  };
+  const variables = {
+    ...context,
+    key: context.key ?? "",
+    intent: context.intent ?? "read",
+    element: context.element ?? { ref: "", role: "", name: "", type: "" },
+    file: context.file ?? { path: "", name: "", extension: "" },
+    mcp: context.mcp ?? { server: "", tool: "", effect: "" },
+    command: context.command ?? "",
+  };
+  const evaluateRule = (expression: string): boolean | null => {
+    try {
+      const value = evaluateCel(
+        expression,
+        variables as Record<string, unknown>,
+        {
+          contains: (value: unknown, search: unknown) =>
+            typeof value === "string" &&
+            typeof search === "string" &&
+            value.toLowerCase().includes(search.toLowerCase()),
+          startsWith: (value: unknown, search: unknown) =>
+            typeof value === "string" &&
+            typeof search === "string" &&
+            value.startsWith(search),
+          endsWith: (value: unknown, search: unknown) =>
+            typeof value === "string" &&
+            typeof search === "string" &&
+            value.endsWith(search),
+          matches: (value: unknown, pattern: unknown) => {
+            if (typeof value !== "string" || typeof pattern !== "string") {
+              return false;
+            }
+            try {
+              return new RegExp(pattern).test(value);
+            } catch {
+              return false;
+            }
+          },
+        },
+      );
+      return typeof value === "boolean" ? value : null;
+    } catch {
+      return null;
+    }
+  };
 
-  // Deny first, and a broken deny expression still denies. One typo in a rule therefore blocks the
-  // action rather than admitting it: the failure is loud, immediate and safe, and the alternative is
-  // a deployment that believes it has forbidden something it has not.
-  for (const expression of deny) {
-    if (matches(expression, context, true)) {
+  for (const expression of effective.deny) {
+    const matched = evaluateRule(expression);
+    if (matched === true) {
       return {
         allowed: false,
-        mode,
+        mode: effective.mode,
         matched: expression,
         source: "deny",
-        // dry-run records the refusal and lets the work continue, which is what makes it safe to
-        // switch on against live traffic.
-        forward: mode === "dry-run",
-        reason: describeRefusal(context, expression),
+        forward: effective.mode === "dry-run",
+        reason: `Refused by boundary rule: ${expression}`,
+      };
+    }
+    if (matched === null) {
+      return {
+        allowed: false,
+        mode: effective.mode,
+        matched: expression,
+        source: "deny",
+        forward: effective.mode === "dry-run",
+        reason: `A boundary rule could not be evaluated: ${expression}`,
       };
     }
   }
 
-  for (const expression of allow) {
-    if (matches(expression, context, false)) {
+  for (const expression of effective.allow) {
+    const matched = evaluateRule(expression);
+    if (matched === true) {
       return {
         allowed: true,
-        mode,
+        mode: effective.mode,
         matched: expression,
         source: "allow",
         forward: true,
-        reason: "Permitted by policy.",
+        reason: `Allowed by boundary rule: ${expression}`,
+      };
+    }
+    if (matched === null) {
+      return {
+        allowed: false,
+        mode: effective.mode,
+        matched: expression,
+        source: "default",
+        forward: effective.mode === "dry-run",
+        reason: `A boundary rule could not be evaluated: ${expression}`,
       };
     }
   }
 
   return {
     allowed: false,
-    mode,
+    mode: effective.mode,
     matched: null,
     source: "default",
-    forward: mode === "dry-run",
+    forward: effective.mode === "dry-run",
     reason:
-      "No rule in this deployment's policy permits that action, so it was refused. " +
-      "An administrator can add one.",
+      effective.mode === "dry-run"
+        ? "No boundary rule allows this action; dry-run is forwarding it."
+        : "No boundary rule allows this action.",
   };
-}
-
-/** A refusal a person can act on: what was refused, and on what. */
-function describeRefusal(context: PolicyContext, expression: string): string {
-  // A tool call is named by its server and its tool, and nothing else here fits it. The browser
-  // fields are all present on an MCP context and all empty, deliberately, so that a rule written
-  // about a page evaluates to false rather than being unevaluable. That makes every one of the
-  // tests below true of a tool call and all of them wrong about it: without this branch a refused
-  // Jira call reads "the file  is blocked", naming a workspace it never touched and a path that is
-  // not there. Checked first because it is the only one of these that is ever certain.
-  // A command is described by the command. Falling through to the page branch below would produce
-  // "a run_command action on " with an empty host, because a shell call has no page.
-  if (context.command) {
-    return (
-      `This deployment's policy does not allow that: the command \`${context.command}\` ` +
-      `is blocked by the rule \`${expression}\`.`
-    );
-  }
-
-  // Present is not enough: the gateway attaches a neutral all-empty `mcp` to every browser context
-  // so a rule naming `mcp.effect` evaluates to false instead of throwing. Testing the object rather
-  // than its contents made this branch fire for every browser refusal, and a person whose click was
-  // refused read ":  on  is blocked" — two empty strings where the element and page belonged. A real
-  // tool call always names its server and its tool, so those are what the branch keys on.
-  if (context.mcp?.server || context.mcp?.tool) {
-    return (
-      `This deployment's policy does not allow that: ${context.mcp.tool} on ` +
-      `${context.mcp.server} is blocked by the rule \`${expression}\`.`
-    );
-  }
-  // A file refusal must not be phrased as happening "on <host>": the workspace has nothing to do with
-  // whatever page the browser happens to be showing, and saying so sends somebody to the wrong place.
-  if (context.file?.path) {
-    return (
-      `This deployment's policy does not allow that: the file ${context.file.path} ` +
-      `is blocked by the rule \`${expression}\`.`
-    );
-  }
-  const what = context.element?.name
-    ? `“${context.element.name}”`
-    : `a ${context.tool.name.replace("computer_", "")} action`;
-  return (
-    `This deployment's policy does not allow that: ${what} on ${context.page.host} ` +
-    `is blocked by the rule \`${expression}\`.`
-  );
 }

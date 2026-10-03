@@ -21,6 +21,16 @@ import type { HandoffDesk } from "./handoff";
 /** What the model is offered. One name, so a transcript can find every hop by searching for it. */
 export const HANDOFF_TOOL = "message_bot";
 
+/**
+ * The Remi name for the same door.
+ *
+ * `delegate_bot` sends through the very same desk, grants, caps and audit trail as
+ * `message_bot`: the two names exist because a chief-of-staff model thinks in "delegate this",
+ * and meeting it there costs nothing once the machinery is shared. A transcript can still find
+ * every hop by searching for either name.
+ */
+export const DELEGATE_TOOL = "delegate_bot";
+
 const parameters = z.object({
   bot: z
     .string()
@@ -127,3 +137,81 @@ export function handoffTool(options: {
 
 /** Re-exported so callers of this module do not need to know where it is declared. */
 export { HANDED_OVER };
+
+const delegateParameters = z.object({
+  bot: z
+    .string()
+    .describe(
+      "The name of the Bot to delegate this to, as it appears in the roster",
+    ),
+  task: z
+    .string()
+    .describe("What you are asking that Bot to do, in a sentence or two"),
+  constraints: z
+    .string()
+    .optional()
+    .describe("Anything that bounds the work, such as scope, limits, or rules"),
+  expecting: z
+    .string()
+    .optional()
+    .describe("What a good result looks like, including any report to save"),
+});
+
+/**
+ * The Remi spelling of handing work on, for a run that is allowed to have it.
+ *
+ * Same desk, same caps, same grants, same audit rows as {@link handoffTool}: only the name and
+ * the shape differ, because a chief of staff delegates and does not "message". Returns nothing
+ * under the same conditions handoff returns nothing, for the same reason.
+ */
+export function delegateTool(options: {
+  desk: HandoffDesk;
+  /** The run doing the asking, as this deployment signed it. */
+  from: RunAssertion;
+  /** Whether this Bot has been granted anybody at all. */
+  hasSomebodyToAsk: boolean;
+  maxDepth: number;
+  /** How many Bots one run may address. Zero switches it off as surely as a depth of zero. */
+  maxPerRun: number;
+}): GrantedTool | null {
+  const { desk, from, hasSomebodyToAsk, maxDepth, maxPerRun } = options;
+  if (maxDepth <= 0 || maxPerRun <= 0 || !hasSomebodyToAsk) return null;
+  if ((from.depth ?? 0) >= maxDepth) return null;
+
+  return {
+    name: DELEGATE_TOOL,
+    ref: `bot/${DELEGATE_TOOL}`,
+    description:
+      "Delegate a piece of work to another Bot in this workspace. The other Bot does the work in " +
+      "its OWN channel with this person, not here: create the Bot first if it does not exist, then " +
+      "delegate to it and tell the person who is handling it. Do not do the work yourself and do " +
+      "not answer on the Bot's behalf. If the work is yours to do, do it, and if it needs a " +
+      "person's judgement rather than another Bot's, ask the person instead.",
+    parameters: delegateParameters,
+    execute: async (args: unknown) => {
+      const parsed = delegateParameters.safeParse(args);
+      if (!parsed.success) {
+        return "That delegation was not sent: name the Bot and say what you are asking it to do.";
+      }
+      const outcome = await desk.send({
+        from,
+        target: parsed.data.bot,
+        envelope: {
+          task: parsed.data.task,
+          ...(parsed.data.constraints
+            ? { constraints: parsed.data.constraints }
+            : {}),
+          ...(parsed.data.expecting
+            ? { expecting: parsed.data.expecting }
+            : {}),
+        },
+        runInOwnChannel: true,
+      });
+      return outcome.ok
+        ? outcome.inOwnChannel
+          ? `${HANDED_OVER}${outcome.toName}. It is doing the work now in its own channel, which is open in the sidebar. Tell the person who is handling it and do not do the work yourself.`
+          : `${HANDED_OVER}${outcome.toName}. Tell the person who is handling it and do not do the work yourself.`
+        : outcome.refusal;
+    },
+  };
+}

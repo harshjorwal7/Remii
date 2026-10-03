@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { type AuditStore, recordAuditEvent } from "./audit";
 import type { Database } from "./db/client";
 import { reasonWithoutStatement } from "./db/query-failure";
@@ -24,6 +24,7 @@ export type CredentialKind = (typeof credentialKind.enumValues)[number];
 
 export type CredentialStatus = {
   id: string;
+  userId?: string | null;
   kind: CredentialKind;
   provider: string;
   keyId: string;
@@ -37,6 +38,7 @@ type StoredCredential = {
 };
 
 export type CredentialStoreValue = {
+  userId?: string | null;
   kind: CredentialKind;
   provider: string;
   keyId: string;
@@ -107,30 +109,49 @@ export type CredentialStore = {
   /**
    * The live credential for a key, if this deployment holds one.
    *
-   * At most one can exist, which is what `credentials_active_key_idx`
-   * enforces, so a caller about to store a secret for a key can ask whether it
-   * is replacing something rather than finding out from a failed insert.
+   * At most one can exist per owner, which is what
+   * `credentials_active_key_idx` enforces, so a caller about to store a
+   * secret for a key can ask whether it is replacing something rather than
+   * finding out from a failed insert.
+   *
+   * `ownerUserId` pins the lookup to one person's rows plus deployment rows
+   * (user_id NULL). Without it the lookup spans owners, which is what
+   * deployment-level callers (server OAuth clients, agent auth) want and
+   * what user-level callers must not rely on.
    */
   findLiveByKey: (
     key: { kind: CredentialKind; provider: string; keyId: string },
     executor?: CredentialExecutor,
+    ownerUserId?: string | null,
   ) => Promise<{ id: string } | null>;
 };
 
 export type CredentialSecretReader = {
-  readSecret: (id: string) => Promise<{
+  /**
+   * One row by id, optionally pinned to an owner.
+   *
+   * The pin admits the owner's rows and deployment rows (user_id NULL) and
+   * nothing else, so a user-supplied id can never decrypt another person's
+   * secret. Callers without an owner (run context, deployment clients) pass
+   * none and keep the old behavior.
+   */
+  readSecret: (
+    id: string,
+    ownerUserId?: string | null,
+  ) => Promise<{
     encryptedValue: string;
     revokedAt: Date | null;
   } | null>;
 };
 
 export type CredentialStatusReader = {
-  list: () => Promise<CredentialStatus[]>;
+  /** Deployment rows plus, when pinned, one owner's rows. Unpinned lists everything. */
+  list: (ownerUserId?: string | null) => Promise<CredentialStatus[]>;
 };
 
 export type ModelCredentialSecretReader = {
   readModelSecret: (input: {
-    provider: "openai" | "anthropic";
+    provider: "openai";
     keyId: string;
   }) => Promise<{ encryptedValue: string } | null>;
 };
@@ -206,8 +227,8 @@ export async function decryptSecret(encodedKey: string, value: string) {
  * was a withdrawal, anything else was an error. drizzle reports a failed query as a message that
  * BEGINS `Failed query: select "encrypted_value", "revoked_at" from "credentials" …`, so the column
  * this function reads put the substring into every database fault on this very read — Postgres
- * down, a wrong address, a cancelled statement — and each was announced to the person, the model and
- * the operator as an administrator having taken the credential away. A class cannot be produced by
+ * down, a wrong address, a cancelled statement — and each was announced to the person and the model
+ * as somebody having taken the credential away. A class cannot be produced by
  * accident that way, and it survives a reworded sentence, which is the same argument
  * `TokenRefusedError` carries a `code` for rather than a phrase in its prose.
  *
@@ -241,7 +262,7 @@ export async function decryptCredentialForUse(
 export async function resolveModelApiKey(input: {
   encryptionKey: string;
   reader: ModelCredentialSecretReader;
-  provider: "openai" | "anthropic";
+  provider: "openai";
   keyId: string;
   environment: Record<string, string | undefined>;
 }) {
@@ -253,10 +274,18 @@ export async function resolveModelApiKey(input: {
     return decryptSecret(input.encryptionKey, stored.encryptedValue);
   }
 
+  /*
+   * `DEEPSEEK_API_KEY` first, and `||` rather than `??`: `trim()` yields `""` for a blank value, and
+   * `??` would hand that blank straight back instead of reading the next name.
+   *
+   * DeepSeek leads because it is the only provider this deployment dials (`remi/model-router` builds
+   * a chain of one). `OPENAI_API_KEY` stays as the second name because the tenant packages, the
+   * remote agent containers, and `docker-compose` all still write it, and this deployment sets both
+   * to the same key — dropping it would break an env file written before the rename.
+   */
   const environmentKey =
-    input.environment[
-      input.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"
-    ]?.trim();
+    input.environment.DEEPSEEK_API_KEY?.trim() ||
+    input.environment.OPENAI_API_KEY?.trim();
   return environmentKey || null;
 }
 
@@ -312,6 +341,7 @@ export function createCredentialStore(
             kind: credentials.kind,
             provider: credentials.provider,
             keyId: credentials.keyId,
+            userId: credentials.userId,
           })
           .from(credentials)
           .where(eq(credentials.id, input.previousCredentialId))
@@ -329,6 +359,19 @@ export function createCredentialStore(
         ) {
           throw new Error(
             "Previous credential does not match the input's kind, provider or keyId",
+          );
+        }
+        /*
+         * Ownership cannot move on rotation. A caller naming another
+         * person's live row as "previous" would otherwise retire their
+         * secret and mint its replacement under their own id.
+         */
+        if (
+          previous.userId !== null &&
+          previous.userId !== (input.userId ?? null)
+        ) {
+          throw new Error(
+            "Previous credential belongs to somebody else and cannot be rotated here",
           );
         }
 
@@ -357,6 +400,7 @@ export function createCredentialStore(
         const [inserted] = await transaction
           .insert(credentials)
           .values({
+            userId: input.userId,
             kind: input.kind,
             provider: input.provider,
             keyId: input.keyId,
@@ -402,7 +446,11 @@ export function createCredentialStore(
 
       return credential !== undefined;
     },
-    findLiveByKey: async ({ kind, provider, keyId }, executor = database) => {
+    findLiveByKey: async (
+      { kind, provider, keyId },
+      executor = database,
+      ownerUserId,
+    ) => {
       const [credential] = await executor
         .select({ id: credentials.id })
         .from(credentials)
@@ -412,19 +460,41 @@ export function createCredentialStore(
             eq(credentials.provider, provider),
             eq(credentials.keyId, keyId),
             isNull(credentials.revokedAt),
+            // One person's rows plus deployment rows; never another person's.
+            // Absent owner keeps the old span (deployment callers).
+            ...(ownerUserId
+              ? [
+                  or(
+                    eq(credentials.userId, ownerUserId),
+                    isNull(credentials.userId),
+                  ),
+                ]
+              : []),
           ),
         );
 
       return credential ?? null;
     },
-    readSecret: async (id) => {
+    readSecret: async (id, ownerUserId) => {
       const [credential] = await database
         .select({
           encryptedValue: credentials.encryptedValue,
           revokedAt: credentials.revokedAt,
         })
         .from(credentials)
-        .where(eq(credentials.id, id));
+        .where(
+          and(
+            eq(credentials.id, id),
+            ...(ownerUserId
+              ? [
+                  or(
+                    eq(credentials.userId, ownerUserId),
+                    isNull(credentials.userId),
+                  ),
+                ]
+              : []),
+          ),
+        );
 
       return credential ?? null;
     },
@@ -449,10 +519,11 @@ export function createCredentialStore(
 
       return credential ?? null;
     },
-    list: async () => {
+    list: async (ownerUserId) => {
       const records = await database
         .select({
           id: credentials.id,
+          userId: credentials.userId,
           kind: credentials.kind,
           provider: credentials.provider,
           keyId: credentials.keyId,
@@ -460,6 +531,14 @@ export function createCredentialStore(
           revokedAt: credentials.revokedAt,
         })
         .from(credentials)
+        .where(
+          ownerUserId
+            ? or(
+                eq(credentials.userId, ownerUserId),
+                isNull(credentials.userId),
+              )
+            : undefined,
+        )
         .orderBy(credentials.createdAt);
 
       return records.map((credential) => ({
@@ -479,7 +558,7 @@ export type CredentialInput = {
   actorUserId?: string;
 };
 
-export type CredentialAdminService = CredentialStatusReader & {
+export type CredentialWriteService = CredentialStatusReader & {
   create: (input: CredentialInput) => Promise<CredentialStatus>;
   rotate: (
     input: CredentialInput & { previousCredentialId: string },
@@ -662,11 +741,11 @@ export async function revokeCredential(
   return { id: credentialId, revokedAt };
 }
 
-export function createCredentialAdminService(
+export function createCredentialWriteService(
   encryptionKey: string,
   store: CredentialStore & CredentialStatusReader,
   auditStore: AuditStore,
-): CredentialAdminService {
+): CredentialWriteService {
   const service = { encryptionKey, store, auditStore };
 
   return {

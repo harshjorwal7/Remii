@@ -90,7 +90,7 @@ export function SidebarToggle({ className }: { className?: string }) {
             size="icon"
             variant="ghost"
           >
-            <IconLayoutSidebar className="size-4.5" />
+            <IconLayoutSidebar />
           </Button>
         }
       />

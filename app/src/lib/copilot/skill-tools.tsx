@@ -150,10 +150,16 @@ export function SkillTools() {
                 summary: values.summary,
                 title: values.title,
                 /*
-                 * Sent on every save, including empty, because the server replaces the declared set
+                 * Sent on every save, including null, because the server replaces the declared set
                  * rather than merging into it. See `SkillInput`.
                  */
                 tools: values.tools,
+                /*
+                 * And for the same reason. A model that rewrites a skill about a repository and drops
+                 * the `repo` argument would otherwise leave the skill pointing at the old codebase, and
+                 * the run would keep reading it while the card said the skill was being replaced.
+                 */
+                repo: values.repo,
               });
             }}
           />
@@ -165,7 +171,7 @@ export function SkillTools() {
   useHumanInTheLoop({
     name: "save_skill",
     description:
-      "Put a finished skill in front of the person to save. They see the command, the title and the whole instruction, and nothing is written unless they press the button. Call this once, at the end, after they have agreed to what the skill says — not to check your draft.",
+      "Put a finished skill in front of the person to save. They see the command, the title, the whole instruction and the repository if it has one, and nothing is written unless they press the button. Call this once, at the end, after they have agreed to what the skill says — not to check your draft.",
     parameters: proposedSkillSchema,
     available: authoring,
     render: Card,

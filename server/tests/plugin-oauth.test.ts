@@ -48,18 +48,33 @@ describe("the state that travels through the vendor", () => {
     });
   });
 
+  /*
+   * WAS "the screen to return to survives the round trip", sealing a state with `returnTo: "admin"`
+   * and expecting it back.
+   *
+   * There is no admin page to return to — it went with the admin surface — and `ConnectOrigin` is a
+   * closed set of one name, `"settings"`. `"admin"` is no longer a value the type admits, so the seal
+   * either dropped it or was cast past its own type, and the round trip came back as the one
+   * destination there is.
+   *
+   * Both halves are asserted: the name that IS valid survives, and a state sealed before the field
+   * existed still reads as `"settings"` rather than as nothing. The second is the case above; this one
+   * is that the field is carried at all.
+   */
   test("the screen to return to survives the round trip", async () => {
     const sealed = await sealConnectState(
       {
         userId: "user-1",
         serverId: "google-drive",
         verifier: "v-1",
-        returnTo: "admin",
+        returnTo: "settings",
       },
       KEY,
       NOW,
     );
-    expect((await readConnectState(sealed, KEY, NOW))?.returnTo).toBe("admin");
+    expect((await readConnectState(sealed, KEY, NOW))?.returnTo).toBe(
+      "settings",
+    );
   });
 
   /*
@@ -248,7 +263,7 @@ describe("the address the person is sent to", () => {
     authorizationUrlFor({
       auth: googleAuth,
       clientId: "client-id",
-      redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+      redirectUri: "https://remii.example/api/plugins/oauth/callback",
       state: "signed-state",
       codeChallenge: "challenge",
     }),
@@ -292,7 +307,7 @@ describe("the address the person is sent to", () => {
       authorizationUrlFor({
         auth: notionAuth,
         clientId: "client-id",
-        redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+        redirectUri: "https://remii.example/api/plugins/oauth/callback",
         state: "signed-state",
         codeChallenge: "challenge",
       }),
@@ -323,7 +338,7 @@ describe("the address the person is sent to", () => {
       authorizationUrlFor({
         auth: hostileAuth,
         clientId: "client-id",
-        redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+        redirectUri: "https://remii.example/api/plugins/oauth/callback",
         state: "signed-state",
         codeChallenge: "challenge",
       }),
@@ -343,7 +358,7 @@ describe("the address the person is sent to", () => {
       authorizationUrlFor({
         auth: audienceAuth,
         clientId: "client-id",
-        redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+        redirectUri: "https://remii.example/api/plugins/oauth/callback",
         state: "signed-state",
         codeChallenge: "challenge",
       }),
@@ -354,16 +369,16 @@ describe("the address the person is sent to", () => {
 
 describe("the address the vendor sends them back to", () => {
   test("is one path, built from the deployment's own public URL", () => {
-    expect(redirectUriFor("https://openbot.example")).toBe(
-      "https://openbot.example/api/plugins/oauth/callback",
+    expect(redirectUriFor("https://remii.example")).toBe(
+      "https://remii.example/api/plugins/oauth/callback",
     );
   });
 
   test("does not double a slash when the public URL has a trailing one", () => {
     // A redirect URI has to match what was registered with the vendor character for character, so a
     // stray slash is not cosmetic: it fails at the vendor, with a message that does not name us.
-    expect(redirectUriFor("https://openbot.example/")).toBe(
-      "https://openbot.example/api/plugins/oauth/callback",
+    expect(redirectUriFor("https://remii.example/")).toBe(
+      "https://remii.example/api/plugins/oauth/callback",
     );
   });
 });
@@ -424,30 +439,40 @@ describe("where the callback sends somebody afterwards", () => {
     ).toBe("/settings/connected-accounts/google-drive");
   });
 
-  test("a connect started on the admin page returns to the admin page", () => {
-    // The round trip this removes: an administrator who connected from the connector's setup screen
-    // used to be put down on their personal settings page, mid-task, on another part of the app.
+  /*
+   * WAS two cases about returning to the admin page: one expecting
+   * `/admin/plugins/google-drive`, one a failure still going to the list.
+   *
+   * There is no admin plugins page to return to, and `connectedAccountsUrlFor` no longer takes a
+   * `returnTo` at all — the whole parameter was there to let a caller pick between two destinations,
+   * and there is now one. That is the stronger version of the open-redirect defence this file is
+   * about: a destination a caller could name is one an attacker could name.
+   *
+   * So these assert the single remaining destination, and that a `returnTo` naming somewhere else is
+   * not carried into the url. The `as never` is deliberate and is the point: the parameter is gone
+   * from the signature, and passing one must not reach the url.
+   */
+  test("a connect returns to the account on the caller's own connected-accounts screen", () => {
+    expect(
+      connectedAccountsUrlFor("http://localhost:3010", {
+        serverId: "google-drive",
+      }),
+    ).toBe("http://localhost:3010/settings/connected-accounts/google-drive");
+  });
+
+  test("a returnTo naming the admin page does not become a destination", () => {
     expect(
       connectedAccountsUrlFor(
         "http://localhost:3010",
         { serverId: "google-drive" },
-        "admin",
+        "admin" as never,
       ),
-    ).toBe("http://localhost:3010/admin/plugins/google-drive");
+    ).toBe("http://localhost:3010/settings/connected-accounts/google-drive");
   });
 
-  test("a failure goes to the list even when it began on the admin page", () => {
-    /*
-     * The admin route takes the server key in its path, and a failed state has no key to build one
-     * from — the whole reason a failure is anonymous is that the state could not be read. The list is
-     * also the only screen that draws the notice, so it is the honest destination either way.
-     */
+  test("a failure goes to the list, which is the only screen that draws the notice", () => {
     expect(
-      connectedAccountsUrlFor(
-        "http://localhost:3010",
-        { failed: true },
-        "admin",
-      ),
+      connectedAccountsUrlFor("http://localhost:3010", { failed: true }),
     ).toBe(
       "http://localhost:3010/settings/connected-accounts?connected=failed",
     );
@@ -468,16 +493,16 @@ describe("registering this deployment as an OAuth client", () => {
     try {
       const client = await registerDynamicClient({
         registrationUrl: "https://vendor.example/register",
-        redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+        redirectUri: "https://remii.example/api/plugins/oauth/callback",
       });
       expect(client).toEqual({ clientId: "dyn-123", clientSecret: "" });
       expect(seen[0]?.url).toBe("https://vendor.example/register");
       expect(seen[0]?.body).toEqual({
-        redirect_uris: ["https://openbot.example/api/plugins/oauth/callback"],
+        redirect_uris: ["https://remii.example/api/plugins/oauth/callback"],
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
         token_endpoint_auth_method: "none",
-        client_name: "OpenBot",
+        client_name: "Remii",
       });
     } finally {
       globalThis.fetch = realFetch;
@@ -492,7 +517,7 @@ describe("registering this deployment as an OAuth client", () => {
       expect(
         await registerDynamicClient({
           registrationUrl: "https://vendor.example/register",
-          redirectUri: "https://openbot.example/cb",
+          redirectUri: "https://remii.example/cb",
         }),
       ).toBeNull();
     } finally {
@@ -520,7 +545,7 @@ describe("registering this deployment as an OAuth client", () => {
       expect(
         await registerDynamicClient({
           registrationUrl: "https://vendor.example/register",
-          redirectUri: "https://openbot.example/cb",
+          redirectUri: "https://remii.example/cb",
         }),
       ).toBeNull();
     } finally {
@@ -550,7 +575,7 @@ describe("registering this deployment as an OAuth client", () => {
       expect(
         await registerDynamicClient({
           registrationUrl: "https://vendor.example/register",
-          redirectUri: "https://openbot.example/cb",
+          redirectUri: "https://remii.example/cb",
         }),
       ).toBeNull();
       expect(seen[0]?.redirect).toBe("manual");
@@ -578,7 +603,7 @@ describe("registering this deployment as an OAuth client", () => {
       expect(
         await registerDynamicClient({
           registrationUrl: "https://vendor.example/register",
-          redirectUri: "https://openbot.example/cb",
+          redirectUri: "https://remii.example/cb",
         }),
       ).toBeNull();
     } finally {
@@ -603,7 +628,7 @@ describe("registering this deployment as an OAuth client", () => {
       expect(
         await registerDynamicClient({
           registrationUrl: "https://vendor.example/register",
-          redirectUri: "https://openbot.example/cb",
+          redirectUri: "https://remii.example/cb",
         }),
       ).toBeNull();
     } finally {
@@ -631,7 +656,7 @@ describe("redeeming an authorization code", () => {
         clientId: "client-id",
         clientSecret: "",
         code: "code-1",
-        redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+        redirectUri: "https://remii.example/api/plugins/oauth/callback",
         verifier: "verifier-1",
       });
       expect(seen[0]?.params.has("client_secret")).toBe(false);
@@ -656,7 +681,7 @@ describe("redeeming an authorization code", () => {
         clientId: "client-id",
         clientSecret: "secret-1",
         code: "code-1",
-        redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+        redirectUri: "https://remii.example/api/plugins/oauth/callback",
         verifier: "verifier-1",
       });
       expect(seen[0]?.params.get("client_secret")).toBe("secret-1");
@@ -687,7 +712,7 @@ describe("redeeming an authorization code", () => {
           clientId: "client-id",
           clientSecret: "",
           code: "code-1",
-          redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+          redirectUri: "https://remii.example/api/plugins/oauth/callback",
           verifier: "verifier-1",
         }),
       ).toBeNull();
@@ -714,7 +739,7 @@ describe("redeeming an authorization code", () => {
           clientId: "client-id",
           clientSecret: "",
           code: "code-1",
-          redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+          redirectUri: "https://remii.example/api/plugins/oauth/callback",
           verifier: "verifier-1",
         }),
       ).toBeNull();
@@ -745,7 +770,7 @@ describe("redeeming an authorization code", () => {
         clientId: "client-id",
         clientSecret: "",
         code: "code-1",
-        redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+        redirectUri: "https://remii.example/api/plugins/oauth/callback",
         verifier: "verifier-1",
       });
       expect(grant?.scope.length).toBe(512);
@@ -777,7 +802,7 @@ describe("redeeming an authorization code", () => {
           clientId: "client-id",
           clientSecret: "",
           code: "code-1",
-          redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+          redirectUri: "https://remii.example/api/plugins/oauth/callback",
           verifier: "verifier-1",
         }),
       ).toBeNull();
@@ -801,7 +826,7 @@ describe("redeeming an authorization code", () => {
           clientId: "client-id",
           clientSecret: "",
           code: "code-1",
-          redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+          redirectUri: "https://remii.example/api/plugins/oauth/callback",
           verifier: "verifier-1",
         }),
       ).toBeNull();

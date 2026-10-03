@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { AgentCard } from "@/components/agents/agent-card";
@@ -14,10 +14,13 @@ import {
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { defaultAgentProfile } from "@/lib/agents/default-agent";
-import { agentListQueryOptions, isSharedWithYou } from "@/lib/agents/queries";
+import { duplicateAgentMutationOptions } from "@/lib/agents/mutations";
+import { agentListQueryOptions } from "@/lib/agents/queries";
+import { workspaceAgentId } from "@/lib/agents/workspace";
 import { routeMessage } from "@/lib/channels/route";
 import { useStartChannel } from "@/lib/channels/start";
 import { appConfig } from "@/lib/generated/application-config";
+import { queryClient } from "@/query-client";
 
 export const Route = createFileRoute("/_authed/_app/")({
   component: RouteComponent,
@@ -29,20 +32,25 @@ function RouteComponent() {
     isPending: loading,
     isError: failed,
   } = useQuery(agentListQueryOptions());
-  const explore = agents?.filter(isSharedWithYou);
+  // Strict per-user SaaS sandbox: no shared/public agents. The explore
+  // row shows the user's own templates, never another person's coworker.
+  const explore = agents?.filter((a) => Boolean(a.isSystemTemplate));
   const { start, startChosen, pending } = useStartChannel();
   const [error, setError] = useState<string | null>(null);
+  const duplicate = useMutation(duplicateAgentMutationOptions(queryClient));
 
   /** Default recipient when the composer draft has no mention. */
-  const fallback = defaultAgentProfile(
-    agents,
-    agents?.find((agent) => agent.visibility === "public"),
-  );
+  const fallback = defaultAgentProfile(agents, agents?.[0]);
 
   return (
     <>
       <SidebarToggleBar />
-      <div className="flex-1 flex flex-col items-center justify-center w-full p-4 mt-8">
+      {/*
+       * NO `mt-8`. `justify-center` already centres this column, and the margin pushed it about
+       * 16px below optical centre while also consuming height it needed on a short window. The
+       * breathing room is `p-4` on all four sides now.
+       */}
+      <div className="flex w-full flex-1 flex-col items-center justify-center p-4">
         <div className="flex flex-col items-center">
           <h2 className="text-sm uppercase text-muted-foreground font-medium tracking-tight text-center">
             {appConfig.brand.productName}
@@ -66,7 +74,13 @@ function RouteComponent() {
                 if (draft.agentId) {
                   // Recorded and started as one sequence, shared with `/channel/new`: the person
                   // already decided, and the trail has to say so wherever they decided it.
-                  await startChosen(draft.agentId, draft.text);
+                  // A template `@`-mentioned joins the workspace as a copy at send time.
+                  const targetId = await workspaceAgentId(
+                    agents?.find((agent) => agent.id === draft.agentId),
+                    draft.agentId,
+                    duplicate.mutateAsync,
+                  );
+                  await startChosen(targetId, draft.text);
                   return;
                 }
                 let agentId: string | undefined;
@@ -76,6 +90,12 @@ function RouteComponent() {
                   agentId = fallback?.id;
                 }
                 if (!agentId) return;
+                // The router may name a template; it joins as a copy like an explicit pick.
+                agentId = await workspaceAgentId(
+                  agents?.find((agent) => agent.id === agentId),
+                  agentId,
+                  duplicate.mutateAsync,
+                );
                 await start(agentId, draft.text);
               } catch (caught) {
                 setError(
@@ -86,7 +106,7 @@ function RouteComponent() {
                 throw caught;
               }
             }}
-            pending={pending}
+            pending={pending || duplicate.isPending}
           />
           {fallback ? (
             // Said out loud: a message that silently reaches somebody you did not choose is the
@@ -123,11 +143,11 @@ function RouteComponent() {
         {/*
          * A carousel rather than the wrapping grid `/agents` uses, and the difference is on purpose.
          * This is a one-row teaser under the composer: a grid that wrapped here would push the row
-         * down the page every time somebody shared another Bot. `/agents` is the browse surface and
+         * down the page with every template. `/agents` is the browse surface and
          * wraps.
          *
          * What it replaces was `flex flex-row` with no wrap over cards that have no `shrink-0`, so
-         * the fifth public Bot squeezed all five — the same failure `/agents` had just been fixed
+         * the fifth card squeezed all five — the same failure `/agents` had just been fixed
          * for, still sitting here.
          */}
         <div className="mt-10 w-full max-w-2xl">
@@ -168,7 +188,7 @@ function RouteComponent() {
                 {explore.map((agent) => (
                   <CarouselItem className="basis-auto pl-4" key={agent.id}>
                     <Link search={{ agent: agent.id }} to="/channel/new">
-                      <AgentCard agent={agent} />
+                      <AgentCard agent={agent} className="w-[144px]" />
                     </Link>
                   </CarouselItem>
                 ))}
@@ -188,7 +208,7 @@ function RouteComponent() {
               <Empty className="mt-4 h-[180px] border border-dashed border-destructive">
                 <EmptyHeader>
                   <EmptyTitle className="text-destructive">
-                    Agents shared with you couldn't be loaded.
+                    Your agents couldn't be loaded.
                   </EmptyTitle>
                 </EmptyHeader>
               </Empty>
@@ -202,7 +222,7 @@ function RouteComponent() {
               <Empty className="mt-4 h-[180px] border border-dashed">
                 <EmptyHeader>
                   <EmptyTitle className="text-muted-foreground">
-                    Nobody has shared an agent with you yet.
+                    No templates yet. Create your own agent to get started.
                   </EmptyTitle>
                 </EmptyHeader>
               </Empty>

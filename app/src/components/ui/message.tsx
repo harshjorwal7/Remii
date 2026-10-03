@@ -35,7 +35,17 @@ function MessageAvatar({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="message-avatar"
       className={cn(
-        "flex w-fit min-w-8 shrink-0 items-center justify-center self-end overflow-hidden rounded-full bg-muted group-has-data-[slot=message-footer]/message:-translate-y-8",
+        /*
+         * `self-end` ALONE WHEN THERE IS NO FOOTER, `self-start` WHEN THERE IS.
+         *
+         * This used to pair the unconditional `self-end` with a `group-has-…footer:-translate-y-8`,
+         * pulling the avatar up a fixed 32px to land beside the bubble. That number is a guess: a
+         * footer is one line or two depending on its content, so on the longer ones the avatar
+         * overlapped the bubble above and on the shorter ones it floated away from its own message.
+         * Switching the alignment instead of translating it makes the avatar line up with the top of
+         * the message no matter how tall the footer is, which is what the offset was reaching for.
+         */
+        "flex w-fit min-w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted self-end group-has-data-[slot=message-footer]/message:self-start",
         className,
       )}
       {...props}
@@ -83,10 +93,10 @@ function MessageFooter({ className, ...props }: React.ComponentProps<"div">) {
 }
 
 export {
-  MessageGroup,
   Message,
   MessageAvatar,
   MessageContent,
   MessageFooter,
+  MessageGroup,
   MessageHeader,
 };

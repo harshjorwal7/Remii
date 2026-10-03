@@ -1,11 +1,12 @@
 import {
   IconBolt,
   IconBox,
+  IconCreditCard,
   IconLogout,
+  IconPlug,
   IconPlus,
   IconSearch,
   IconSettings,
-  IconShieldLock,
 } from "@tabler/icons-react";
 import {
   useInfiniteQuery,
@@ -13,15 +14,10 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import {
-  Link,
-  type LinkOptions,
-  useNavigate,
-  useParams,
-} from "@tanstack/react-router";
+import { Link, type LinkOptions, useParams } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type * as React from "react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,8 +40,11 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
+import { REMII_AGENT_ID } from "@/lib/agents/default-agent";
+import { agentListQueryOptions } from "@/lib/agents/queries";
 import { signOutMutationOptions } from "@/lib/auth/mutations";
 import { currentUserQueryOptions } from "@/lib/auth/queries";
+import { createChannelMutationOptions } from "@/lib/channels/mutations";
 import {
   type ChannelSummary,
   channelListQueryOptions,
@@ -59,8 +58,8 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../ui/empty";
 import { Channel } from "./channel";
 
 const appLinkOptions = { to: "/" } satisfies LinkOptions;
-const adminLinkOptions = { to: "/admin" } satisfies LinkOptions;
 const settingsLinkOptions = { to: "/settings" } satisfies LinkOptions;
+const billingLinkOptions = { to: "/settings/billing" } satisfies LinkOptions;
 
 const userMenuItemClassName = "gap-2 px-2 py-1.5";
 
@@ -190,6 +189,7 @@ function ChannelRow({
       <Channel
         channelId={channel.id}
         participantIds={channel.agentIds}
+        mascots={channel.mascots}
         name={channel.name}
         summary={channel.summary ?? undefined}
         lastMessage={channel.lastMessage ?? undefined}
@@ -201,6 +201,7 @@ function ChannelRow({
         pinned={channel.pinned}
         unread={unread}
         busy={channel.busy ?? false}
+        activity={channel.activity ?? null}
       />
     </motion.div>
   );
@@ -209,13 +210,38 @@ function ChannelRow({
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { data: currentUser } = useQuery(currentUserQueryOptions());
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const signOut = useMutation(signOutMutationOptions(queryClient));
   const channels = useInfiniteQuery(channelListQueryOptions());
   // One socket for the app, opened where the roster is kept live.
   useChannelEvents();
   const [search, setSearch] = useState("");
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const searching = search.trim().length > 0;
+  /*
+   * Remii is always present: the chief of staff is the default coworker, so a roster with no
+   * channel to them is a roster missing its front door. When the list loads empty and Remii is
+   * on the roster, open a direct channel once per mount — creation invalidates this very list,
+   * which is what stops the effect from firing again. Somebody who deletes every channel gets
+   * Remii back on reload, which is the point: there is always somebody to talk to.
+   */
+  const { data: roster } = useQuery(agentListQueryOptions());
+  const createChannel = useMutation(createChannelMutationOptions(queryClient));
+  const ensuredRemii = useRef(false);
+  useEffect(() => {
+    if (ensuredRemii.current || createChannel.isPending) return;
+    if (channels.isPending || channels.isError || !channels.data) return;
+    // The list query selects its pages flat, so this is already one array of rows.
+    if (channels.data.length > 0) return;
+    if (!roster?.some((agent) => agent.id === REMII_AGENT_ID)) return;
+    ensuredRemii.current = true;
+    createChannel.mutate([REMII_AGENT_ID]);
+  }, [
+    channels.data,
+    channels.isPending,
+    channels.isError,
+    roster,
+    createChannel,
+  ]);
   const visibleChannels = pinnedFirst(matchingChannels(channels.data, search));
   /*
    * FILTERING DOES NOT ANIMATE. Rows exit and relayout on every keystroke otherwise, which is a
@@ -227,8 +253,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     !searching && (channels.data?.length ?? 0) <= MAX_ANIMATED_ROWS;
 
   const handleSignOut = async () => {
-    await signOut.mutateAsync();
-    await navigate({ to: "/sign" });
+    setSignOutError(null);
+    try {
+      await signOut.mutateAsync();
+      window.location.replace("/sign");
+    } catch (error) {
+      setSignOutError(
+        error instanceof Error ? error.message : "Could not sign out.",
+      );
+    }
   };
 
   return (
@@ -287,7 +320,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
              */}
             {searching && visibleChannels.length === 0 ? (
               <div className="py-4">
-                <Empty className="border border-dashed min-h-[40dvh]">
+                <Empty className="h-[180px] border border-dashed">
                   <EmptyHeader>
                     <EmptyTitle>No channels match your search</EmptyTitle>
                     <EmptyDescription className="text-pretty">
@@ -300,12 +333,39 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             ) : null}
             {!searching && channels.data?.length === 0 ? (
               <div className="py-4">
-                <Empty className="border border-dashed min-h-[40dvh]">
+                <Empty className="h-[180px] border border-dashed">
                   <EmptyHeader>
                     <EmptyTitle>You don't have channels yet</EmptyTitle>
                     <EmptyDescription className="text-pretty">
                       Start talking to agents and your channels will appear
                       here.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              </div>
+            ) : null}
+            {/*
+             * AND A THIRD NOTHING, WHICH WAS THE ONE THAT REACHED THE PERSON.
+             *
+             * The two empty states above test `channels.data?.length === 0`, and on a failed read
+             * `data` is `undefined`, so `undefined?.length === 0` is false and NEITHER of them
+             * renders. The roster area was then empty space between the search box and the footer,
+             * with no message of any kind: the sidebar is the app's primary navigation, and a
+             * failure to read it was indistinguishable from having no conversations — except that
+             * having no conversations at least says so.
+             *
+             * So a failure is its own state, and it says what it is. `data === undefined` is what
+             * separates "we could not ask" from "we asked and it was empty": after a refetch that
+             * succeeds the line goes away on its own.
+             */}
+            {!searching && channels.isError && channels.data === undefined ? (
+              <div className="py-4">
+                <Empty className="h-[180px] border border-dashed">
+                  <EmptyHeader>
+                    <EmptyTitle>Your channels could not be loaded</EmptyTitle>
+                    <EmptyDescription className="text-pretty">
+                      This is a problem with this page, not with your
+                      conversations. Reload to try again.
                     </EmptyDescription>
                   </EmptyHeader>
                 </Empty>
@@ -326,6 +386,25 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       <SidebarFooter>
         <SidebarMenu className="gap-px">
           <SidebarMenuItem>
+            <SidebarMenuButton
+              className="hover:bg-foreground/5 h-10"
+              render={(props) => (
+                <Link
+                  {...props}
+                  to="/apps"
+                  activeProps={{
+                    className: "bg-foreground/5",
+                  }}
+                />
+              )}
+            >
+              <div className="size-[28px] flex items-center justify-center">
+                <IconPlug />
+              </div>
+              <span className="text-sm tracking-tight">Apps</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
             {/* Beside Agents rather than inside Admin: writing a skill is something anybody does. */}
             <SidebarMenuButton
               className="hover:bg-foreground/5 h-10"
@@ -342,7 +421,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               <div className="size-[28px] flex items-center justify-center">
                 <IconBox />
               </div>
-              <span className="text-sm trackint-tight">Skills</span>
+              <span className="text-sm tracking-tight">Skills</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
@@ -361,7 +440,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               <div className="size-[28px] flex items-center justify-center">
                 <IconBolt />
               </div>
-              <span className="text-sm trackint-tight">Agents</span>
+              <span className="text-sm tracking-tight">Agents</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           {/* Routines live on each coworker's own dialog now, not as a nav destination: the
@@ -371,30 +450,29 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
-                  <SidebarMenuButton className="hover:bg-foreground/5 h-10" />
+                  <SidebarMenuButton className="hover:bg-foreground/5 h-10 w-full justify-between" />
                 }
               >
-                <UserAvatar />
-                <span className="text-sm trackint-tight">
-                  {currentUser?.name || currentUser?.email}
-                </span>
+                <div className="flex items-center gap-2 min-w-0">
+                  <UserAvatar />
+                  <span className="text-sm tracking-tight truncate">
+                    {currentUser?.name || currentUser?.email}
+                  </span>
+                </div>
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="start"
-                className="p-1.5"
+                className="p-1.5 min-w-[200px]"
                 side="top"
                 sideOffset={8}
               >
-                {/* Admin routes are server-guarded; hide the entry for users who cannot open them. */}
-                {currentUser?.role === "admin" ? (
-                  <DropdownMenuItem
-                    className={userMenuItemClassName}
-                    render={<Link {...adminLinkOptions} />}
-                  >
-                    <IconShieldLock />
-                    Admin
-                  </DropdownMenuItem>
-                ) : null}
+                <DropdownMenuItem
+                  className={userMenuItemClassName}
+                  render={<Link {...billingLinkOptions} />}
+                >
+                  <IconCreditCard className="size-4 text-muted-foreground" />
+                  <span className="flex-1">Billing</span>
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   className={userMenuItemClassName}
                   render={<Link {...settingsLinkOptions} />}
@@ -411,6 +489,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   <IconLogout />
                   Log out
                 </DropdownMenuItem>
+                {signOutError ? (
+                  <p
+                    className="px-2 py-1.5 text-xs text-destructive"
+                    role="alert"
+                  >
+                    {signOutError}
+                  </p>
+                ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
           </SidebarMenuItem>

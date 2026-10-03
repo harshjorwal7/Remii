@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createAgentRegistry } from "../src/agents/registry";
 
-test("reports built-in and remote agent availability without secrets", () => {
+test("reports in-process and AG-UI-reached availability without secrets", () => {
   expect(
     createAgentRegistry(
       [
@@ -26,7 +26,7 @@ test("reports built-in and remote agent availability without secrets", () => {
   ]);
 });
 
-test("marks unavailable agents with safe reasons", () => {
+test("marks an agent with no model credential unavailable and says why", () => {
   expect(
     createAgentRegistry(
       [
@@ -60,5 +60,30 @@ test("marks unavailable agents with safe reasons", () => {
       available: false,
       reason: "AG-UI endpoint is invalid.",
     },
+  ]);
+});
+
+test("an address this deployment configured is not screened again at read time", () => {
+  /*
+   * WAS covered by the same two cases as an invalid address, back when a person could type one in.
+   * The check stayed, and it is worth saying why it is now only a sanity check: every address here
+   * comes from this deployment's own configuration — the Bot it ships in the box, or the harness
+   * chosen at setup — so nothing untrusted is left to screen, and a malformed one is a broken
+   * deployment rather than an attempt.
+   */
+  expect(
+    createAgentRegistry(
+      [
+        {
+          id: "risk",
+          name: "Risk",
+          type: "remote_ag_ui",
+          endpoint: "http://127.0.0.1:4200/ag-ui",
+        },
+      ],
+      new Set(),
+    ),
+  ).toEqual([
+    { id: "risk", name: "Risk", type: "remote_ag_ui", available: true },
   ]);
 });

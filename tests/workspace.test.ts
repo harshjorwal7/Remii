@@ -27,7 +27,7 @@ function packagesStartedBy(script: string, workspaces: string[]): string[] {
   );
 }
 
-describe("OpenBot workspace", () => {
+describe("Remii workspace", () => {
   test("defines the app, server, and worker packages", () => {
     const manifest = rootManifest();
 

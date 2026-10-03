@@ -1,12 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
-import { createApp } from "../src/app";
 import { createAuditReader } from "../src/audit";
-import { loadConfig } from "../src/config";
 import { createDatabase } from "../src/db/client";
 import { auditEvents } from "../src/db/schema";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
-import { testEnvironment } from "./support/environment";
 
 /**
  * What a hand-edited cursor does to the admin trail, asked of the database that parses it.
@@ -24,86 +21,70 @@ import { testEnvironment } from "./support/environment";
  * read" and "this deployment is broken".
  */
 
-const config = loadConfig({ ...testEnvironment() });
-
 const databaseUrl = testDatabaseUrl();
 const database = createDatabase(databaseUrl, TEST_POOL);
-
-const adminAuth = {
-  handler: () => new Response(null, { status: 204 }),
-  api: {
-    getSession: async () => ({
-      user: { id: "admin", email: "admin@openbot.test" },
-    }),
-  },
-};
-
-function adminApp() {
-  return createApp(
-    config,
-    adminAuth,
-    { rolesForUser: async () => ["admin"] },
-    createAuditReader(database),
-  );
-}
 
 function cursorOf(page: unknown): string {
   return Buffer.from(JSON.stringify(page)).toString("base64url");
 }
 
+/**
+ * A hand-edited cursor, asked of the reader that turns it into SQL.
+ *
+ * WAS three tests driving `createApp` and asking for `/api/admin/audit-events?cursor=...`, asserting
+ * 400 / 400 / 200. That route went with the admin surface, so all three were answering 404.
+ *
+ * The property underneath them is intact and is the one worth keeping: a cursor the server cannot
+ * read must never reach PostgreSQL. It is asserted here by calling `createAuditReader.list` with the
+ * cursor directly, which is the actual boundary — `decodeCursor` is inside the reader, and a stub
+ * reader could never have shown the failure this file exists for, because a stub takes any cursor at
+ * all. `audit_events.id` is a `uuid` and the cursor's id goes into `lt(auditEvents.id, cursor.id)`, so
+ * an id that is not a uuid is `invalid input syntax for type uuid` from inside the query.
+ */
 describe("a cursor the trail's own columns have to parse", () => {
-  test("an id no uuid column can read answers 400, not 500", async () => {
-    const response = await adminApp().request(
-      `http://openbot.local/api/admin/audit-events?cursor=${cursorOf({
-        id: "event-1",
-        createdAt: "2026-08-13T12:00:00.000Z",
-      })}`,
-    );
+  const reader = createAuditReader(database);
 
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: "cursor must be a valid audit page cursor",
-    });
+  test("an id no uuid column can read is refused before the query is built", async () => {
+    await expect(
+      reader.list({
+        cursor: cursorOf({
+          id: "event-1",
+          createdAt: "2026-08-13T12:00:00.000Z",
+        }),
+      }),
+    ).rejects.toThrow("cursor must be a valid audit page cursor");
   });
 
-  test("an id that is not a string at all answers 400, not 500", async () => {
+  test("an id that is not a string at all is refused the same way", async () => {
     // Truthy, which is all the guard used to ask of it, and bound into a uuid comparison unchanged.
-    const response = await adminApp().request(
-      `http://openbot.local/api/admin/audit-events?cursor=${cursorOf({
-        id: 7,
-        createdAt: "2026-08-13T12:00:00.000Z",
-      })}`,
-    );
-
-    expect(response.status).toBe(400);
+    await expect(
+      reader.list({
+        cursor: cursorOf({
+          id: 7,
+          createdAt: "2026-08-13T12:00:00.000Z",
+        }),
+      }),
+    ).rejects.toThrow("cursor must be a valid audit page cursor");
   });
 
   test("a cursor the endpoint itself would issue still pages", async () => {
     /*
-     * THE LIMIT ON THE REFUSAL, against the reader that builds the query rather than a stub that
-     * records it: a uuid id and an ISO timestamp — which is exactly what `encodeCursor` writes out
-     * of a row — still reaches the database and answers a page.
+     * THE LIMIT ON THE REFUSAL: a uuid id and an ISO timestamp — exactly what `encodeCursor` writes
+     * out of a row — still reaches the database and answers a page. Without this the two refusals
+     * above would pass on a reader that rejected every cursor ever written.
      */
-    const response = await adminApp().request(
-      `http://openbot.local/api/admin/audit-events?cursor=${cursorOf({
+    const page = await reader.list({
+      cursor: cursorOf({
         id: "6f1b7f28-6b2d-4d1b-9a2a-1c0b4b2c8a11",
         createdAt: "2026-08-13T12:00:00.000Z",
-      })}&limit=1`,
-    );
+      }),
+      limit: 1,
+    });
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toHaveProperty("events");
+    expect(Array.isArray(page.events)).toBe(true);
   });
 });
 
-/**
- * Walking the trail with the cursor the endpoint itself hands out.
- *
- * `created_at` keeps microseconds and a JavaScript `Date` keeps milliseconds, so a cursor built from
- * the row as the driver returns it names a moment slightly before the row it was taken from. Rows
- * written in the same millisecond as the last one on a page then compare as newer than the cursor
- * and never come back on any page.
- */
 describe("a cursor over rows written within one millisecond", () => {
   const reader = createAuditReader(database);
 

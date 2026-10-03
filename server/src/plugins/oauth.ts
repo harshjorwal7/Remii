@@ -57,7 +57,12 @@ const CALLBACK_PATH = "/api/plugins/oauth/callback";
  * It lives in the SEALED state rather than on the callback URL because the callback is a request
  * somebody else's server sent the browser on. Nothing on it is believable by itself.
  */
-export type ConnectOrigin = "settings" | "admin";
+/**
+ * Where a consent flow lands back. Individual-user SaaS has one answer every
+ * user's own connected-accounts screen. The type stays so the state the
+ * server signs cannot become an open redirect however it is called.
+ */
+export type ConnectOrigin = "settings";
 
 export type ConnectState = {
   /** Who is connecting. Taken from their session when the flow starts, never from the callback. */
@@ -71,7 +76,12 @@ export type ConnectState = {
    * code it unlocks, so a state anybody could read would be a code anybody could redeem.
    */
   verifier: string;
-  /** Where to go back to. Absent reads as `settings`, which is where every flow used to end. */
+  /**
+   * Where to go back to. Always absent now: every flow ends on the person's
+   * own connected-accounts page, and a destination a caller could name is the
+   * open redirect this shape exists to stop. Kept on the type so a sealed
+   * state written before this still opens, reading as the default.
+   */
   returnTo?: ConnectOrigin;
 };
 
@@ -110,26 +120,13 @@ export function connectedAccountsUrlFor(
   appUrl: string | undefined,
   where: { serverId: string } | { failed: true },
   /**
-   * Which screen to go back to.
-   *
-   * An administrator can start this from the connector's own setup page, and sending them to their
-   * personal settings afterwards would be the same round trip this was meant to remove — they left a
-   * page mid-task and should come back to it. The page they return to shows the same fact either way.
+   * The flow always lands back on the person's own connected-accounts page.
+   * There is no administrator connector page any more, and no parameter to
+   * choose one: a destination a caller could name is the open redirect this
+   * shape exists to stop.
    */
-  returnTo: ConnectOrigin = "settings",
 ): string {
   const origin = appUrl?.replace(/\/+$/, "") ?? "";
-
-  if (returnTo === "admin") {
-    /*
-     * The admin route takes the server key as its path parameter, so a failure has nowhere generic
-     * to land — and a failed state has no key to build one from. Those cases fall through to the
-     * settings list below, which is the one screen that draws a failure notice.
-     */
-    if ("serverId" in where) {
-      return `${origin}/admin/plugins/${encodeURIComponent(where.serverId)}`;
-    }
-  }
 
   const base = `${origin}/settings/connected-accounts`;
 
@@ -219,7 +216,7 @@ export async function readConnectState(
       serverId: payload.serverId,
       verifier: payload.verifier,
       // Only the one name is recognised; anything else becomes the default rather than being carried.
-      returnTo: payload.returnTo === "admin" ? "admin" : "settings",
+      returnTo: "settings",
     };
   } catch {
     return null;
@@ -477,7 +474,7 @@ export async function registerDynamicClient(input: {
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
         token_endpoint_auth_method: "none",
-        client_name: "OpenBot",
+        client_name: "Remii",
       }),
       // The registration endpoint is pinned in the catalogue, so a redirect is somebody else deciding
       // where this deployment introduces itself. Left as the response, which is not `ok`.

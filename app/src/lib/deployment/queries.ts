@@ -14,10 +14,19 @@ export type DeploymentCapabilities = {
    *
    * Read by the browser because the browser owns half of this capability: the SDK's provider is what
    * offers the model the tool that generates one. A deployment that turned the server half off while
-   * the browser kept offering the tool would have Bots writing whole interfaces that nothing draws,
+   * the browser kept offering the tool would have Bots writing whole interfaces nothing ever draws,
    * so both halves read this one answer.
    */
   generativeUi: boolean;
+  /**
+   * Whether any Bot here has a computer behind it.
+   *
+   * The browser offers the computer_* tools and draws the watch-screen button off this: with no
+   * computer the tools stay home and the button answers "coming soon". Absent reads as off, the
+   * fail-closed direction, because offering tools nothing executes is the failure this flag exists
+   * to prevent.
+   */
+  computer: boolean;
 };
 
 export const deploymentKeys = {
@@ -51,9 +60,12 @@ export function deploymentCapabilitiesQueryOptions() {
         await client("/api/capabilities", {
           fallback: "This deployment's capabilities could not be loaded.",
         })
-      ).json()) as { generativeUi?: boolean };
+      ).json()) as { generativeUi?: boolean; computer?: boolean };
 
-      return { generativeUi: body.generativeUi === true };
+      return {
+        generativeUi: body.generativeUi === true,
+        computer: body.computer === true,
+      };
     },
   });
 }

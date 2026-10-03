@@ -135,6 +135,7 @@ type Connection = {
   url: string;
   /** The bearer token for this server, already decrypted. Absent for a server that needs none. */
   token?: string;
+  signal?: AbortSignal;
 };
 
 /**
@@ -269,7 +270,7 @@ async function withClient<T>(
       ? { headers: { Authorization: authorizationHeader(connection.token) } }
       : undefined,
   });
-  const client = new Client({ name: "openbot", version: "1.0.0" });
+  const client = new Client({ name: "remii", version: "1.0.0" });
 
   try {
     await client.connect(transport);
@@ -369,7 +370,10 @@ export async function callTool(
     const result = await client.callTool(
       { name: toolName, arguments: args },
       undefined,
-      { timeout: CALL_TIMEOUT_MS },
+      {
+        timeout: CALL_TIMEOUT_MS,
+        ...(connection.signal ? { signal: connection.signal } : {}),
+      },
     );
 
     const { text, truncated } = resultText(result.content);

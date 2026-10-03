@@ -26,10 +26,16 @@ import {
   type RoutineSweepOptions,
 } from "../../server/src/routines/sweep";
 import { createWorkQueue } from "../../server/src/work/queue";
-import { loadWorkerEnv, routineRunUrl } from "./env";
+import {
+  cronTickUrl,
+  loadWorkerEnv,
+  memoryConsolidateUrl,
+  routineRunUrl,
+} from "./env";
+import { runTelegramLoop } from "./telegram";
 import { workerStatus } from "./status";
 
-console.info(`OpenBot worker status: ${workerStatus().status}`);
+console.info(`Remii worker status: ${workerStatus().status}`);
 
 /*
  * The worker's three settings, parsed and validated in one place (`./env`).
@@ -107,6 +113,9 @@ function sleep(ms: number): Promise<void> {
 
 let tick = 0;
 
+/** The UTC day consolidation last ran, so it runs once a day, not once a tick. */
+let lastConsolidationDay = "";
+
 async function runOneTick(): Promise<void> {
   tick += 1;
 
@@ -158,9 +167,165 @@ async function runOneTick(): Promise<void> {
       );
     }
   }
+
+  // Nightly memory consolidation, once per UTC day. The server merges duplicate memories and
+  // resolves contradictions per user; this loop only supplies the clock. Dry-run until the
+  // operator sets MEMORY_CONSOLIDATE_DRY_RUN=false: decisions are logged, nothing is linked.
+  // Its own try/catch, so a consolidation failure never touches the routines sweep below.
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    if (lastConsolidationDay !== today) {
+      lastConsolidationDay = today;
+      const dryRun = process.env.MEMORY_CONSOLIDATE_DRY_RUN !== "false";
+      const response = await fetch(memoryConsolidateUrl(serverInternalUrl), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${workerSharedSecret}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ dryRun }),
+        signal: AbortSignal.timeout(55_000),
+      });
+      const summary = (await response.json().catch(() => null)) as {
+        users?: number;
+        merged?: number;
+        superseded?: number;
+      } | null;
+      console.info(
+        JSON.stringify({
+          type: "memory-consolidation",
+          status: response.status,
+          dryRun,
+          users: summary?.users ?? 0,
+          merged: summary?.merged ?? 0,
+          superseded: summary?.superseded ?? 0,
+        }),
+      );
+      // The morning brief rides the same nightly pass: one clock, one log
+      // line family, its own failure note so a brief outage never touches
+      // consolidation above.
+      try {
+        const briefed = await fetch(
+          `${serverInternalUrl}/internal/memory/brief`,
+          {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${workerSharedSecret}`,
+              "content-type": "application/json",
+            },
+            body: "{}",
+            signal: AbortSignal.timeout(55_000),
+          },
+        );
+        const briefSummary = (await briefed.json().catch(() => null)) as {
+          users?: number;
+          briefed?: number;
+        } | null;
+        console.info(
+          JSON.stringify({
+            type: "memory-brief",
+            status: briefed.status,
+            users: briefSummary?.users ?? 0,
+            briefed: briefSummary?.briefed ?? 0,
+          }),
+        );
+      } catch (error) {
+        console.warn(
+          JSON.stringify({
+            type: "memory-brief-failed",
+            reason: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+    }
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        type: "memory-consolidation-failed",
+        reason: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+
+  // Remi's scheduled jobs, every other tick (about once a minute). The server claims due rows,
+  // runs each as its owner and releases them; this loop only supplies the clock. Its own
+  // try/catch, so a cron failure never touches the routines sweep above.
+  if (tick % 2 === 0) {
+    try {
+      const response = await fetch(cronTickUrl(serverInternalUrl), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${workerSharedSecret}`,
+          "content-type": "application/json",
+        },
+        body: "{}",
+        signal: AbortSignal.timeout(55_000),
+      });
+      const summary = (await response.json().catch(() => null)) as {
+        claimed?: number;
+        ran?: number;
+        failed?: number;
+      } | null;
+      console.info(
+        JSON.stringify({
+          type: "cron-tick",
+          status: response.status,
+          claimed: summary?.claimed ?? 0,
+          ran: summary?.ran ?? 0,
+          failed: summary?.failed ?? 0,
+        }),
+      );
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          type: "cron-tick-failed",
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+  }
 }
 
 async function main(): Promise<void> {
+  // Telegram alongside routines, when a bot token is configured. Its own loop (long-poll),
+  // because stuffing a 25-second wait into the 30-second sweep tick would serialize the two:
+  // a quiet Telegram would make every routine late. Absent without a token.
+  //
+  // Opt out with TELEGRAM_POLL=false (local development against a bot token
+  // production already polls: two getUpdates loops 409 each other and both
+  // sides lose messages). The link/username display keeps working — only the
+  // incoming-message loop stops.
+  if (
+    process.env.TELEGRAM_BOT_TOKEN?.trim() &&
+    process.env.TELEGRAM_POLL !== "false"
+  ) {
+    void runTelegramLoop({
+      botToken: process.env.TELEGRAM_BOT_TOKEN.trim(),
+      serverInternalUrl,
+      workerSharedSecret,
+    }).catch((error: unknown) => {
+      console.warn(
+        JSON.stringify({
+          type: "telegram-loop-died",
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    });
+  } else {
+    console.info(
+      JSON.stringify(
+        process.env.TELEGRAM_POLL === "false"
+          ? {
+              type: "telegram-disabled",
+              note: "TELEGRAM_POLL is false, so Telegram messages are not polled here.",
+            }
+          : {
+              type: "telegram-disabled",
+              note: "TELEGRAM_BOT_TOKEN is not set, so Telegram messages are not polled.",
+            },
+      ),
+    );
+  }
   // Loop for ever, one tick every TICK_MS, awaiting each tick fully before scheduling the next so two
   // ticks are never in flight at once.
   for (;;) {

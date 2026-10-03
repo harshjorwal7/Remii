@@ -39,6 +39,16 @@ export type SavedConfiguration = {
     | "compatible-endpoint"
     | null;
   intelligenceApiKey?: boolean | null;
+  /*
+   * BOTH PROVIDERS, IN BOTH RECORDS.
+   *
+   * These two records were typed for `"openai"` only, and the component then reads them with
+   * `record?.[row.id]` where `row.id` is also `"anthropic"`. So a Claude setup's saved-session flag
+   * was carried in a key the type said could not exist: it survived at runtime (it is an object
+   * lookup) and no compiler objected, which is the worst combination — the annotation claimed a
+   * narrower world than the code actually handled, and a reader trusting it would conclude Claude
+   * had no saved-session state at all.
+   */
   modelApiKeys?: Partial<
     Record<"openai" | "anthropic" | "compatible", boolean | null>
   >;

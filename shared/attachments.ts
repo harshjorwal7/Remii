@@ -116,6 +116,126 @@ export const ACCEPTED_TEXT_MIME = [
 ] as const;
 
 /**
+ * Formats the app can show and read, but not as an image or as text.
+ *
+ * Split out from `ACCEPTED_TEXT_MIME` because these are NOT text. A PDF is a container with
+ * compressed page streams inside it and a `.docx` is a zip archive, and the only thing that makes
+ * either readable is an extractor rather than a decode. They are listed separately so the limits,
+ * the viewer and the extractor can each ask about their own set without re-deciding what counts as
+ * what.
+ *
+ * The four are what the extractor below is actually built to read. `application/msword` and the rest
+ * of the pre-2007 binary Office set are deliberately absent: they are a different container with a
+ * different parser, and a file the app cannot read is still a file it can store and hand back whole.
+ * Adding one to this list without writing its extractor would produce a file that previews as an
+ * empty box.
+ */
+export const ACCEPTED_DOCUMENT_MIME = [
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+] as const;
+
+/**
+ * Media the app can play inline.
+ *
+ * Kept small on purpose. `video/*` in particular is a browser's problem: a codec this deployment
+ * cannot decode is a black rectangle, which is worse than the file's name, and the accept list below
+ * can only be a guess about what the reader's browser supports. What is listed is what the common
+ * browsers all handle.
+ */
+export const ACCEPTED_AUDIO_MIME = [
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/ogg",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/webm",
+] as const;
+
+export const ACCEPTED_VIDEO_MIME = [
+  "video/mp4",
+  "video/webm",
+  "video/ogg",
+] as const;
+
+/**
+ * TYPES THAT ARE REFUSED RATHER THAN STORED, AND WHY THE LIST IS A LIST.
+ *
+ * The app now accepts files whose type it does not recognise, which makes the default "accept"
+ * rather than "refuse" — and that inverts the safety argument this file used to make by omission.
+ * Before, anything not on the accepted lists was turned away, so nothing served from this origin
+ * could carry script. Now the question is no longer "is this on a list" but "is serving this
+ * inline dangerous", and the dangerous cases share one property: they are markup or script that a
+ * browser will EXECUTE when it is served with its own content type from this origin.
+ *
+ * They are refused outright rather than neutralised. Serving them as
+ * `application/octet-stream` with a download disposition would be safe in the same way
+ * `application/octet-stream` is safe for any other binary, and the honest reason not to is that a
+ * `.html` file somebody attaches to a message is nearly always meant to be read by a person opening
+ * it, and a download prompt is a worse answer than a clear refusal at the door.
+ *
+ * `image/svg+xml` is here and is also reached by the `image/` rule in `classifyAttachment`, which
+ * is why it is not repeated in the note on that function.
+ */
+export const INLINE_UNSAFE_MIME = [
+  "text/html",
+  "application/xhtml+xml",
+  "text/xml",
+  "application/xml",
+  "application/xhtml",
+  "text/x-server-parsed-html",
+  "application/xslt+xml",
+  "application/mathml+xml",
+  "application/rdf+xml",
+  "text/xsl",
+] as const;
+
+/**
+ * How large a file of each kind may be, in bytes.
+ *
+ * A TABLE RATHER THAN A CONSTANT PER FAMILY, because the ceilings are not interchangeable and were
+ * not before either. An image is bound by a provider's vision limit and by the base64 the stored
+ * bytes become; text is bound by what a context window can hold; a document is bound by an
+ * extractor's memory rather than by either, since a 200-page PDF is a modest file and a large amount
+ * of work to parse; a media file is bound by nothing but the disk, and is the one family where the
+ * only real question is whether anybody should be able to fill the volume with a video.
+ *
+ * `binary` is the smallest ceiling of the accepted families and that is deliberate. A file nobody can
+ * preview is a file whose only use is being handed back whole, so its limit is about disk and about
+ * the size of the response `/api/attachments/:id` has to produce — not about anything the app
+ * reads out of it.
+ *
+ * The numbers are bytes, and a caller that wants a sentence to refuse with wants
+ * {@link maxBytesForKind} rather than the table, so the refusal and the check cannot be written
+ * against different entries.
+ */
+export const MAX_BYTES_BY_KIND: Readonly<Record<AttachmentKind, number>> = {
+  image: MAX_IMAGE_BYTES,
+  text: MAX_FILE_BYTES,
+  document: 32 * 1024 * 1024,
+  audio: 64 * 1024 * 1024,
+  video: 256 * 1024 * 1024,
+  binary: 64 * 1024 * 1024,
+  // Not accepted, so nothing is ever refused against these two; present so the table is total and a
+  // caller cannot index it with `undefined` on a kind it has already been told is unsupported.
+  "unsupported-image": MAX_IMAGE_BYTES,
+  unsupported: MAX_FILE_BYTES,
+};
+
+/**
+ * The ceiling for one kind, in bytes.
+ *
+ * The only supported way to ask, so that a caller writing a refusal sentence is reading the same
+ * entry the check was made against. Returns 0 for the two kinds that are never accepted, which reads
+ * as "nothing is allowed" rather than as a missing value.
+ */
+export function maxBytesForKind(kind: AttachmentKind): number {
+  return MAX_BYTES_BY_KIND[kind] ?? 0;
+}
+
+/**
  * THE MEDIA TYPE ON ITS OWN: LOWER CASE, PARAMETERS GONE — AND THE ONLY FORM ANYTHING HERE COMPARES.
  *
  * A `File`'s type is whatever produced it. Bun's constructor appends `;charset=utf-8` to
@@ -158,10 +278,48 @@ export function namesNoFormat(mimeType: string): boolean {
 }
 
 export type AttachmentKind =
+  /** Shown inline as an image, and put in front of a vision-capable model as one. */
   | "image"
+  /** Shown inline as text, and handed to the model as its own characters. */
   | "text"
+  /**
+   * Shown through a document viewer and read by an extractor, never inline as text.
+   *
+   * Its own kind because "it has text inside it" is not the same answer as "it IS text": a PDF
+   * served as `text/plain` is a corrupt file, and a `.docx` served as `text/plain` is a zip archive
+   * with a Word in it. Both are unreadable, and both would be served from this origin as text.
+   */
+  | "document"
+  /** Played inline, never read. */
+  | "audio"
+  /** Played inline, never read. */
+  | "video"
+  /**
+   * Stored, served whole, and offered as a download. Nothing is read out of it and nothing is shown
+   * inline.
+   *
+   * This kind is what makes "any file" true. It is reached by a type that names a real format and is
+   * not one of the families above, which is a deliberate inversion of the old default — see
+   * `INLINE_UNSAFE_MIME` for the list that keeps the inversion from becoming unsafe.
+   */
+  | "binary"
   | "unsupported-image"
   | "unsupported";
+
+/**
+ * The kinds this app accepts, in the order a caller usually wants to ask about them.
+ *
+ * Exported so a screen can say "this app takes these" without re-deriving it, and so the composer's
+ * refusals and the server's refusals are written against one list.
+ */
+export const ACCEPTED_KINDS = [
+  "image",
+  "text",
+  "document",
+  "audio",
+  "video",
+  "binary",
+] as const satisfies readonly AttachmentKind[];
 
 /**
  * `unsupported-image` is a separate answer from `unsupported` so the refusal can name the real
@@ -180,9 +338,10 @@ export type AttachmentKind =
  * have already given.
  */
 export function classifyAttachment(mimeType: string): AttachmentKind {
-  // The media type is what decides here — see `mediaTypeOf`. Without this the composer refused a
-  // file the server then accepted, which is the drift the note at the top of this file exists to
-  // prevent.
+  /*
+   * The media type decides, and it is the type `sniffMimeType` earned from the bytes — never the
+   * filename. See the note on this function.
+   */
   const mediaType = mediaTypeOf(mimeType);
   if ((ACCEPTED_IMAGE_MIME as readonly string[]).includes(mediaType)) {
     return "image";
@@ -191,7 +350,40 @@ export function classifyAttachment(mimeType: string): AttachmentKind {
   if ((ACCEPTED_TEXT_MIME as readonly string[]).includes(mediaType)) {
     return "text";
   }
-  return "unsupported";
+  if ((ACCEPTED_DOCUMENT_MIME as readonly string[]).includes(mediaType)) {
+    return "document";
+  }
+  if ((ACCEPTED_AUDIO_MIME as readonly string[]).includes(mediaType)) {
+    return "audio";
+  }
+  if ((ACCEPTED_VIDEO_MIME as readonly string[]).includes(mediaType)) {
+    return "video";
+  }
+
+  /*
+   * Refused by name, before the `binary` default below.
+   *
+   * The order matters and it is the whole reason this function is safe to end in `binary`. These
+   * are the types a browser will EXECUTE when this origin serves them with their own content type,
+   * and they include several that are not `image/*` and so never reach the rule above — `text/xml`
+   * and `application/xslt+xml` among them. A list checked after the default would be a list that
+   * never fires.
+   */
+  if ((INLINE_UNSAFE_MIME as readonly string[]).includes(mediaType)) {
+    return "unsupported";
+  }
+
+  /*
+   * Anything else that NAMES a format is `binary`: stored, served whole, offered as a download.
+   *
+   * A claim that names no format at all is not `binary` — it is `unsupported`, because on arrival
+   * the server has already thrown such a claim away and sniffed the bytes (`sniffMimeType`), so
+   * reaching this point with one means the caller is the composer, screening a file it has not
+   * uploaded yet and whose bytes it has not seen. Treating "I don't know what this is" as a licence
+   * to accept anything would put the whole sniffing layer behind a browser's shrug.
+   */
+  if (namesNoFormat(mediaType)) return "unsupported";
+  return "binary";
 }
 
 /**

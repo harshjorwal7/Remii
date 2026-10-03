@@ -14,6 +14,7 @@ import {
 import { cleanup, render } from "@testing-library/react";
 import { type AgentProfile, agentKeys } from "@/lib/agents/queries";
 import { Route as BotRoute } from "@/routes/_authed/_app/bot";
+import { REMII_AGENT_ID } from "@/lib/agents/default-agent";
 
 beforeAll(() => GlobalRegistrator.register());
 
@@ -31,11 +32,8 @@ function agent(
 ): AgentProfile {
   return {
     avatarSeed: "seed",
-    builtIn: true,
+    mascot: null,
     canManage: true,
-    endpoint: null,
-    hasAuth: false,
-    hasCallbackToken: false,
     hidden: false,
     mine: true,
     name: "Agent",
@@ -135,15 +133,20 @@ function renderBot(queryClient: QueryClient, initialEntry = "/bot") {
   );
 }
 
-const GENERAL_ASSISTANT = agent({
-  id: "general-assistant",
-  name: "General Assistant",
-  title: "Everyday work",
+/**
+ * REMII, and the id is a template rather than a literal so the URL below cannot drift from it.
+ *
+ * A stale literal here does not fail: `?agent=` names an id nothing answers to, the route renders its
+ * "Bot couldn't be loaded" error, and the test reports a missing heading rather than a wrong id. Built
+ * from the constant, the two cannot disagree.
+ */
+const REMII = agent({
+  id: REMII_AGENT_ID,
+  name: "Remii",
+  title: "Chief of Staff",
 });
 
 const PICKED_HARNESS = agent({
-  builtIn: false,
-  endpoint: "http://127.0.0.1:4201",
   id: "picked-harness",
   name: "LangGraph",
   title: "LangGraph",
@@ -151,7 +154,7 @@ const PICKED_HARNESS = agent({
 
 test("/bot defaults to the picked harness when this setup selected one", async () => {
   const view = renderBot(
-    queryClientWithAgents([GENERAL_ASSISTANT, PICKED_HARNESS]),
+    queryClientWithAgents([REMII, PICKED_HARNESS]),
   );
 
   expect(await view.findByRole("heading", { name: "LangGraph" })).toBeTruthy();
@@ -162,7 +165,7 @@ test("/bot defaults to the picked harness when this setup selected one", async (
 
 test("/bot with an empty agent query uses the normal default Bot", async () => {
   const view = renderBot(
-    queryClientWithAgents([GENERAL_ASSISTANT, PICKED_HARNESS]),
+    queryClientWithAgents([REMII, PICKED_HARNESS]),
     "/bot?agent=",
   );
 
@@ -183,22 +186,22 @@ test("/bot reports a failed initial roster load instead of claiming there are no
 
 test("/bot preserves an explicit agent, including the built-in first agent", async () => {
   const view = renderBot(
-    queryClientWithAgents([GENERAL_ASSISTANT, PICKED_HARNESS]),
-    "/bot?agent=general-assistant",
+    queryClientWithAgents([REMII, PICKED_HARNESS]),
+    `/bot?agent=${REMII_AGENT_ID}`,
   );
 
   expect(
-    await view.findByRole("heading", { name: "General Assistant" }),
+    await view.findByRole("heading", { name: "Remii" }),
   ).toBeTruthy();
   expect(view.getByTestId("copilot-chat").dataset.agentId).toBe(
-    "general-assistant",
+    REMII_AGENT_ID,
   );
 });
 
 test("/bot preserves an explicit unknown agent as a clear missing-bot state", async () => {
   const view = renderBot(
     queryClientWithAgentsAndFetchedAgent(
-      [GENERAL_ASSISTANT, PICKED_HARNESS],
+      [REMII, PICKED_HARNESS],
       "missing-agent",
       new Response(null, { status: 404 }),
     ),
@@ -220,7 +223,7 @@ test("/bot loads a hidden explicit agent from the detail endpoint", async () => 
   });
   const view = renderBot(
     queryClientWithAgentsAndFetchedAgent(
-      [GENERAL_ASSISTANT],
+      [REMII],
       "hidden-bot",
       Response.json({ agent: hiddenBot }),
     ),
@@ -242,7 +245,7 @@ test("/bot hidden lookup does not collide with the shared agent detail cache", a
     title: "Hidden Bot",
   });
   const queryClient = queryClientWithAgentsAndFetchedAgent(
-    [GENERAL_ASSISTANT],
+    [REMII],
     "hidden-bot",
     Response.json({ agent: hiddenBot }),
   );
@@ -259,7 +262,7 @@ test("/bot hidden lookup does not collide with the shared agent detail cache", a
 test("/bot reports an explicit agent detail load failure", async () => {
   const view = renderBot(
     queryClientWithAgentsAndFetchedAgent(
-      [GENERAL_ASSISTANT],
+      [REMII],
       "error-bot",
       Response.json({ error: "detail exploded" }, { status: 500 }),
     ),
@@ -275,13 +278,13 @@ test("/bot reports an explicit agent detail load failure", async () => {
 test("/bot still falls back to the first agent when no picked harness exists", async () => {
   const otherAgent = agent({ id: "researcher", name: "Researcher" });
   const view = renderBot(
-    queryClientWithAgents([GENERAL_ASSISTANT, otherAgent]),
+    queryClientWithAgents([REMII, otherAgent]),
   );
 
   expect(
-    await view.findByRole("heading", { name: "General Assistant" }),
+    await view.findByRole("heading", { name: "Remii" }),
   ).toBeTruthy();
   expect(view.getByTestId("copilot-chat").dataset.agentId).toBe(
-    "general-assistant",
+    REMII_AGENT_ID,
   );
 });

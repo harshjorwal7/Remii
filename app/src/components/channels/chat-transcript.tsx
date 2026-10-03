@@ -22,6 +22,7 @@ import {
 } from "react";
 import { Streamdown } from "streamdown";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogClose,
@@ -341,7 +342,7 @@ function Queued({
                * and read as "Remove queued message:", which is the same nothing three times over.
                */
               aria-label={`Remove queued message: ${describeParked(text, files)}`}
-              className="ml-2 underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+              className="ml-2 underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
               onClick={onRemove}
               type="button"
             >
@@ -1138,14 +1139,19 @@ function AttachmentLightbox({
         <LightboxPicture filename={filename} url={url} />
         <DialogClose
           render={
-            <button
+            /*
+             * The primitive, not a bare `<button>`: the hand-rolled version had no focus ring and
+             * a 20px glyph in a 36px circle, a step larger than every other icon button in the app.
+             */
+            <Button
               aria-label="Close"
-              className="absolute top-4 right-4 grid size-9 place-items-center rounded-full bg-white/10 text-white transition-colors hover:bg-white/20"
-              type="button"
+              className="absolute top-4 right-4 rounded-full bg-white/10 text-white hover:bg-white/20 hover:text-white"
+              size="icon"
+              variant="ghost"
             />
           }
         >
-          <IconX className="size-5" />
+          <IconX />
         </DialogClose>
       </DialogContent>
     </Dialog>
@@ -1257,7 +1263,7 @@ const TranscriptToolCall = memo(function TranscriptToolCall({
          * What was called, shimmering until its result arrives, and then the server's own words
          * drawn the way a Bot's prose is drawn.
          */}
-        {drawn ?? <ServerToolLine name={name} result={result} />}
+        {drawn ?? <ServerToolLine name={name} args={args} result={result} />}
       </ToolRenderBoundary>
     </Arriving>
   );
@@ -1269,8 +1275,16 @@ const TranscriptToolCall = memo(function TranscriptToolCall({
  * Named from the reader's side: what was done, against which server, with the server's own words
  * behind a disclosure. The identifier the model was offered never reaches the screen.
  */
-function ServerToolLine({ name, result }: { name: string; result?: string }) {
-  const { label, detail } = readToolName(name);
+function ServerToolLine({
+  name,
+  args,
+  result,
+}: {
+  name: string;
+  args?: string;
+  result?: string;
+}) {
+  const { label, detail } = readToolName(name, args);
   /*
    * A refusal is not a result, and must not read like one.
    *

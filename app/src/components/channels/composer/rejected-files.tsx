@@ -1,5 +1,6 @@
 import { IconX } from "@tabler/icons-react";
 
+import { Button } from "@/components/ui/button";
 import { Collapse } from "./collapse";
 
 /**
@@ -81,18 +82,20 @@ export function RejectedFiles({
            * files refuses several at once — and are read together, so dismissing them one at a
            * time is work without a purpose.
            */}
-          <button
+          <Button
             aria-label={
               rejected.length === 1
                 ? "Dismiss this refusal"
                 : `Dismiss these ${rejected.length} refusals`
             }
-            className="-m-1 shrink-0 rounded p-1 text-destructive/70 transition-colors hover:text-destructive"
+            className="-m-1 shrink-0 text-destructive/70 hover:text-destructive"
             onClick={onDismiss}
+            size="icon-sm"
             type="button"
+            variant="ghost"
           >
-            <IconX className="size-4" />
-          </button>
+            <IconX />
+          </Button>
         </div>
       ) : null}
     </Collapse>

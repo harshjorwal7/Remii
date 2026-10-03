@@ -1,4 +1,5 @@
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { z } from "zod";
 import {
   type AuditInitiator,
   type AuditStore,
@@ -29,6 +30,7 @@ import {
 import {
   agentProfiles,
   agents,
+  composioAccountGrants,
   composioConnections,
   // Aliased: `credentials` is already the injected vault interface in this module, and the table and
   // the interface are two different things to reach for.
@@ -37,6 +39,8 @@ import {
   mcpTools,
   mcpUserCredentials,
   pluginGrants,
+  pluginRevocations,
+  skillRepos,
   skills,
   skillTools,
 } from "../db/schema";
@@ -46,6 +50,7 @@ import {
   ServerUnresolvableError,
 } from "./access";
 import {
+  type BrokerApp,
   type BrokerConnection,
   BrokerRefusalError,
   BrokerUnconfiguredError,
@@ -73,17 +78,21 @@ import {
 import { inspectToolArguments } from "./content-governance";
 import { type ListedTool, McpServerError } from "./mcp";
 import { registerDynamicClient } from "./oauth";
+import type { RepoIndex, RepoSpec } from "./repo-index";
 import { transportFor } from "./transport";
 
 /**
  * Plugins: what this deployment has added, which Bots may use it, and the one path a call takes.
  *
  * The grant and the policy are two different questions and both are asked on every call. The grant
- * answers "is this Bot allowed this tool at all", which an operator decides on the Plugins page. The
+ * answers "is this Bot allowed this tool at all", which an operator decides on App connections. The
  * policy answers "is this particular call permitted right now", which is written as a rule and can
  * say things a grant cannot: not on this host, not this argument, not a write. Collapsing them would
  * mean an operator who granted a Bot a server had also, invisibly, waived every rule about it.
  */
+
+/** Strict execution timeout: Hard cap any single tool execution to 60 seconds. */
+export const TOOL_EXECUTION_TIMEOUT_MS = 60_000;
 
 /**
  * What a grant is a grant OF.
@@ -185,6 +194,16 @@ export type ServerRecord = {
    * Null is not an older brokered row. It is a row that is not brokered at all.
    */
   authScheme: string | null;
+  /**
+   * The vendor's presentation for an enabled Composio app: logo, description
+   * and action count, joined server-side off the cached directory.
+   */
+  broker?: {
+    logo: string | null;
+    description: string;
+    categories: string[];
+    actionCount: number;
+  } | null;
   tools: ToolRecord[];
   /**
    * Grants on tools this server no longer advertises.
@@ -225,6 +244,58 @@ export type ServerAddress = {
   authScheme: string | null;
 };
 
+/**
+ * The repository a skill points at, as a store read and as a screen read.
+ *
+ * TWO SHAPES RATHER THAN ONE WITH AN OPTIONAL FIELD, and the difference is size rather than taste: the
+ * index is bounded at a few hundred kilobytes and the list of every skill on the deployment is read
+ * on every page of the Skills screen and on every poll of the `/` menu. Sending the index to the
+ * browser would mean every skill list carried a file listing, so {@link SkillRepoSummary} is what
+ * leaves the server and {@link SkillRepoRecord} is what stays here.
+ *
+ * `indexedAt` is a `Date` on the record and a string on the summary, because the column is a timestamp
+ * and the screen renders a duration — there is nothing on the browser that needs to order two of them
+ * or compare them to another timestamp.
+ */
+export type SkillRepoSummary = {
+  /**
+   * The whole address, in the same form the field takes.
+   *
+   * Including the branch and the folder, which is the part that matters: the edit form opens with this
+   * string in its box, so a summary that carried only `owner/repo` would show a skill as pointing at a
+   * repository and quietly drop the branch it was pinned to the moment anybody pressed Save.
+   *
+   * A null `ref` is written as `/tree/HEAD` rather than omitted, for the same reason — a folder cannot
+   * be expressed without a branch in the address, and `HEAD` is GitHub's own name for "whatever branch
+   * this points at", so a repository with no branch pinned keeps following its default one instead of
+   * being silently pinned to whatever the default happened to be on the day it was saved.
+   */
+  url: string;
+  /** The branch, tag or commit the author named. Null means the repository's default branch. */
+  ref: string | null;
+  /** A folder inside the repository, treated as the root. Empty means the whole repository. */
+  path: string;
+  /** The branch the last read was at, which is the answer for a null `ref`. */
+  defaultRef: string | null;
+  indexedAt: string | null;
+  /** Whether the cached file list is all of it. A person shown a partial list is told. */
+  truncated: boolean;
+  /** How many files were listed, so the screen can say something better than "it worked". */
+  fileCount: number | null;
+};
+
+export type SkillRepoRecord = {
+  owner: string;
+  repo: string;
+  ref: string | null;
+  path: string;
+  defaultRef: string | null;
+  treeSha: string | null;
+  indexedAt: Date | null;
+  /** Null until the first read, and again after a failed one. Its absence is not an error state. */
+  index: RepoIndex | null;
+};
+
 export type SkillRecord = {
   id: string;
   slug: string;
@@ -243,15 +314,24 @@ export type SkillRecord = {
    * See the comment on `skillTools` in the schema for why that separation is load-bearing.
    */
   tools: string[];
+  /**
+   * The repository this skill points at, or null.
+   *
+   * Content rather than capability, which is what keeps this writable by anybody signed in. See the
+   * note on `skillRepos` in the schema, and `repo-index.ts` for why it is only ever a public
+   * GitHub address.
+   */
+  repo: SkillRepoSummary | null;
 };
 
 /**
  * Who is asking, for the surfaces where the answer depends on it.
  *
- * An administrator sees and governs the whole deployment. Everybody else sees the deployment's
- * skills and their own, and may act only on their own.
+ * Individual-user SaaS: there is no administrator, so there is nothing here that could widen the
+ * answer. Every signed-in person is one user over their own data, and this type carries the id and
+ * nothing else — which is what makes a cross-user read unrepresentable rather than merely unused.
  */
-export type SkillActor = { id: string; isAdmin: boolean };
+export type SkillActor = { id: string };
 
 /** What one Bot holds. Everything the runtime needs to offer it, and nothing it does not. */
 export type GrantedPlugins = {
@@ -261,6 +341,7 @@ export type GrantedPlugins = {
     toolName: string;
     description: string;
     inputSchema: Record<string, unknown>;
+    effect: "read" | "write";
   }[];
   skills: {
     slug: string;
@@ -273,6 +354,17 @@ export type GrantedPlugins = {
      * make it callable.
      */
     tools: string[];
+    /**
+     * The repository this skill points at, or null.
+     *
+     * Carried HERE rather than read at run time for the same reason `instructions` is: the browser
+     * is what invokes the skill, so it is the only place that knows a skill is in play, and a run
+     * that has to be told separately is a run the server cannot tell apart from one where nobody
+     * used the command. The summary is deliberately the small shape — enough to bind three tools to
+     * one repository and tell the model which it is looking at, with the index fetched server-side
+     * when a tool is actually called.
+     */
+    repo: SkillRepoSummary | null;
   }[];
 };
 
@@ -435,6 +527,13 @@ export class PluginRefusedError extends Error {
   }
 }
 
+export class PluginInvalidArgumentsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PluginInvalidArgumentsError";
+  }
+}
+
 export class CatalogueEntryUnknownError extends Error {
   constructor(key: string) {
     super(`${key} is not a server this deployment will connect to.`);
@@ -460,7 +559,7 @@ export class CustomServerRefusedError extends Error {
  * copied every message into `lastError` and answered `{ tools: 0 }`. A plain `Error` is what the
  * narrowing throws in {@link createPluginStore}'s `connectionTokenFor` raise, so a row that resolved
  * to a brokered credential with no app in its url — or to a per-person credential with no
- * `user-oauth` entry — came out on the Plugins page as a sentence about the vendor, next to a
+ * `user-oauth` entry — came out on App connections as a sentence about the vendor, next to a
  * refresh that looked like it had merely failed. An operator reading that is sent to somebody else's
  * status page over a contradiction in our own tables.
  *
@@ -1102,7 +1201,7 @@ export type PluginStoreOptions = {
   credentials: CredentialSecretReader & CredentialStore;
   encryptionKey: string;
   /** Read at call time, never captured, so a policy changed a moment ago applies to this call. */
-  policy: () => ActionPolicy;
+  policy: (actorId?: string) => ActionPolicy;
   /**
    * Speaking MCP to the vendor. Defaults to the real client.
    *
@@ -1137,7 +1236,7 @@ export type PluginStoreOptions = {
    * OPTIONAL BECAUSE ITS ABSENCE IS A STATE RATHER THAN A MISCONFIGURATION. An unset
    * `COMPOSIO_API_KEY` is the documented default: where it is unset there is nothing to connect,
    * nothing to grant and no brokered tool for a Bot to call, and what is left on screen is one row
-   * that goes nowhere under More apps on the admin Plugins page. So the store is constructible
+   * that goes nowhere in the Composio section of App connections. So the store is constructible
    * without one and every path that needs one says so by raising {@link BrokerUnconfiguredError}.
    * A required field would make every caller that never enables an app — the routes, the tests
    * above — invent a broker to get a store.
@@ -1184,6 +1283,28 @@ export function createPluginStore(options: PluginStoreOptions) {
   // No default, unlike the seams above: there is no real implementation in this tree to fall back
   // to, and a deployment with no Composio key is supposed to have no broker. See `./broker`.
   const broker = options.broker;
+
+  /*
+   * The slim server list, held briefly. It costs ~10s against a remote database and every
+   * settings screen reads it on mount; the full listing is deliberately uncached because its
+   * callers mutate-then-read (credentials, grants, refreshes) through writers outside this
+   * cache's reach. Per store instance (not module-global), so tests holding several stores
+   * never read each other's rows. Five minutes: an app enabled on App connections shows up
+   * on the settings screens after that. The version bumps on every server/tool mutation in
+   * this file, so a mutation in the same process never reads stale.
+   */
+  const SERVERS_TTL_MS = 5 * 60_000;
+  let serversCache: {
+    at: number;
+    version: number;
+    rows: ServerRecord[];
+  } | null = null;
+  /*
+   * Bumped whenever servers or their tools change (add flows funnel through refreshTools;
+   * removeServer bumps directly), so a mutation in the same process never reads a stale list.
+   * Cross-process staleness is still bounded by the TTL.
+   */
+  let serversVersion = 0;
 
   /*
    * One exchange at a time per (server, person). A rotating vendor invalidates the refresh
@@ -1253,6 +1374,71 @@ export function createPluginStore(options: PluginStoreOptions) {
   }
 
   /** The refs each of these skills declares, keyed by skill id. Skills with none are absent. */
+  /** One row of `skill_repos`, as the schema gives it. */
+  type SkillRepoRow = typeof skillRepos.$inferSelect;
+
+  function skillRepoSummary(repo: SkillRepoRecord): SkillRepoSummary {
+    const index = repo.index;
+    return {
+      url: repoAddress(repo),
+      ref: repo.ref,
+      path: repo.path,
+      defaultRef: repo.defaultRef,
+      indexedAt: repo.indexedAt?.toISOString() ?? null,
+      truncated: index?.truncated === true,
+      // Null rather than zero when there is no index: a skill whose repository has never been read has
+      // no file count, and drawing "0 files" beside a Refresh button reads as an empty repository.
+      fileCount: index ? index.tree.length : null,
+    };
+  }
+
+  /**
+   * One repository as the single address a field holds, branch and folder included.
+   *
+   * The one place that assembles it, because the alternative is a client rebuilding it from four fields
+   * and getting the `null` branch wrong — and `parseRepoRef` accepts `HEAD` as a ref, which is precisely
+   * why writing it here is safe rather than a bug: `repo-index.ts` resolves `HEAD` back to the default
+   * branch on every read, so a repository nobody pinned keeps following its default rather than becoming
+   * pinned to whichever branch happened to be the default the first time somebody saved the form.
+   */
+  function repoAddress(repo: {
+    owner: string;
+    repo: string;
+    ref: string | null;
+    path: string;
+  }): string {
+    const base = `https://github.com/${repo.owner}/${repo.repo}`;
+    if (!repo.ref && !repo.path) return base;
+    return `${base}/tree/${repo.ref ?? "HEAD"}${repo.path ? `/${repo.path}` : ""}`;
+  }
+
+  /** Every repository a set of skills points at, keyed by skill id, in one read. */
+  async function reposFor(
+    database: Database,
+    skillIds: readonly string[],
+  ): Promise<Map<string, SkillRepoRecord>> {
+    if (skillIds.length === 0) return new Map();
+    const rows: SkillRepoRow[] = await database
+      .select()
+      .from(skillRepos)
+      .where(inArray(skillRepos.skillId, [...skillIds]));
+    return new Map(
+      rows.map((row) => [
+        row.skillId,
+        {
+          owner: row.owner,
+          repo: row.repo,
+          ref: row.ref,
+          path: row.path,
+          defaultRef: row.defaultRef,
+          treeSha: row.treeSha,
+          indexedAt: row.indexedAt,
+          index: (row.index as RepoIndex | null) ?? null,
+        },
+      ]),
+    );
+  }
+
   async function toolsDeclaredBy(skillIds: string[]) {
     if (skillIds.length === 0) return new Map<string, string[]>();
     const rows = await database
@@ -1386,7 +1572,8 @@ export function createPluginStore(options: PluginStoreOptions) {
     entry: CatalogueEntry | null,
     actorId: string,
     access: ServerAccess,
-  ): Promise<{ token?: string }> {
+    botId?: string,
+  ): Promise<{ token?: string; accountId?: string }> {
     /*
      * A brokered app, where the deployment holds one key and Composio keeps the accounts apart.
      *
@@ -1503,8 +1690,12 @@ export function createPluginStore(options: PluginStoreOptions) {
        * `gmail` at `composio://slack` passed this gate on a Gmail connection and then ran a Slack
        * action — the person having connected an app they were never asked about.
        */
-      const [connected] = await database
-        .select({ toolkit: composioConnections.toolkit })
+      const connections = await database
+        .select({
+          id: composioConnections.id,
+          toolkit: composioConnections.toolkit,
+          accountId: composioConnections.accountId,
+        })
         .from(composioConnections)
         .where(
           and(
@@ -1512,23 +1703,72 @@ export function createPluginStore(options: PluginStoreOptions) {
             eq(composioConnections.userId, actorId),
           ),
         )
-        .limit(1);
+        // Deterministic: the same user with several accounts must get the
+        // same answer on every call. An unordered select let two identical
+        // turns run in two different mailboxes.
+        .orderBy(asc(composioConnections.id));
 
-      if (!connected) {
+      if (connections.length === 0) {
         throw new PluginRefusedError(
           `You have not connected your ${row.title} account. Connect it in Settings and ask again.`,
           null,
         );
       }
 
-      return {};
+      let selectedAccountId: string | undefined;
+      if (botId) {
+        const granted = await database
+          .select({
+            accountId: composioConnections.accountId,
+          })
+          .from(composioAccountGrants)
+          .innerJoin(
+            composioConnections,
+            eq(composioAccountGrants.connectionId, composioConnections.id),
+          )
+          .where(
+            and(
+              eq(composioAccountGrants.agentId, botId),
+              eq(composioAccountGrants.userId, actorId),
+              eq(composioConnections.toolkit, access.toolkit),
+            ),
+          )
+          // Deterministic like the connections read above: same grant, same
+          // account, every call.
+          .orderBy(asc(composioConnections.id))
+          .limit(1);
+
+        if (granted.length === 1) {
+          selectedAccountId = granted[0]?.accountId ?? undefined;
+        } else {
+          throw new PluginRefusedError(
+            granted.length > 1
+              ? `This Bot has more than one ${row.title} account selected. Choose exactly one and ask again.`
+              : `This Bot has not been granted one of your ${row.title} accounts. Grant it an account and ask again.`,
+            null,
+          );
+        }
+      } else {
+        if (connections.length > 1) {
+          // Same rule without a Bot in the picture: an unattributed choice
+          // between several of one person's accounts is still a choice the
+          // deployment must not make silently.
+          throw new PluginRefusedError(
+            `You hold several ${row.title} accounts. Pick one for this call and ask again.`,
+            null,
+          );
+        }
+        selectedAccountId = connections[0]?.accountId ?? undefined;
+      }
+
+      return { accountId: selectedAccountId };
     }
 
     if (access.credential !== "person-oauth") {
       const token = row.credentialId
         ? await secretFor(
             row.credentialId,
-            `${row.id} needs a credential this deployment no longer holds. An administrator has to add it again.`,
+            `${row.id} needs a credential this deployment no longer holds. Add it again on the app's connection page.`,
           )
         : undefined;
       return { token };
@@ -1616,10 +1856,10 @@ export function createPluginStore(options: PluginStoreOptions) {
      */
     const noClient = registrationUrl
       ? `${title} has no OAuth client for this deployment, so this cannot be called. Connect ${title} again in Settings: the deployment registers itself with the vendor when somebody connects.`
-      : `${title} has no OAuth client registered for this deployment, so this cannot be called. An administrator has to add one.`;
+      : `${title} has no OAuth client registered for this deployment, so this cannot be called. Remove it from App connections and add it again to register one.`;
     const unusableClient = registrationUrl
       ? `${title} has no usable OAuth client for this deployment. Connect ${title} again in Settings: the deployment registers itself with the vendor on the next connect.`
-      : `${title} has no usable OAuth client for this deployment. An administrator has to add one again.`;
+      : `${title} has no usable OAuth client for this deployment. Remove it from App connections and add it again to register one.`;
     /**
      * What to say when the vendor has forgotten the client this person's grant was issued under.
      *
@@ -1690,7 +1930,7 @@ export function createPluginStore(options: PluginStoreOptions) {
          * input it choked on, and the input here is the DECRYPTED OAuth client. Rethrowing it puts
          * a fragment of the client secret — under Bun's parser, the whole of it when the stored
          * value is a bare token — into the `mcp.call_failed` payload and into
-         * `mcp_servers.last_error`, two durable stores that the Plugins page draws for anybody who
+         * `mcp_servers.last_error`, two durable stores that App connections draws for anybody who
          * can read it.
          *
          * A reader should conclude that the signal is not lost, only the bytes: `unusableClient`
@@ -1962,6 +2202,7 @@ export function createPluginStore(options: PluginStoreOptions) {
     };
     const value = {
       ...key,
+      userId: input.userId,
       metadata: { server: input.serverId, scope: input.scope },
       // Encrypted before the transaction opens: it is arithmetic, and it has no business happening
       // while a pooled connection is held open behind row locks.
@@ -1970,12 +2211,17 @@ export function createPluginStore(options: PluginStoreOptions) {
 
     return await database.transaction(async (transaction) => {
       /*
-       * `credentials_active_key_idx` holds one live credential per key, so a second insert for the
-       * same person and server would be refused. Asked of the key rather than of the connection row,
-       * because the row can name a credential that has already been revoked while the key itself is
-       * free, and it is the key the index constrains.
+       * `credentials_active_key_idx` holds one live credential per owner and
+       * key, so a second insert for the same person and server would be
+       * refused. Asked of the key rather than of the connection row,
+       * because the row can name a credential that has already been revoked
+       * while the key itself is free, and it is the key the index constrains.
        */
-      const live = await credentials.findLiveByKey(key, transaction);
+      const live = await credentials.findLiveByKey(
+        key,
+        transaction,
+        input.userId,
+      );
       const stored = live
         ? await credentials.rotate(
             { ...value, previousCredentialId: live.id },
@@ -2290,6 +2536,7 @@ export function createPluginStore(options: PluginStoreOptions) {
     serverId: string,
     credentialId: string,
     kind: "mcp" | null,
+    actorUserId: string,
   ): Promise<void> {
     /*
      * A server that takes no credential when it is added is refused here rather than at the caller,
@@ -2314,17 +2561,33 @@ export function createPluginStore(options: PluginStoreOptions) {
      * fails on its next call. Refusing it here says so at the moment somebody can still act on it,
      * and it closes the case where a token was retired precisely because it should stop being used.
      */
+    /*
+     * WHOSE IT IS, not only what it is.
+     *
+     * The kind and the vendor were both checked and the owner was not, on the one field in this
+     * product that accepts a reference to a secret rather than the secret. A credential with no user
+     * is the deployment's own and may be used by anybody; a credential with a user is that person's
+     * and may not. The refresh path dereferences this id and spends the token, so without the
+     * check a caller who learned another person's credential id could spend their token against a
+     * server they chose. The reference is never returned by any route, which is what kept this
+     * unreachable rather than fixed, and a UUID is not an authorisation.
+     */
     const [named] = looksLikeId
       ? await database
           .select({
             kind: credentialRows.kind,
             provider: credentialRows.provider,
+            userId: credentialRows.userId,
           })
           .from(credentialRows)
           .where(
             and(
               eq(credentialRows.id, credentialId),
               isNull(credentialRows.revokedAt),
+              or(
+                isNull(credentialRows.userId),
+                eq(credentialRows.userId, actorUserId),
+              ),
             ),
           )
       : [];
@@ -2457,6 +2720,25 @@ export function createPluginStore(options: PluginStoreOptions) {
     return (await brokeredAppRowsAt([url])).get(url) ?? null;
   }
 
+  async function brokeredToolkitForServer(
+    serverId: string,
+  ): Promise<string | null> {
+    const [row] = await database
+      .select({ url: mcpServers.url })
+      .from(mcpServers)
+      .where(
+        and(
+          or(
+            eq(mcpServers.id, serverId),
+            eq(mcpServers.id, `composio-${serverId}`),
+          ),
+          eq(mcpServers.provenance, "composio"),
+        ),
+      )
+      .limit(1);
+    return row ? toolkitOf(row.url) : null;
+  }
+
   /**
    * The same answer for several urls at once, and the ONE PLACE the ordering rule is written.
    *
@@ -2535,6 +2817,8 @@ export function createPluginStore(options: PluginStoreOptions) {
       instanceHost?: string;
       credentialId?: string;
       by: string;
+      /** Whose credential may be attached. See `requireCredentialOfKind`. */
+      actorUserId: string;
     }): Promise<ServerRecord> {
       const resolved = resolveServerUrl(input.key, input.instanceHost);
       if (!resolved) throw new CatalogueEntryUnknownError(input.key);
@@ -2557,6 +2841,7 @@ export function createPluginStore(options: PluginStoreOptions) {
           resolved.entry.key,
           credentialId,
           serverCredentialKind(resolved.entry),
+          input.actorUserId,
         );
       }
 
@@ -2667,6 +2952,8 @@ export function createPluginStore(options: PluginStoreOptions) {
       url: string;
       credentialId?: string;
       by: string;
+      /** Whose credential may be attached. See `requireCredentialOfKind`. */
+      actorUserId: string;
     }): Promise<ServerRecord> {
       const refusal = customUrlRefusal(input.url);
       if (refusal) throw new CustomServerRefusedError(refusal);
@@ -2810,6 +3097,7 @@ export function createPluginStore(options: PluginStoreOptions) {
           input.id,
           credentialId,
           "mcp",
+          input.actorUserId,
         );
       }
 
@@ -3542,6 +3830,7 @@ export function createPluginStore(options: PluginStoreOptions) {
             : {}),
         },
       });
+      serversVersion += 1;
     },
 
     /**
@@ -3677,7 +3966,7 @@ export function createPluginStore(options: PluginStoreOptions) {
          * A QUERY FAILURE IS THE REACHABLE ONE. `connectionTokenFor`'s vault read, its connection
          * lookup and its locked credential swap all run inside this `try` for an MCP listing, and
          * each throws a `DrizzleQueryError` whose message is the statement plus every value bound
-         * to it. Recorded, that put a SQL dump in the column the Plugins page draws, under a
+         * to it. Recorded, that put a SQL dump in the column App connections draws, under a
          * heading that says a vendor said it. Raised as an invariant of ours, with the driver's
          * complaint and none of the query.
          */
@@ -3978,112 +4267,179 @@ export function createPluginStore(options: PluginStoreOptions) {
       // What was recorded, which is what "this app offers N actions" means on the page. Counting
       // the listing instead reported a duplicate the vendor named twice as two actions the
       // deployment holds, when `mcp_tools` holds one row for it.
+      serversVersion += 1;
       return { tools: storable.length };
     },
 
-    async listServers(): Promise<ServerRecord[]> {
-      const rows = await database
-        .select()
-        .from(mcpServers)
-        .orderBy(asc(mcpServers.title));
-      if (rows.length === 0) return [];
-
-      const tools = await database
-        .select()
-        .from(mcpTools)
-        .where(
-          inArray(
-            mcpTools.serverId,
-            rows.map((row) => row.id),
-          ),
-        )
-        .orderBy(asc(mcpTools.name));
-
-      /*
-       * Every grant on these servers, not only the ones matching a tool that is still advertised.
-       * Asking about the advertised refs answers "who holds what is offered", which cannot report the
-       * grants that are the point here — see `mcpGrantsForServers`.
+    async listServers(opts?: {
+      /**
+       * Skip tools, grants and withdrawn: ids, titles, vendors, schemes and
+       * broker meta only. The connected-accounts screens draw 1500 brokered
+       * rows and never touch a tool; loading tens of thousands of them to
+       * discard is what made that page take ten seconds to open.
        */
-      const grants = await mcpGrantsForServers(rows.map((row) => row.id));
-      const advertised = new Set(
-        tools.map((tool) => `${tool.serverId}/${tool.name}`),
-      );
-
+      slim?: boolean;
+    }): Promise<ServerRecord[]> {
       /*
-       * HOW EACH APP CONNECTS, WHICH IS A FACT ABOUT THE APP AND NOT ABOUT THE ROW BESIDE IT.
-       *
-       * CRITERION. Every row here whose url names a Composio app reports the scheme
-       * {@link brokeredAppScheme} answers for that app — so two rows at one url report one answer,
-       * and it is the answer {@link connectBrokeredWithFields} will act on.
-       *
-       * REASON. The browser forks on this field: `brokered-account-row.tsx` draws a consent button,
-       * a form or a "nothing to connect" sentence out of it, and the press then lands in a store
-       * method that resolves the app by its URL. Reported off each row's own column those were two
-       * readings of one fact — a form drawn from this row and a submission refused by the other
-       * row's scheme, telling somebody to connect the app the way it asks for over an app they were
-       * asked exactly that way. {@link serverAddress} answers the same field the same way, so the
-       * page that lists an app and the route that connects it cannot come apart either.
-       *
-       * ONE EXTRA READ FOR THE WHOLE LIST, and none where the deployment has enabled no apps.
+       * Only the slim shape is cached: callers of the full listing mutate-then-read through
+       * writers this cache cannot see (credentials, grants), so caching it serves stale rows
+       * to the very screens that just changed something.
        */
-      const brokeredApps = await brokeredAppRowsAt(
-        rows.filter((row) => toolkitOf(row.url) !== null).map((row) => row.url),
-      );
+      if (opts?.slim !== true) return build();
+      const held = serversCache;
+      if (
+        held &&
+        held.version === serversVersion &&
+        Date.now() - held.at < SERVERS_TTL_MS
+      ) {
+        return held.rows;
+      }
+      const out = await build();
+      serversCache = {
+        at: Date.now(),
+        version: serversVersion,
+        rows: out,
+      };
+      return out;
 
-      return rows.map((row) => {
-        const entry = catalogueEntry(row.id);
-        return {
-          id: row.id,
-          title: row.title,
-          vendor: row.vendor,
-          url: effectiveUrl(row, entry),
-          summary: entry?.summary ?? "",
-          docsUrl: entry?.docsUrl ?? "",
-          provenance: row.provenance,
-          hasCredential: row.credentialId !== null,
-          toolsRefreshedAt: iso(row.toolsRefreshedAt),
-          lastError: row.lastError,
-          addedBy: row.addedBy,
-          dynamicClient:
-            entry?.auth.kind === "user-oauth" &&
-            entry.auth.clientRegistration === "dynamic",
-          // The app's, for a row whose url names one; this row's own column for everything else,
-          // which is a null on every server that is not brokered. See the read above.
-          authScheme: toolkitOf(row.url)
-            ? (brokeredApps.get(row.url)?.authScheme ?? null)
-            : row.authScheme,
-          tools: tools
-            .filter((tool) => tool.serverId === row.id)
-            .map((tool) => {
-              const ref = `${tool.serverId}/${tool.name}`;
-              return {
-                serverId: tool.serverId,
-                name: tool.name,
-                description: tool.description,
-                inputSchema: tool.inputSchema as Record<string, unknown>,
+      async function build(): Promise<ServerRecord[]> {
+        const rows = await database
+          .select()
+          .from(mcpServers)
+          .orderBy(asc(mcpServers.title));
+        if (rows.length === 0) return [];
+
+        const tools =
+          opts?.slim === true
+            ? []
+            : await database
+                .select()
+                .from(mcpTools)
+                .where(
+                  inArray(
+                    mcpTools.serverId,
+                    rows.map((row) => row.id),
+                  ),
+                )
+                .orderBy(asc(mcpTools.name));
+
+        /*
+         * Every grant on these servers, not only the ones matching a tool that is still advertised.
+         * Asking about the advertised refs answers "who holds what is offered", which cannot report the
+         * grants that are the point here — see `mcpGrantsForServers`.
+         *
+         * Skipped in slim mode alongside the tools: there is nothing to match them against.
+         */
+        const grants =
+          opts?.slim === true
+            ? new Map()
+            : await mcpGrantsForServers(rows.map((row) => row.id));
+        const advertised = new Set(
+          tools.map((tool) => `${tool.serverId}/${tool.name}`),
+        );
+
+        /*
+         * HOW EACH APP CONNECTS, WHICH IS A FACT ABOUT THE APP AND NOT ABOUT THE ROW BESIDE IT.
+         *
+         * CRITERION. Every row here whose url names a Composio app reports the scheme
+         * {@link brokeredAppScheme} answers for that app — so two rows at one url report one answer,
+         * and it is the answer {@link connectBrokeredWithFields} will act on.
+         *
+         * REASON. The browser forks on this field: `brokered-account-row.tsx` draws a consent button,
+         * a form or a "nothing to connect" sentence out of it, and the press then lands in a store
+         * method that resolves the app by its URL. Reported off each row's own column those were two
+         * readings of one fact — a form drawn from this row and a submission refused by the other
+         * row's scheme, telling somebody to connect the app the way it asks for over an app they were
+         * asked exactly that way. {@link serverAddress} answers the same field the same way, so the
+         * page that lists an app and the route that connects it cannot come apart either.
+         *
+         * ONE EXTRA READ FOR THE WHOLE LIST, and none where the deployment has enabled no apps.
+         */
+        const brokeredApps = await brokeredAppRowsAt(
+          rows
+            .filter((row) => toolkitOf(row.url) !== null)
+            .map((row) => row.url),
+        );
+
+        const brokerAppMap = new Map<string, BrokerApp>();
+        if (broker) {
+          try {
+            const apps = await broker.listApps();
+            for (const app of apps) {
+              brokerAppMap.set(app.slug.toLowerCase(), app);
+            }
+          } catch {
+            // Keep empty map if directory cannot be read
+          }
+        }
+
+        return rows.map((row) => {
+          const entry = catalogueEntry(row.id);
+          const toolkit = toolkitOf(row.url);
+          const brokerApp = toolkit
+            ? (brokerAppMap.get(toolkit.toLowerCase()) ?? null)
+            : null;
+          return {
+            id: row.id,
+            title: row.title,
+            vendor: row.vendor,
+            url: effectiveUrl(row, entry),
+            summary: entry?.summary ?? "",
+            docsUrl: entry?.docsUrl ?? "",
+            provenance: row.provenance,
+            hasCredential: row.credentialId !== null,
+            toolsRefreshedAt: iso(row.toolsRefreshedAt),
+            lastError: row.lastError,
+            addedBy: row.addedBy,
+            dynamicClient:
+              entry?.auth.kind === "user-oauth" &&
+              entry.auth.clientRegistration === "dynamic",
+            // The app's, for a row whose url names one; this row's own column for everything else,
+            // which is a null on every server that is not brokered. See the read above.
+            authScheme: toolkitOf(row.url)
+              ? (brokeredApps.get(row.url)?.authScheme ?? null)
+              : row.authScheme,
+            broker: brokerApp
+              ? {
+                  logo: brokerApp.logo,
+                  description: brokerApp.description,
+                  categories: brokerApp.categories,
+                  actionCount: brokerApp.actionCount,
+                }
+              : null,
+            tools: tools
+              .filter((tool) => tool.serverId === row.id)
+              .map((tool) => {
+                const ref = `${tool.serverId}/${tool.name}`;
+                return {
+                  serverId: tool.serverId,
+                  name: tool.name,
+                  description: tool.description,
+                  inputSchema: tool.inputSchema as Record<string, unknown>,
+                  ref,
+                  effect: classifyTool(entry, tool.name, true, tool.effect),
+                  destructive: tool.destructive,
+                  grantedTo: grants.get(ref) ?? [],
+                };
+              }),
+            /*
+             * Sorted by ref so the list is stable between reads, which matters because this is the one
+             * place a discrepancy is reported and a reader comparing two visits should see the same
+             * order.
+             */
+            withdrawn: [...grants.entries()]
+              .filter(
+                ([ref]) => ref.startsWith(`${row.id}/`) && !advertised.has(ref),
+              )
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([ref, grantedTo]) => ({
                 ref,
-                effect: classifyTool(entry, tool.name, true, tool.effect),
-                destructive: tool.destructive,
-                grantedTo: grants.get(ref) ?? [],
-              };
-            }),
-          /*
-           * Sorted by ref so the list is stable between reads, which matters because this is the one
-           * place a discrepancy is reported and a reader comparing two visits should see the same
-           * order.
-           */
-          withdrawn: [...grants.entries()]
-            .filter(
-              ([ref]) => ref.startsWith(`${row.id}/`) && !advertised.has(ref),
-            )
-            .sort(([left], [right]) => left.localeCompare(right))
-            .map(([ref, grantedTo]) => ({
-              ref,
-              name: ref.slice(row.id.length + 1),
-              grantedTo,
-            })),
-        };
-      });
+                name: ref.slice(row.id.length + 1),
+                grantedTo,
+              })),
+          };
+        });
+      }
     },
 
     /**
@@ -4165,16 +4521,31 @@ export function createPluginStore(options: PluginStoreOptions) {
     },
 
     /**
-     * The skills this person may see: the deployment's, plus their own.
+     * Just the ids, for callers that name vendors without touching tools.
      *
-     * An administrator sees every skill in the deployment, including other people's, because
-     * governing what Bots are told is the job of the surface they are looking at.
+     * `listServers` joins every tool row, which is tens of thousands once the
+     * broker catalogue is fully enabled; a per-request guidance read over
+     * that is what made runtime info take ten seconds to answer.
+     */
+    async serverIds(): Promise<string[]> {
+      const rows = await database
+        .select({ id: mcpServers.id })
+        .from(mcpServers)
+        .orderBy(asc(mcpServers.id));
+      return rows.map((row) => row.id);
+    },
+
+    /**
+     * The skills this person may see: the deployment's read-only templates, plus their own.
+     *
+     * There is no actor that sees every skill in the deployment including other people's: signing in
+     * is the only bar, and this filter is the whole of what stands between one person's skills and
+     * another's.
      */
     async listSkills(actor?: SkillActor): Promise<SkillRecord[]> {
-      const visible =
-        !actor || actor.isAdmin
-          ? undefined
-          : or(isNull(skills.ownerUserId), eq(skills.ownerUserId, actor.id));
+      const visible = !actor
+        ? undefined
+        : or(isNull(skills.ownerUserId), eq(skills.ownerUserId, actor.id));
       const rows = await database
         .select()
         .from(skills)
@@ -4185,18 +4556,28 @@ export function createPluginStore(options: PluginStoreOptions) {
         rows.map((row) => row.slug),
       );
       const declared = await toolsDeclaredBy(rows.map((row) => row.id));
-      return rows.map((row) => ({
-        id: row.id,
-        slug: row.slug,
-        ownerUserId: row.ownerUserId,
-        title: row.title,
-        summary: row.summary,
-        instructions: row.instructions,
-        origin: row.origin,
-        installedBy: row.installedBy,
-        grantedTo: grants.get(row.slug) ?? [],
-        tools: declared.get(row.id) ?? [],
-      }));
+      // One read for every skill on the page rather than one per skill, because this runs on every
+      // paint of the Skills screen and on every poll of the `/` menu in every conversation.
+      const repos = await reposFor(
+        database,
+        rows.map((row) => row.id),
+      );
+      return rows.map((row) => {
+        const repo = repos.get(row.id);
+        return {
+          id: row.id,
+          slug: row.slug,
+          ownerUserId: row.ownerUserId,
+          title: row.title,
+          summary: row.summary,
+          instructions: row.instructions,
+          origin: row.origin,
+          installedBy: row.installedBy,
+          grantedTo: grants.get(row.slug) ?? [],
+          tools: declared.get(row.id) ?? [],
+          repo: repo ? skillRepoSummary(repo) : null,
+        };
+      });
     },
 
     /** Whose a skill is, or `undefined` if there is no such skill. Null owner means the deployment's. */
@@ -4275,6 +4656,19 @@ export function createPluginStore(options: PluginStoreOptions) {
        * declared before; an empty array clears it, which is how a skill stops asking for anything.
        */
       tools?: string[];
+      /**
+       * The repository to point at, or null to point at none.
+       *
+       * Absent leaves whatever was pointed at before; null clears it. That distinction is the same
+       * one `tools` makes and for the same reason — a form that has just had its repository field
+       * emptied must be able to say so, and a caller that genuinely means "leave it alone" is a
+       * package seeding on boot rather than a person saving.
+       *
+       * Already parsed by the route, which is where the refusal belongs: `repo-index.ts` turns a
+       * typed URL into four values or into a sentence, and a store that took the URL would have to
+       * either repeat that or be trusted with a string it has no way to check.
+       */
+      repo?: RepoSpec | null;
       by: string;
     }): Promise<void> {
       /*
@@ -4342,6 +4736,59 @@ export function createPluginStore(options: PluginStoreOptions) {
         }
       }
 
+      /*
+       * The repository, and — the part that is not obvious — what happens to its cached index when the
+       * pointer moves.
+       *
+       * A re-save that changes the URL, the branch or the folder is a different repository, or the same
+       * repository at a different commit, and the cached file list describes the old one. Carrying it
+       * across would hand a model a tree of paths that do not exist at the address now pointed at, which
+       * is the worst of both: `repo_overview` would answer confidently and `repo_read_file` would
+       * refuse every path it had just printed. So any change clears the index, and the screen says the
+       * repository has not been read yet rather than showing a stale one.
+       *
+       * The upsert is on the skill id, which is the primary key, so a row cannot be orphaned by a
+       * second save and there is nothing to clean up first.
+       */
+      if (input.repo !== undefined) {
+        // Narrowed once. `input.repo` is a union of "absent", "null" and a spec, and reaching for
+        // `input.repo.owner` under a guard on a different expression is how a null gets a property
+        // read on it three lines later.
+        const wanted: RepoSpec | null = input.repo;
+        const before = (await reposFor(database, [input.slug])).get(input.slug);
+        const unchanged =
+          wanted !== null &&
+          before !== undefined &&
+          before.owner === wanted.owner &&
+          before.repo === wanted.repo &&
+          (before.ref ?? null) === wanted.ref &&
+          before.path === wanted.path;
+
+        await database
+          .delete(skillRepos)
+          .where(eq(skillRepos.skillId, input.slug));
+        if (wanted) {
+          await database.insert(skillRepos).values({
+            skillId: input.slug,
+            owner: wanted.owner,
+            repo: wanted.repo,
+            ref: wanted.ref,
+            path: wanted.path,
+            // Kept only when the pointer is identical. A different repository has no index to reuse,
+            // and reusing its timestamp is how a person ends up reading "indexed 3 days ago" beside a
+            // tree that has never been fetched.
+            ...(unchanged && before
+              ? {
+                  defaultRef: before.defaultRef,
+                  treeSha: before.treeSha,
+                  indexedAt: before.indexedAt,
+                  index: before.index as SkillRepoRow["index"],
+                }
+              : {}),
+          });
+        }
+      }
+
       await recordAuditEvent(auditStore, {
         eventType: "configuration.changed",
         targetType: "skill",
@@ -4353,6 +4800,21 @@ export function createPluginStore(options: PluginStoreOptions) {
           // Recorded because it is what the skill will pull into a model's context once selection is
           // built. It changes nothing about what may be called; the grant still decides that.
           ...(declared === undefined ? {} : { declares: declared }),
+          /*
+           * The repository for the same reason, and with the same weight: it is what a run will be able
+           * to read, and it is the one thing about a skill that is a pointer at somebody else's code
+           * rather than prose this deployment holds. A trail that recorded the instruction but not the
+           * repository would say a Bot was told about the work and not where it was told to look.
+           */
+          ...(input.repo === undefined
+            ? {}
+            : {
+                repository: input.repo
+                  ? `${input.repo.owner}/${input.repo.repo}` +
+                    (input.repo.ref ? `@${input.repo.ref}` : "") +
+                    (input.repo.path ? `/${input.repo.path}` : "")
+                  : null,
+              }),
         },
       });
     },
@@ -4364,6 +4826,12 @@ export function createPluginStore(options: PluginStoreOptions) {
           .where(
             and(eq(pluginGrants.kind, "skill"), eq(pluginGrants.ref, slug)),
           );
+        // `skill_repos` cascades off the skill, so there is deliberately no delete for it here.
+        //
+        // Awaited, and that is the whole of the note. An unawaited delete inside `transaction` is a
+        // query the driver may run after the transaction has been committed and the connection handed
+        // back, so the skill it was meant to remove outlives the call that claimed to delete it — and
+        // the cascade that takes a repository with it never fires.
         await transaction.delete(skills).where(eq(skills.slug, slug));
       });
       await recordAuditEvent(auditStore, {
@@ -4372,6 +4840,119 @@ export function createPluginStore(options: PluginStoreOptions) {
         targetId: slug,
         payload: { actor: by, change: "skill_uninstalled", skill: slug },
       });
+    },
+
+    /**
+     * The repository one skill points at, or null.
+     *
+     * Null means two different things and the caller has to tell them apart, which is why this is not
+     * enough on its own: the skill may point at no repository, or at one that has never been read.
+     * {@link skillRepoSummary} separates them with `fileCount: null`, and the tools below refuse
+     * rather than index on demand — a run that reaches GitHub the first time somebody types a command
+     * is a run whose latency depends on a vendor, and a run that pays the hourly rate limit.
+     */
+    async skillRepo(slug: string): Promise<SkillRepoRecord | null> {
+      const found = await reposFor(database, [slug]);
+      return found.get(slug) ?? null;
+    },
+
+    /**
+     * Whether one Bot carries a skill, asked as its own question rather than by reading a list.
+     *
+     * The repo endpoints need this and cannot afford `listForAgent`, which reads every tool row the
+     * Bot holds to answer a question about one skill grant. This is the indexed primary-key read that
+     * actually decides the thing, so it is what the endpoint asks.
+     */
+    async agentHoldsSkill(agentId: string, slug: string): Promise<boolean> {
+      const [row] = await database
+        .select({ ref: pluginGrants.ref })
+        .from(pluginGrants)
+        .where(
+          and(
+            eq(pluginGrants.agentId, agentId),
+            eq(pluginGrants.kind, "skill"),
+            eq(pluginGrants.ref, slug),
+          ),
+        )
+        .limit(1);
+      return row !== undefined;
+    },
+
+    /**
+     * Record a fresh reading of a skill's repository.
+     *
+     * Written only when something changed. A refresh that finds the same tree has nothing to say, and
+     * rewriting the row would push `indexedAt` forward — which is the one field a person reads to
+     * answer "is this current?", so moving it on a refresh that learned nothing would be a lie told by
+     * a timestamp.
+     */
+    async saveSkillRepoIndex(
+      slug: string,
+      index: RepoIndex,
+      by: string,
+    ): Promise<void> {
+      const [row] = await database
+        .select({ treeSha: skillRepos.treeSha })
+        .from(skillRepos)
+        .where(eq(skillRepos.skillId, slug))
+        .limit(1);
+      if (!row) {
+        // The skill was deleted between the read and here, which is a race the caller loses harmlessly:
+        // there is no repository to attach the reading to, and the cascade has already cleaned up.
+        return;
+      }
+      if (row.treeSha === index.treeSha) return;
+
+      await database
+        .update(skillRepos)
+        .set({
+          defaultRef: index.ref,
+          treeSha: index.treeSha,
+          index: index as unknown as SkillRepoRow["index"],
+          indexedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(skillRepos.skillId, slug));
+
+      await recordAuditEvent(auditStore, {
+        eventType: "configuration.changed",
+        targetType: "skill",
+        targetId: slug,
+        payload: {
+          actor: by,
+          change: "skill_repo_indexed",
+          skill: slug,
+          repository: index.fullName,
+          at: index.ref,
+          /*
+           * Recorded because it is what changed rather than what was asked for. A branch moving is the
+           * ordinary case and needs no row; `truncated` is the one a reader would want to find later,
+           * because it is the difference between "this file does not exist" and "this file was not
+           * carried".
+           */
+          ...(index.truncated ? { truncated: true } : {}),
+        },
+      });
+    },
+
+    /**
+     * How stale a cached index is allowed to be before a read spends a GitHub request on it.
+     *
+     * A day rather than an hour, because the answer to "which commit is this" is almost always the
+     * same and the ceiling is sixty requests an hour for a whole deployment. A repository someone is
+     * actively asking about gets a Refresh button; this is the floor under it, not the mechanism.
+     */
+    async staleRepoIndex(slug: string, maximumAgeMs: number): Promise<boolean> {
+      const [row] = await database
+        .select({ indexedAt: skillRepos.indexedAt })
+        .from(skillRepos)
+        .where(eq(skillRepos.skillId, slug))
+        .limit(1);
+      // No row at all is not stale: there is nothing to be out of date, and a read of a skill with no
+      // repository is refused before it gets here. A row that has never been indexed always is.
+      if (!row) return false;
+      if (!row.indexedAt) return true;
+      return Date.now() - row.indexedAt.getTime() > maximumAgeMs;
     },
 
     /**
@@ -4423,6 +5004,16 @@ export function createPluginStore(options: PluginStoreOptions) {
           set: { grantedBy: by, updatedAt: new Date() },
         });
 
+      await database
+        .delete(pluginRevocations)
+        .where(
+          and(
+            eq(pluginRevocations.kind, kind),
+            eq(pluginRevocations.ref, ref),
+            eq(pluginRevocations.agentId, agentId),
+          ),
+        );
+
       await recordAuditEvent(auditStore, {
         eventType: "configuration.changed",
         targetType: grantTargetType(kind),
@@ -4453,6 +5044,16 @@ export function createPluginStore(options: PluginStoreOptions) {
           ),
         );
 
+      await database
+        .insert(pluginRevocations)
+        .values({
+          kind,
+          ref,
+          agentId,
+          revokedBy: by,
+        })
+        .onConflictDoNothing();
+
       await recordAuditEvent(auditStore, {
         eventType: "configuration.changed",
         targetType: grantTargetType(kind),
@@ -4465,6 +5066,209 @@ export function createPluginStore(options: PluginStoreOptions) {
           bot: agentId,
         },
       });
+    },
+
+    /** Tools and current grants for one specific server. */
+    async listServerTools(serverId: string): Promise<ToolRecord[]> {
+      const tools = await database
+        .select()
+        .from(mcpTools)
+        .where(eq(mcpTools.serverId, serverId))
+        .orderBy(asc(mcpTools.name));
+      const grants = await mcpGrantsForServers([serverId]);
+      return tools.map((tool) => {
+        const ref = `${tool.serverId}/${tool.name}`;
+        return {
+          serverId: tool.serverId,
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema as Record<string, unknown>,
+          ref,
+          effect: (tool.effect as "read" | "write") ?? "write",
+          destructive: tool.destructive ?? false,
+          grantedTo: grants.get(ref) ?? [],
+        };
+      });
+    },
+
+    /** Grant all tools of a server to one Bot. */
+    async grantServer(
+      serverId: string,
+      agentId: string,
+      by: string,
+    ): Promise<number> {
+      const tools = await database
+        .select({ name: mcpTools.name })
+        .from(mcpTools)
+        .where(eq(mcpTools.serverId, serverId));
+      if (tools.length === 0) return 0;
+
+      for (const tool of tools) {
+        const ref = `${serverId}/${tool.name}`;
+        await database
+          .insert(pluginGrants)
+          .values({ kind: "mcp", ref, agentId, grantedBy: by })
+          .onConflictDoUpdate({
+            target: [pluginGrants.kind, pluginGrants.ref, pluginGrants.agentId],
+            set: { grantedBy: by, updatedAt: new Date() },
+          });
+
+        await database
+          .delete(pluginRevocations)
+          .where(
+            and(
+              eq(pluginRevocations.kind, "mcp"),
+              eq(pluginRevocations.ref, ref),
+              eq(pluginRevocations.agentId, agentId),
+            ),
+          );
+      }
+
+      await database
+        .delete(pluginRevocations)
+        .where(
+          and(
+            eq(pluginRevocations.kind, "mcp_server"),
+            eq(pluginRevocations.ref, serverId),
+            eq(pluginRevocations.agentId, agentId),
+          ),
+        );
+
+      await recordAuditEvent(auditStore, {
+        eventType: "configuration.changed",
+        targetType: grantTargetType("mcp"),
+        targetId: serverId,
+        payload: {
+          actor: by,
+          change: "plugin_server_granted",
+          kind: "mcp",
+          server: serverId,
+          bot: agentId,
+          count: tools.length,
+        },
+      });
+      return tools.length;
+    },
+
+    /** Revoke all tools of a server from one Bot. */
+    async revokeServer(
+      serverId: string,
+      agentId: string,
+      by: string,
+    ): Promise<number> {
+      const deleted = await database
+        .delete(pluginGrants)
+        .where(
+          and(
+            eq(pluginGrants.kind, "mcp"),
+            eq(pluginGrants.agentId, agentId),
+            sql`split_part(${pluginGrants.ref}, '/', 1) = ${serverId}`,
+          ),
+        )
+        .returning({ ref: pluginGrants.ref });
+
+      await database
+        .insert(pluginRevocations)
+        .values({
+          kind: "mcp_server",
+          ref: serverId,
+          agentId,
+          revokedBy: by,
+        })
+        .onConflictDoNothing();
+
+      await recordAuditEvent(auditStore, {
+        eventType: "configuration.changed",
+        targetType: grantTargetType("mcp"),
+        targetId: serverId,
+        payload: {
+          actor: by,
+          change: "plugin_server_revoked",
+          kind: "mcp",
+          server: serverId,
+          bot: agentId,
+          count: deleted.length,
+        },
+      });
+      return deleted.length;
+    },
+
+    async syncDefaultGrants(options?: {
+      agentId?: string;
+      serverId?: string;
+    }): Promise<void> {
+      const agentRows = options?.agentId
+        ? await database
+            .select({ id: agents.id, type: agents.type })
+            .from(agents)
+            .where(eq(agents.id, options.agentId))
+        : await database
+            .select({ id: agents.id, type: agents.type })
+            .from(agents);
+
+      if (agentRows.length === 0) return;
+
+      const targetAgentIds = Array.from(new Set(agentRows.map((a) => a.id)));
+
+      // Fetch revocations
+      const revocations = await database
+        .select({
+          kind: pluginRevocations.kind,
+          ref: pluginRevocations.ref,
+          agentId: pluginRevocations.agentId,
+        })
+        .from(pluginRevocations)
+        .where(inArray(pluginRevocations.agentId, targetAgentIds));
+
+      const revokedBots = new Set<string>();
+
+      for (const r of revocations) {
+        if (r.kind === "bot") {
+          revokedBots.add(`${r.agentId}:${r.ref}`);
+        }
+      }
+
+      // Grant bidirectional bot handoffs between built-in agents
+      const allBuiltInAgents = await database
+        .select({ id: agents.id })
+        .from(agents)
+        .where(eq(agents.type, "built_in"));
+
+      const builtInIds = allBuiltInAgents.map((a) => a.id);
+      const botGrantsToInsert: Array<{
+        kind: "bot";
+        ref: string;
+        agentId: string;
+        grantedBy: string;
+      }> = [];
+
+      for (const fromId of builtInIds) {
+        for (const toId of builtInIds) {
+          if (fromId === toId) continue;
+          if (
+            options?.agentId &&
+            fromId !== options.agentId &&
+            toId !== options.agentId
+          ) {
+            continue;
+          }
+          if (revokedBots.has(`${fromId}:${toId}`)) continue;
+
+          botGrantsToInsert.push({
+            kind: "bot",
+            ref: toId,
+            agentId: fromId,
+            grantedBy: "default",
+          });
+        }
+      }
+
+      if (botGrantsToInsert.length > 0) {
+        await database
+          .insert(pluginGrants)
+          .values(botGrantsToInsert)
+          .onConflictDoNothing();
+      }
     },
 
     /** Everything one Bot may use. The runtime asks this and offers exactly what comes back. */
@@ -4517,6 +5321,9 @@ export function createPluginStore(options: PluginStoreOptions) {
             toolName: toolNameFor(ref),
             description: row.description,
             inputSchema: row.inputSchema as Record<string, unknown>,
+            effect: (row.effect === "write" ? "write" : "read") as
+              | "read"
+              | "write",
           };
         });
 
@@ -4536,16 +5343,30 @@ export function createPluginStore(options: PluginStoreOptions) {
        * way to grant a tool, which is the one thing this must never be.
        */
       const declared = await toolsDeclaredBy(skillRows.map((row) => row.id));
+      /*
+       * One read for the repositories on these skills, for the same reason as in `listSkills`: this
+       * runs on every run of every Bot and on every poll of the `/` menu beside it, and the summary is
+       * four short fields where the index is not. The browser needs the summary to bind three tools to
+       * one repository; the index stays here and is fetched when a tool is actually called.
+       */
+      const repos = await reposFor(
+        database,
+        skillRows.map((row) => row.id),
+      );
 
       return {
         tools: grantedTools,
-        skills: skillRows.map((row) => ({
-          slug: row.slug,
-          title: row.title,
-          summary: row.summary,
-          instructions: row.instructions,
-          tools: declared.get(row.id) ?? [],
-        })),
+        skills: skillRows.map((row) => {
+          const repo = repos.get(row.id);
+          return {
+            slug: row.slug,
+            title: row.title,
+            summary: row.summary,
+            instructions: row.instructions,
+            tools: declared.get(row.id) ?? [],
+            repo: repo ? skillRepoSummary(repo) : null,
+          };
+        }),
       };
     },
 
@@ -5154,6 +5975,9 @@ export function createPluginStore(options: PluginStoreOptions) {
       userId: string;
       verified: boolean;
       probeAction: string | null;
+      id?: string;
+      accountId?: string | null;
+      label?: string | null;
       /** See the paragraph on `only` above. Absent is the ordinary upsert. */
       only?: "a row that is still there";
     }): Promise<{ verifiedAt: Date | null; wrote: boolean }> {
@@ -5166,6 +5990,10 @@ export function createPluginStore(options: PluginStoreOptions) {
         verified: input.verified,
         verifiedAt,
         probeAction: input.probeAction,
+        ...(input.label !== undefined ? { label: input.label } : {}),
+        ...(input.accountId !== undefined
+          ? { accountId: input.accountId }
+          : {}),
         updatedAt: new Date(),
       };
 
@@ -5179,28 +6007,63 @@ export function createPluginStore(options: PluginStoreOptions) {
           .update(composioConnections)
           .set(set)
           .where(
-            and(
-              eq(composioConnections.toolkit, input.toolkit),
-              eq(composioConnections.userId, input.userId),
-            ),
+            input.id
+              ? eq(composioConnections.id, input.id)
+              : input.accountId
+                ? and(
+                    eq(composioConnections.toolkit, input.toolkit),
+                    eq(composioConnections.userId, input.userId),
+                    eq(composioConnections.accountId, input.accountId),
+                  )
+                : and(
+                    eq(composioConnections.toolkit, input.toolkit),
+                    eq(composioConnections.userId, input.userId),
+                  ),
           )
           .returning({ userId: composioConnections.userId });
         return { verifiedAt, wrote: written.length > 0 };
       }
 
-      await database
-        .insert(composioConnections)
-        .values({
+      /*
+       * Select-then-write rather than ON CONFLICT, because there is no unique arbiter left to
+       * name: multi-account storage keyed the table by a generated id, so (toolkit, user_id) is
+       * no longer a constraint Postgres can match a conflict against.
+       */
+      const [existing] = await database
+        .select({ id: composioConnections.id })
+        .from(composioConnections)
+        .where(
+          input.id
+            ? eq(composioConnections.id, input.id)
+            : input.accountId
+              ? and(
+                  eq(composioConnections.toolkit, input.toolkit),
+                  eq(composioConnections.userId, input.userId),
+                  eq(composioConnections.accountId, input.accountId),
+                )
+              : and(
+                  eq(composioConnections.toolkit, input.toolkit),
+                  eq(composioConnections.userId, input.userId),
+                ),
+        )
+        .limit(1);
+      if (existing) {
+        await database
+          .update(composioConnections)
+          .set(set)
+          .where(eq(composioConnections.id, existing.id));
+      } else {
+        await database.insert(composioConnections).values({
+          id: input.id ?? crypto.randomUUID(),
           toolkit: input.toolkit,
           userId: input.userId,
+          accountId: input.accountId ?? null,
+          label: input.label ?? null,
           verified: input.verified,
           verifiedAt,
           probeAction: input.probeAction,
-        })
-        .onConflictDoUpdate({
-          target: [composioConnections.toolkit, composioConnections.userId],
-          set,
         });
+      }
       return { verifiedAt, wrote: true };
     },
 
@@ -5455,10 +6318,18 @@ export function createPluginStore(options: PluginStoreOptions) {
       // no key has no broker to have connected anybody at, so there is nothing here to ask.
       if (!broker) throw new BrokerUnconfiguredError();
 
-      const connected = await broker.isConnected({
-        userId: input.userId,
-        toolkit: input.toolkit,
-      });
+      const accounts = broker.listAccounts
+        ? await broker.listAccounts({
+            userId: input.userId,
+            toolkit: input.toolkit,
+          })
+        : [];
+      const connected =
+        accounts.length > 0 ||
+        (await broker.isConnected({
+          userId: input.userId,
+          toolkit: input.toolkit,
+        }));
       if (!connected) {
         // Deleted rather than left alone, because the row is only the vendor's last answer: an
         // account ended in Composio's own dashboard reaches this deployment as the no above and
@@ -5473,6 +6344,77 @@ export function createPluginStore(options: PluginStoreOptions) {
             ),
           );
         return { connected: false };
+      }
+
+      const kind = await brokeredAppKind(input.toolkit);
+      if (kind === "none") return { connected: true };
+
+      if (accounts.length > 0) {
+        const existingRows = await database
+          .select()
+          .from(composioConnections)
+          .where(
+            and(
+              eq(composioConnections.toolkit, input.toolkit),
+              eq(composioConnections.userId, input.userId),
+            ),
+          );
+        const activeAccountIds = new Set(accounts.map((a) => a.id));
+
+        // Remove stale rows whose accountId is set but no longer in vendor's active accounts
+        for (const row of existingRows) {
+          if (row.accountId && !activeAccountIds.has(row.accountId)) {
+            await database
+              .delete(composioConnections)
+              .where(eq(composioConnections.id, row.id));
+          }
+        }
+
+        // Upsert each active account
+        for (const account of accounts) {
+          const matching = existingRows.find((r) => r.accountId === account.id);
+          if (matching) {
+            await database
+              .update(composioConnections)
+              .set({
+                label: matching.label || account.label,
+                verified: kind === "consent" ? true : matching.verified,
+                verifiedAt:
+                  kind === "consent" && !matching.verified
+                    ? new Date()
+                    : matching.verifiedAt,
+                updatedAt: new Date(),
+              })
+              .where(eq(composioConnections.id, matching.id));
+          } else {
+            const legacy = existingRows.find((r) => !r.accountId);
+            if (legacy && accounts.length === 1) {
+              await database
+                .update(composioConnections)
+                .set({
+                  accountId: account.id,
+                  label: legacy.label || account.label,
+                  verified: kind === "consent" ? true : legacy.verified,
+                  verifiedAt:
+                    kind === "consent" ? new Date() : legacy.verifiedAt,
+                  updatedAt: new Date(),
+                })
+                .where(eq(composioConnections.id, legacy.id));
+            } else {
+              await database.insert(composioConnections).values({
+                id: crypto.randomUUID(),
+                toolkit: input.toolkit,
+                userId: input.userId,
+                accountId: account.id,
+                label: account.label,
+                verified: kind === "consent",
+                verifiedAt: kind === "consent" ? new Date() : null,
+                probeAction: null,
+              });
+            }
+          }
+        }
+        return { connected: true };
       }
 
       /*
@@ -5496,119 +6438,6 @@ export function createPluginStore(options: PluginStoreOptions) {
         )
         .limit(1);
       const existing = held !== undefined;
-
-      /*
-       * THE SCHEME ON THE APP'S ROW, WHICH IS WHAT DECIDES WHETHER THE YES ABOVE IS A CHECK.
-       *
-       * Keyed on the url and on the one row that answers for it — see {@link brokeredAppRow} — which
-       * is the read {@link connectBrokeredWithFields} and {@link recheckBrokeredConnection} both
-       * make: `mcp_servers.id` is a display name and nothing holds the two equal, so a row called
-       * `gmail` at `composio://slack` would decide a Slack confirm on Gmail's scheme, and a second
-       * row at the app's own url would have this confirm branch on a scheme the re-check beside it
-       * disagrees with. Asked through {@link brokeredAppKind} rather than compared as a string, so
-       * the schemes this branches on cannot drift from the schemes that have a key behind them.
-       *
-       * AND THE QUESTION IS "IS THIS A CONSENT APP", NOT "IS THIS NOT A KEY APP", which are the same
-       * question only if the column can always be read.
-       *
-       * CRITERION. `verified: true` is written here for an app this deployment KNOWS connects by
-       * consent, and for no other.
-       *
-       * REASON. This branched on {@link isFieldScheme} alone, so every other answer — a consent
-       * scheme, a literal from a deployment that knew other names, a NULL — fell into the consent
-       * arm by elimination. A null is not a consent app: it is a column this deployment cannot read,
-       * which {@link mcpServers.authScheme} calls a row that is not brokered and which the row that
-       * ANSWERS for an app is perfectly free to carry — no unique index stands behind that url, so
-       * the row an enable wrote its scheme onto is not always the row found here. Confirm runs from
-       * an effect on mount, so the elimination wrote `verified: true` with a fresh `verified_at` and
-       * a null probe over that row on every page load: a verdict about evidence nobody has, dated to
-       * the day somebody opened a page, over whatever a real check had recorded. The other two
-       * readers of this column already fail closed on the null — {@link recheckBrokeredConnection}
-       * refuses the press, {@link disconnectBrokered} claims no revocation — so the one caller that
-       * could not survive being wrong was the only one failing open.
-       *
-       * SO AN UNREADABLE SCHEME IS TREATED AS A KEY APP IS, and that is the cautious half in both
-       * directions: nothing already recorded is overwritten, and the row that is the gate is still
-       * written where the vendor holds an account nothing here has a row for.
-       */
-      const kind = await brokeredAppKind(input.toolkit);
-
-      /**
-       * WHAT THIS CONFIRM ANSWERS FOR EACH KIND OF APP, WRITTEN DOWN BECAUSE THE CHAIN CANNOT BE.
-       *
-       * Type-only and erased; see {@link Decides}. The chain below tests ONE member and then tests
-       * something else — `kind === "none"`, `kind === "consent"`, then `!existing` — so there is no
-       * position where the compiler has this vocabulary narrowed away and nothing here would fail
-       * for a fifth member.
-       * This is the caller that WRITES, and it is the one that could not survive being wrong: it
-       * runs from an effect on mount, so whatever it decides for a member nobody named is decided
-       * again on every page load.
-       *
-       * EVERY CELL IS NOW ASSERTED RATHER THAN DECLARED. `consent` used to be written as what the
-       * code did rather than as what it should do — the re-stamp of `verified_at` on an
-       * already-consented row was a live finding — and `none` did not exist as a member at all, so
-       * a no-auth app was classified `consent` and got that same write on every mount. See the
-       * table in `tests/composio-connection-kinds.test.ts`, which drives each of these four against
-       * the running code.
-       */
-      type _ConfirmDecides = Decides<
-        SchemeKind,
-        {
-          key: "leaves an existing row exactly as it is; records a new one as unchecked";
-          consent: "records the vendor's yes as a verification the first time, and leaves an already-consented row alone";
-          none: "writes nothing and files nothing — there is no account here for a row to be about";
-          unreadable: "treated as a key app is — nothing already recorded is overwritten";
-        }
-      >;
-
-      /*
-       * AND THE CONSENT WRITE HAPPENS ONCE, WHICH IS THE OTHER HALF OF "A MOUNT DOES NOT RE-DECIDE".
-       *
-       * CRITERION. `verified: true` is written for a consent app only where this deployment has not
-       * already recorded it. A row already carrying that verdict is left exactly as it is, its
-       * `verified_at` included.
-       *
-       * REASON. The arm was unconditional, and this method runs from an effect on mount — so every
-       * page load re-stamped `verified_at` to the moment of the load. The flag never changed, so
-       * nothing looked wrong; what was destroyed was the DATE, which for a consent connection is
-       * the day somebody finished at the vendor's own screen and is a fact nothing else in this
-       * deployment records. The row's own sentence, "last checked 1 Sep", became "last checked
-       * today" on a day nothing was checked, and the real date could not be recovered from anywhere.
-       * {@link recheckBrokeredConnection} refuses to probe a consent app in order to protect exactly
-       * that date; a confirm that re-stamped it on every mount destroyed from the inside what that
-       * refusal protects from the outside. Two earlier fixes made this arm conditional for the key
-       * case and then for the unreadable case and left the consent case — the one the arm is
-       * actually FOR — writing on every load.
-       *
-       * AND A ROW NOT YET CARRYING THE VERDICT IS STILL HEALED, once. A consent app whose row was
-       * written by some other path — a key-era connect, an enable that changed the app's scheme
-       * afterwards — reads `false` with a null date, which is the pair "nobody has checked" and is
-       * not true of a consented account. The vendor's yes above is the check for this kind of app,
-       * so it is recorded, with the stamp of the moment it was first recorded here, and the next
-       * mount finds the verdict already present and writes nothing.
-       */
-      /*
-       * AN APP THERE IS NOTHING TO CONNECT TO GETS NO ROW, WHICH IS THE OTHER TABLE'S RULE APPLIED
-       * HERE FOR THE FIRST TIME.
-       *
-       * CRITERION. Nothing is written and nothing is filed for a `none` app, whatever the vendor
-       * answered about it.
-       *
-       * REASON. `NO_AUTH` used to be a member of the CONSENT list, so the classifier called it
-       * consent and the arm below wrote `verified: true` with a fresh `verified_at` for it — on
-       * every page load, because this runs from an effect on mount. That is precisely the row the
-       * connect route refuses to create for these apps and the row the per-person gate is written to
-       * do without: `composio_connections` is the whole of the permission for a brokered call, and
-       * every row in it means one thing, that this person granted this deployment access to their
-       * account at this app. There is no account — Composio refuses even to hold an authorization
-       * config for a no-auth toolkit — and there is no grant, so a year on, offboarding, the trail
-       * and the Disconnect button could not tell those rows from ones somebody really made.
-       *
-       * THE NEGATIVE HEAL ABOVE STILL RAN, and deliberately: a row left behind by the version that
-       * wrote them is removed by the first mount that finds the vendor holding no account, which is
-       * every mount for an app like this.
-       */
-      if (kind === "none") return { connected: true };
 
       if (kind === "consent" && !held?.verified) {
         // VERIFIED, BECAUSE A CONSENT SCREEN IS A VERIFICATION AND NOT A LESSER KIND OF ONE. The
@@ -5809,7 +6638,7 @@ export function createPluginStore(options: PluginStoreOptions) {
       const authScheme = await brokeredAppScheme(input.toolkit);
       if (!isFieldScheme(authScheme)) {
         throw new BrokerRefusalError(
-          `${input.toolkit} is not an app this deployment connects with values somebody types, so nothing was sent. Open the app on the Plugins page and connect it the way it asks for; if it is not listed there at all, an administrator has to enable it first.`,
+          `${input.toolkit} is not an app this deployment connects with values somebody types, so nothing was sent. Open the app under App connections and connect it the way it asks for; if it is not listed there at all, add it from Composio's directory first.`,
         );
       }
 
@@ -5985,7 +6814,7 @@ export function createPluginStore(options: PluginStoreOptions) {
          * presses that end it either way.
          */
         throw new PluginRefusedError(
-          `${input.toolkit} was connected, and the check this deployment then ran against it did not come back clean: ${probed.sentence} That may be the key, and it may be the app — what came back does not say which — so the account is left standing and recorded as unchecked. Re-check it on the Plugins page once, and if it still will not answer, disconnect it and connect it again with a fresh key.`,
+          `${input.toolkit} was connected, and the check this deployment then ran against it did not come back clean: ${probed.sentence} That may be the key, and it may be the app — what came back does not say which — so the account is left standing and recorded as unchecked. Re-check it on App connections once, and if it still will not answer, disconnect it and connect it again with a fresh key.`,
           null,
         );
       }
@@ -6206,7 +7035,7 @@ export function createPluginStore(options: PluginStoreOptions) {
       >;
       if ((await brokeredAppKind(input.toolkit)) !== "key") {
         throw new PluginRefusedError(
-          `${input.toolkit} is not an app this deployment holds a key for, so there is nothing here to re-check. It was connected at ${input.toolkit}'s own sign-in screen, and if it has stopped working, disconnecting it on the Plugins page and connecting it again is what fixes it.`,
+          `${input.toolkit} is not an app this deployment holds a key for, so there is nothing here to re-check. It was connected at ${input.toolkit}'s own sign-in screen, and if it has stopped working, disconnecting it on App connections and connecting it again is what fixes it.`,
           null,
         );
       }
@@ -6227,7 +7056,7 @@ export function createPluginStore(options: PluginStoreOptions) {
 
       if (!held) {
         throw new PluginRefusedError(
-          `You have no connection to ${input.toolkit} here, so there is nothing to re-check. Connect it on the Plugins page and it will be checked as it is made.`,
+          `You have no connection to ${input.toolkit} here, so there is nothing to re-check. Connect it on App connections and it will be checked as it is made.`,
           null,
         );
       }
@@ -6325,7 +7154,7 @@ export function createPluginStore(options: PluginStoreOptions) {
        */
       if (!wrote) {
         throw new PluginRefusedError(
-          `Your connection to ${input.toolkit} was disconnected while this check was still running, so nothing was recorded about it: what the check found is about an account you no longer have here. Connect ${input.toolkit} again on the Plugins page if that was not what you meant.`,
+          `Your connection to ${input.toolkit} was disconnected while this check was still running, so nothing was recorded about it: what the check found is about an account you no longer have here. Connect ${input.toolkit} again on App connections if that was not what you meant.`,
           null,
         );
       }
@@ -6551,6 +7380,294 @@ export function createPluginStore(options: PluginStoreOptions) {
       }
 
       return { vendorRevocationRequested };
+    },
+
+    async listBrokeredAccounts(input: {
+      toolkit: string;
+      userId: string;
+    }): Promise<
+      Array<{
+        id: string;
+        accountId: string | null;
+        label: string | null;
+        connectedAt: string;
+        verified: boolean;
+        verifiedAt: string | null;
+        grantedAgents: Array<{
+          id: string;
+          name: string;
+          avatarUrl: string | null;
+        }>;
+      }>
+    > {
+      const connections = await database
+        .select()
+        .from(composioConnections)
+        .where(
+          and(
+            eq(composioConnections.toolkit, input.toolkit),
+            eq(composioConnections.userId, input.userId),
+          ),
+        )
+        .orderBy(asc(composioConnections.connectedAt));
+
+      if (connections.length === 0) return [];
+
+      const grants = await database
+        .select({
+          connectionId: composioAccountGrants.connectionId,
+          agentId: composioAccountGrants.agentId,
+          agentName: agents.name,
+        })
+        .from(composioAccountGrants)
+        .innerJoin(agents, eq(composioAccountGrants.agentId, agents.id))
+        .where(eq(composioAccountGrants.userId, input.userId));
+
+      return connections.map((conn) => {
+        const connGrants = grants
+          .filter((g) => g.connectionId === conn.id)
+          .map((g) => ({
+            id: g.agentId,
+            name: g.agentName,
+            avatarUrl: null as string | null,
+          }));
+        return {
+          id: conn.id,
+          accountId: conn.accountId,
+          label: conn.label,
+          connectedAt: iso(conn.connectedAt) ?? "",
+          verified: conn.verified,
+          verifiedAt: iso(conn.verifiedAt),
+          grantedAgents: connGrants,
+        };
+      });
+    },
+
+    async disconnectBrokeredAccount(input: {
+      connectionId: string;
+      toolkit: string;
+      userId: string;
+      by: string;
+      reason: "self" | "person_removed";
+    }): Promise<{ vendorRevocationRequested: boolean }> {
+      const [conn] = await database
+        .select()
+        .from(composioConnections)
+        .where(
+          and(
+            eq(composioConnections.id, input.connectionId),
+            eq(composioConnections.userId, input.userId),
+            eq(composioConnections.toolkit, input.toolkit),
+          ),
+        )
+        .limit(1);
+
+      if (!conn) return { vendorRevocationRequested: false };
+
+      let vendorRevocationRequested = false;
+      if (conn.accountId) {
+        if (!broker?.revokeAccount) {
+          throw new PluginInvariantError(
+            "A connected Composio account cannot be disconnected because no broker is configured.",
+          );
+        }
+        await broker.revokeAccount(conn.accountId);
+        vendorRevocationRequested = true;
+      }
+
+      await database
+        .delete(composioConnections)
+        .where(eq(composioConnections.id, conn.id));
+
+      await recordAuditEvent(auditStore, {
+        eventType: "mcp.account_disconnected",
+        targetType: "mcp_server",
+        targetId: conn.toolkit,
+        payload: {
+          actor: input.by,
+          server: conn.toolkit,
+          owner: input.userId,
+          reason: input.reason,
+          vendorRevocationRequested,
+        },
+      });
+
+      return { vendorRevocationRequested };
+    },
+
+    async grantAccountToAgent(input: {
+      connectionId: string;
+      agentId: string;
+      userId: string;
+      toolkit?: string;
+    }): Promise<void> {
+      const [conn] = await database
+        .select({ id: composioConnections.id })
+        .from(composioConnections)
+        .where(
+          and(
+            eq(composioConnections.id, input.connectionId),
+            eq(composioConnections.userId, input.userId),
+            ...(input.toolkit
+              ? [eq(composioConnections.toolkit, input.toolkit)]
+              : []),
+          ),
+        )
+        .limit(1);
+
+      if (!conn) {
+        throw new PluginRefusedError("Connection not found.", null);
+      }
+
+      const existing = await database
+        .select({
+          connectionId: composioAccountGrants.connectionId,
+          toolkit: composioConnections.toolkit,
+        })
+        .from(composioAccountGrants)
+        .innerJoin(
+          composioConnections,
+          eq(composioAccountGrants.connectionId, composioConnections.id),
+        )
+        .where(
+          and(
+            eq(composioAccountGrants.agentId, input.agentId),
+            eq(composioAccountGrants.userId, input.userId),
+          ),
+        );
+      const conflicting = existing
+        .filter(
+          (row) =>
+            row.toolkit === input.toolkit &&
+            row.connectionId !== input.connectionId,
+        )
+        .map((row) => row.connectionId);
+      if (conflicting.length > 0) {
+        await database
+          .delete(composioAccountGrants)
+          .where(
+            and(
+              eq(composioAccountGrants.agentId, input.agentId),
+              inArray(composioAccountGrants.connectionId, conflicting),
+            ),
+          );
+      }
+
+      await database
+        .insert(composioAccountGrants)
+        .values({
+          connectionId: input.connectionId,
+          agentId: input.agentId,
+          userId: input.userId,
+        })
+        .onConflictDoNothing();
+
+      await database
+        .delete(pluginRevocations)
+        .where(
+          and(
+            eq(pluginRevocations.kind, "composio_account"),
+            eq(pluginRevocations.ref, input.connectionId),
+            eq(pluginRevocations.agentId, input.agentId),
+          ),
+        );
+    },
+
+    async revokeAccountFromAgent(input: {
+      connectionId: string;
+      agentId: string;
+      userId: string;
+      toolkit?: string;
+    }): Promise<void> {
+      const [conn] = await database
+        .select({ id: composioConnections.id })
+        .from(composioConnections)
+        .where(
+          and(
+            eq(composioConnections.id, input.connectionId),
+            eq(composioConnections.userId, input.userId),
+            ...(input.toolkit
+              ? [eq(composioConnections.toolkit, input.toolkit)]
+              : []),
+          ),
+        )
+        .limit(1);
+      if (!conn) {
+        throw new PluginRefusedError("Connection not found.", null);
+      }
+
+      await database
+        .delete(composioAccountGrants)
+        .where(
+          and(
+            eq(composioAccountGrants.connectionId, input.connectionId),
+            eq(composioAccountGrants.agentId, input.agentId),
+            eq(composioAccountGrants.userId, input.userId),
+          ),
+        );
+
+      await database
+        .insert(pluginRevocations)
+        .values({
+          kind: "composio_account",
+          ref: input.connectionId,
+          agentId: input.agentId,
+          revokedBy: input.userId,
+        })
+        .onConflictDoNothing();
+    },
+
+    async updateAccountLabel(input: {
+      connectionId: string;
+      toolkit: string;
+      userId: string;
+      label: string;
+    }): Promise<void> {
+      await database
+        .update(composioConnections)
+        .set({
+          label: input.label.trim() || null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(composioConnections.id, input.connectionId),
+            eq(composioConnections.userId, input.userId),
+            eq(composioConnections.toolkit, input.toolkit),
+          ),
+        );
+    },
+
+    async listAccountGrantsForAgent(input: {
+      agentId: string;
+      userId: string;
+    }): Promise<
+      Array<{
+        connectionId: string;
+        toolkit: string;
+        accountId: string | null;
+        label: string | null;
+      }>
+    > {
+      const rows = await database
+        .select({
+          connectionId: composioAccountGrants.connectionId,
+          toolkit: composioConnections.toolkit,
+          accountId: composioConnections.accountId,
+          label: composioConnections.label,
+        })
+        .from(composioAccountGrants)
+        .innerJoin(
+          composioConnections,
+          eq(composioAccountGrants.connectionId, composioConnections.id),
+        )
+        .where(
+          and(
+            eq(composioAccountGrants.agentId, input.agentId),
+            eq(composioAccountGrants.userId, input.userId),
+          ),
+        );
+      return rows;
     },
 
     /**
@@ -6838,8 +7955,10 @@ export function createPluginStore(options: PluginStoreOptions) {
       args: Record<string, unknown>;
       botId: string;
       actorId: string;
+      signal?: AbortSignal;
       initiator?: AuditInitiator;
     }): Promise<{ text: string; isError: boolean }> {
+      input.signal?.throwIfAborted();
       const [serverId, ...rest] = input.ref.split("/");
       const toolName = rest.join("/");
       if (!serverId || !toolName) {
@@ -6899,8 +8018,45 @@ export function createPluginStore(options: PluginStoreOptions) {
         advertised[0]?.effect,
       );
 
+      let validatedArgs = input.args;
+      if (advertised[0]?.inputSchema) {
+        try {
+          const parsed = z
+            .fromJSONSchema(advertised[0].inputSchema as never)
+            .safeParse(input.args);
+          if (parsed.success) {
+            validatedArgs = parsed.data as Record<string, unknown>;
+          } else {
+            const issue = parsed.error.issues[0];
+            const where = issue?.path.length
+              ? ` at ${issue.path.join(".")}`
+              : "";
+            const invalid = new PluginInvalidArgumentsError(
+              `Invalid arguments for ${toolName}${where}: ${issue?.message ?? "the schema was not satisfied"}.`,
+            );
+            await recordAuditEvent(auditStore, {
+              eventType: "mcp.call_rejected",
+              targetType: "mcp_tool",
+              targetId: input.ref,
+              ...(input.initiator ? { initiator: input.initiator } : {}),
+              payload: {
+                actor: auditActor,
+                bot: input.botId,
+                server: serverId,
+                tool: toolName,
+                refusal: "invalid_arguments",
+                reason: invalid.message,
+              },
+            });
+            throw invalid;
+          }
+        } catch (error) {
+          if (error instanceof PluginInvalidArgumentsError) throw error;
+        }
+      }
+
       const args = withoutEmptyOptionals(
-        input.args,
+        validatedArgs,
         advertised[0]?.inputSchema as Record<string, unknown> | undefined,
       );
 
@@ -6969,7 +8125,10 @@ export function createPluginStore(options: PluginStoreOptions) {
         initiator: policyInitiator(input.initiator),
       };
 
-      const verdict = evaluateActionPolicy(options.policy(), context);
+      const verdict = evaluateActionPolicy(
+        options.policy(input.actorId),
+        context,
+      );
 
       /*
        * The parts of the row that are known before the attempt, held rather than written.
@@ -7095,24 +8254,44 @@ export function createPluginStore(options: PluginStoreOptions) {
        * it did.
        */
       try {
-        const { token } = await connectionTokenFor(
+        const { token, accountId } = await connectionTokenFor(
           row,
           entry,
           input.actorId,
           access,
+          input.botId,
         );
         const vendor =
           injectedVendor ?? transportFor(access.transport).callTool;
-        const result = await vendor(
-          {
-            url: effectiveUrl(row, entry),
-            token,
-            actorId: input.actorId,
-            botId: input.botId,
-          },
-          toolName,
-          vendorArgs,
-        );
+        let toolTimer: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          toolTimer = setTimeout(() => {
+            reject(
+              new Error(
+                "Tool execution exceeded the maximum allowed limit of 60 seconds.",
+              ),
+            );
+          }, TOOL_EXECUTION_TIMEOUT_MS);
+          toolTimer.unref?.();
+        });
+        const result = await Promise.race([
+          vendor(
+            {
+              url: effectiveUrl(row, entry),
+              token,
+              actorId: input.actorId,
+              botId: input.botId,
+              accountId,
+              ...(input.signal ? { signal: input.signal } : {}),
+            },
+            toolName,
+            vendorArgs,
+          ),
+          timeoutPromise,
+        ]).finally(() => {
+          if (toolTimer) clearTimeout(toolTimer);
+        });
+        input.signal?.throwIfAborted();
         await recordAuditEvent(auditStore, {
           eventType: result.isError ? "mcp.call_failed" : "mcp.call_succeeded",
           targetType: "mcp_tool",
@@ -7175,6 +8354,14 @@ export function createPluginStore(options: PluginStoreOptions) {
         throw error;
       }
     },
+    /*
+     * The brokered app row for one toolkit, for callers that only need to know whether the app
+     * is enabled and under what id — the agent `connect_app` tool, which mints a consent link
+     * for an enabled app and points at App connections for one that is not.
+     */
+    brokeredAppRow,
+    brokeredToolkitForServer,
+    workbench: broker?.workbench,
   };
 }
 

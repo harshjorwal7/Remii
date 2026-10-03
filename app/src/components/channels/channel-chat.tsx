@@ -22,10 +22,12 @@ import {
   recordChannelActivityMutationOptions,
   setChannelBusy,
 } from "@/lib/channels/mutations";
+import type { ChannelActivityBrief } from "@/lib/channels/queries";
 import {
   type AgentChannel,
   type ChannelSummary,
   channelKeys,
+  channelRunningQueryOptions,
 } from "@/lib/channels/queries";
 import { useActiveBot } from "@/lib/copilot/active-bot";
 import { ConversationProvider } from "@/lib/copilot/conversation";
@@ -226,9 +228,12 @@ function describeAttachments(attachments: readonly Attachment[]): string {
  * durable threads.
  */
 export function ChannelChat({
+  activity,
   channel,
   runtimeAgentId,
 }: {
+  /** What is running in this channel, or null. Drawn above the composer. */
+  activity?: ChannelActivityBrief | null;
   channel: AgentChannel;
   runtimeAgentId: string;
 }) {
@@ -311,6 +316,38 @@ export function ChannelChat({
   const [historyReadFailed, setHistoryReadFailed] = useState(false);
   // Mount reads and Bot refreshes share one ordering: only the newest read owns the notice.
   const historyReadVersion = useRef(0);
+  // One history read per thread, shared across this mount's re-runs.
+  // `useAgent` hands back a provisional agent until the proxied one registers
+  // (and StrictMode mounts twice), and the activity watcher below pulls on
+  // roster updates: without sharing, one open meant several concurrent full
+  // downloads that raced the deadline and read as chats that never load. A
+  // settled read leaves the map so a later activity refresh can ask for new
+  // durable messages.
+  const historyReadsRef = useRef(
+    new Map<string, Promise<Awaited<ReturnType<typeof readThreadMessages>>>>(),
+  );
+  const readHistoryShared = useCallback(
+    (threadId: string) => {
+      const shared = historyReadsRef.current.get(threadId);
+      if (shared) return shared;
+      const started = readThreadMessages(threadId, runtimeAgentId);
+      historyReadsRef.current.set(threadId, started);
+      started.then(
+        () => {
+          if (historyReadsRef.current.get(threadId) === started) {
+            historyReadsRef.current.delete(threadId);
+          }
+        },
+        () => {
+          if (historyReadsRef.current.get(threadId) === started) {
+            historyReadsRef.current.delete(threadId);
+          }
+        },
+      );
+      return started;
+    },
+    [runtimeAgentId],
+  );
   useEffect(() => {
     if (isReady) openReadyGate.current();
   }, [isReady]);
@@ -322,12 +359,42 @@ export function ChannelChat({
     const version = ++historyReadVersion.current;
 
     void (async () => {
+      /*
+       * The history read starts BESIDE the join, not after it. It used to
+       * wait for the socket join (up to 1.5s of its own deadline) before the
+       * history fetch even began, so a heavy thread spent half its 2.5s
+       * budget before the first byte — and every open lost the race and read
+       * as chats that never load. The two disagree about nothing: the join
+       * orders the live run, the read restores the past.
+       */
+      const history = readHistoryShared(channel.threadId);
       try {
         // Bounded, and finished when it returns; `join-thread.ts` has why that matters.
         await joinWithin({
           connect: copilotkit.connectAgent({ agent }),
           deadline: afterMs(JOIN_DEADLINE_MS),
           detach: () => agent.detachActiveRun(),
+          /*
+           * NOT DETACHED FROM A THREAD THAT IS STILL WORKING.
+           *
+           * The deadline exists so a connect left over from a channel at rest cannot replace this
+           * agent's messages on the next run. It is a reasonable assumption until the thread turns out
+           * not to be at rest — and a conversation this person walked away from and came back to is
+           * exactly that: their run never stopped, because leaving a conversation does not abort it, so
+           * `connect` has just reattached to a live run and the events arriving on it are the answer they
+           * came back for.
+           *
+           * Detaching at the deadline severed that ~1.5s in, and `agent.isRunning` went false as it did,
+           * so the Stop button flashed and disappeared — the same symptom as never having drawn it,
+           * arriving by the other route.
+           *
+           * BOTH terms, because neither is sufficient alone at this instant. `agent.isRunning` is what
+           * the reattach just established, but only once the connect has had a moment to deliver
+           * something; `serverRunningRef` may not have resolved yet, since the poll and this join start
+           * together. Whichever lands first is enough, and asking only one of them reintroduces the bug
+           * for the other's latency.
+           */
+          keepAttached: () => agent.isRunning || serverRunningRef.current,
         });
       } catch {
         /*
@@ -338,10 +405,9 @@ export function ChannelChat({
       }
 
       try {
-        const stored = await readThreadMessages(
-          channel.threadId,
-          runtimeAgentId,
-        );
+        // Awaited here, started beside the join above: the full 2.5s budget
+        // belongs to the read, not to whatever the socket was doing.
+        const stored = await history;
         const isCurrent = current && version === historyReadVersion.current;
         if (isCurrent) {
           // The gateway snapshot can lag the store. Keep its valid local rows even when the
@@ -373,7 +439,7 @@ export function ChannelChat({
     return () => {
       current = false;
     };
-  }, [copilotkit, agent, isReady, channel.threadId, runtimeAgentId]);
+  }, [copilotkit, agent, isReady, channel.threadId, readHistoryShared]);
 
   /*
    * A turn nobody here streamed, surfaced while the channel is open.
@@ -550,7 +616,7 @@ export function ChannelChat({
    * `agent.isRunning` looks like both and is neither. It reports the run on the wire, and a turn
    * that touches the browser is several runs in a row: the Bot asks for a click, the run ENDS so
    * the browser can answer it, and another run starts carrying the answer. The agent reports itself
-   * idle in every one of those gaps — the truth about the wire and a lie about the turn. OpenBot
+   * idle in every one of those gaps — the truth about the wire and a lie about the turn. Remii
    * registers every computer tool as a frontend tool, so the gaps open on ordinary work rather than
    * on some edge case, and anything keyed on the turn ending fires in the middle of one instead.
    *
@@ -562,6 +628,65 @@ export function ChannelChat({
   /* Authoritative once this screen unmounts, where `setTurnsInFlight` becomes a no-op. */
   const turnsRef = useRef(0);
   const [runsInFlight, setRunsInFlight] = useState(0);
+
+  /*
+   * WHETHER THIS SCREEN IS STILL THERE.
+   *
+   * The one thing a `finally` after unmount must not do is tell the roster that work has stopped, because
+   * the work has not. Leaving a conversation does not abort its run — nothing here calls `abortRun` on
+   * unmount, deliberately, since closing a tab is not a request to stop working — so `say`'s cleanup runs
+   * long after this component is gone and posts `busy: false` for a run that is still going. The roster
+   * then shows an idle conversation whose transcript is about to grow an answer nobody is watching, and
+   * coming back shows a conversation with no Working line and no Stop button on a thread that is busy.
+   *
+   * `turnsRef` above solves a different problem and cannot solve this one: it keeps a count accurate
+   * across unmount, but the question here is not how many turns there are, it is whether there is still
+   * a screen that has any business announcing anything.
+   */
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  /*
+   * WHAT THE SERVER SAYS IS HAPPENING IN THIS CONVERSATION, which is not the same question as what this
+   * screen has streamed.
+   *
+   * Everything above is per-mount and therefore zero on arrival: `agent.isRunning` belongs to a `useAgent`
+   * instance registered on mount, and both counters are `useState`. So a person who starts a long task,
+   * goes to another conversation and comes back lands on a screen that is certain nothing is running,
+   * holding no Stop button, while their run is still going on the server.
+   *
+   * This is the read that closes that gap, and it feeds the two things a person can act on:
+   *
+   *  - `stoppable`, so the Stop button is offered for a run that really exists. Stop is thread-scoped, so
+   *    it reaches the server's run from a mount that never started it — the button appearing here works.
+   *  - `pending`, so the next thing typed is parked rather than sent into a thread the runner will
+   *    refuse. Sending is survivable now that the runner supersedes, but it silently discards whatever
+   *    the orphaned run had already done; parking does not.
+   *
+   * It is deliberately NOT OR-ed into `pending` in a way that could strand the composer: the poll only
+   * runs while something is live, so the one thing this can get wrong is being briefly true about a run
+   * that just ended, and `runsInFlight`/`turnsInFlight` take over the instant a local run is involved.
+   */
+  const { data: serverActivity } = useQuery(
+    channelRunningQueryOptions(channel.id),
+  );
+  /** Whether a run the server can still be asked about is going. See the query's own note. */
+  const serverRunning = serverActivity !== null && serverActivity !== undefined;
+  /*
+   * The same fact, in a ref, for the join below.
+   *
+   * A ref because the join effect must not depend on the poll: adding `serverRunning` to its dependency
+   * array would tear the join down and re-run it every four seconds for as long as a run is live, and
+   * each re-run replaces the agent's messages — losing whatever was added in between. The join is a
+   * one-shot on mount and reads this at the one moment it needs the answer.
+   */
+  const serverRunningRef = useRef(serverRunning);
+  serverRunningRef.current = serverRunning;
 
   /**
    * Tell the roster what was just said. Failures here must not block the conversation.
@@ -720,9 +845,21 @@ export function ChannelChat({
     } finally {
       turnsRef.current -= 1;
       setTurnsInFlight(turnsRef.current);
-      // Sent from here rather than from an effect on `turnsInFlight`: this runs after unmount, that
-      // does not, and the last turn out is what takes the roster's working indicator down.
-      if (turnsRef.current === 0) {
+      /*
+       * ONLY WHILE THIS SCREEN IS STILL HERE, and this is the point of `mountedRef`.
+       *
+       * The turn does not end when the browser stops watching it. Leaving a conversation does not abort
+       * its run, so this `finally` runs for a run that is still going on the server — and posting
+       * `busy: false` for it tells the roster this conversation is idle. The roster is what the sidebar
+       * draws and what this same file's `activity` comes from, so the consequence is not a stale dot in
+       * one list: coming back shows a conversation with no Working line and no Stop button, on a thread
+       * that is busy, and the next message goes into a run nobody can see.
+       *
+       * The counter itself is still decremented above, unconditionally, because `turnsRef` is what stays
+       * correct across unmount and a count that leaked would be wrong on the next mount. Only the
+       * announcement is suppressed — there is no longer a screen here that has any business making one.
+       */
+      if (turnsRef.current === 0 && mountedRef.current) {
         void setChannelBusy({ channelId: channel.id, busy: false });
       }
     }
@@ -742,11 +879,28 @@ export function ChannelChat({
       // both is not told two different things about the same silence.
       onRunErrorEvent: ({ event }) => fail(stoppedReason(event?.message)),
       onRunFailed: ({ error }) => fail(stoppedReason(error)),
-      onRunFinishedEvent: () => {
+      onRunFinishedEvent: ({ event }) => {
         const wasOurs = awaitingReply.current;
         awaitingReply.current = false;
         if (!wasOurs) return;
 
+        /*
+         * A FINISH IS NOT ALWAYS AN ANSWER.
+         *
+         * `RUN_FINISHED` is what a completed run ends with, and it is also what an aborted one used
+         * to end with — the server emitted it bare, with no reason, on every abort. So this handler
+         * cannot assume the turn produced something: it can assume the run stopped.
+         *
+         * Two ways it can stop without an answer, and both leave the same hole. A channel deadline
+         * (see `RunBuiltAgent` in server/src/copilot.ts) and the loop breaker's tool-call cap
+         * (server/src/billing/metering.ts) both end a turn partway through a task. Both now carry a
+         * sentence, and `onRunErrorEvent` above reports it. What is left here is a finish with
+         * neither an explanation nor an answer, which would clear the Working indicator and report
+         * success for a turn that never had one — so it is reported for what it is.
+         *
+         * A run that DID answer is left alone: the person asked something, they got something back,
+         * and a truncated turn still gets to show the partial answer it managed to produce.
+         */
         const reply = [...agent.messages]
           .reverse()
           .find(
@@ -755,7 +909,15 @@ export function ChannelChat({
               !assistantMessagesBeforeRun.current.has(message.id),
           );
         const content = typeof reply?.content === "string" ? reply.content : "";
-        if (content) reportRef.current(content, runtimeAgentId);
+        if (content) {
+          reportRef.current(content, runtimeAgentId);
+          return;
+        }
+
+        // No answer and no explanation. `stoppedReason` supplies the honest sentence for it.
+        const stated =
+          typeof event?.message === "string" ? event.message.trim() : "";
+        fail(stated || "This turn ended before the Bot finished answering.");
       },
     });
     return () => subscription?.unsubscribe();
@@ -814,7 +976,8 @@ export function ChannelChat({
            * and `agent.isRunning` alone leaves that gap unmarked — which is the one moment the
            * "Thinking" line exists for. Same value as `pending`, deliberately.
            */
-          busy={agent.isRunning || turnsInFlight > 0}
+          activity={activity ?? serverActivity ?? null}
+          busy={agent.isRunning || turnsInFlight > 0 || serverRunning}
           // The `/` menu exposes only skills granted to this Bot.
           commands={skillCommands}
           // Readiness is handled by `say`; deletion is the only disabled-chat state.
@@ -865,15 +1028,67 @@ export function ChannelChat({
            */
           onStop={() => {
             awaitingReply.current = false;
-            copilotkit.stopAgent({ agent });
+            /*
+             * INVALIDATE FIRST, THEN STOP.
+             *
+             * The order is load-bearing and it was the other way round. `stopAgent` reaches the SDK's
+             * `abortRun`, which builds its URL and can THROW synchronously — with no runtime URL
+             * configured, or under a DOM whose `URL` rejects the base. Everything after it in this handler
+             * is then skipped, so putting the invalidation second meant that on exactly the failure this
+             * handler exists to recover from — stopping a run — the screen was never re-read, and the
+             * Stop button stayed on screen for a run that had just been asked to end.
+             *
+             * Asking first is also more correct on the merits. The invalidation does not depend on the
+             * stop having been delivered: it re-reads what the server says, and the server is the only
+             * thing that knows whether the run is still going. Whether the request then succeeds is
+             * expressed by what the re-read returns, not by skipping it.
+             *
+             * Invalidated rather than set to null, and for the same reason: overwriting the answer would
+             * assert that the run stopped the instant the request left. It may not have, and a
+             * conversation that believes it is idle while the Bot works is the bug this all exists to fix.
+             * Re-reading asks.
+             */
+            void queryClient.invalidateQueries({
+              queryKey: channelKeys.running(channel.id),
+            });
+            /*
+             * AND THE STOP ITSELF MUST NOT BE ABLE TO BREAK THIS SCREEN.
+             *
+             * `stopAgent` is the SDK's, and it can throw synchronously before it sends anything —
+             * `abortRun` builds a URL from the runtime base, which is not configured in every context and
+             * is rejected outright by some DOMs. An exception here does not just fail the stop: it
+             * propagates out of a React event handler, so the person pressing Stop gets an error boundary
+             * over the conversation they were trying to interrupt.
+             *
+             * Reported, not swallowed. A stop that did not happen is a real failure the person should be
+             * able to see, and `runError` is where the transcript already says what ended a turn — so the
+             * screen says the press did not reach the Bot and keeps working, rather than either pretending
+             * it stopped or falling over.
+             */
+            try {
+              copilotkit.stopAgent({ agent });
+            } catch (error) {
+              setRunError(
+                error instanceof Error
+                  ? `The stop could not be sent: ${error.message}`
+                  : "The stop could not be sent.",
+              );
+            }
           }}
           /*
            * The turn, not the run. A browser action ends one run and starts another, and telling the
            * conversation it is idle in between is what would drain a parked correction into the
            * middle of an answer: a second turn racing the first on one thread, with a fabricated
            * result stitched over a tool call that is still executing.
+           *
+           * `serverRunning` is OR-ed in because the local facts are per-mount and a conversation this
+           * person walked away from and came back to has none. Without it, a run still going on the
+           * server is invisible to the composer: the next thing typed is sent into a thread the runner
+           * refuses, and — because that refusal reaches the browser as an empty 200 that reads as
+           * success — the message is swallowed with no reply and no error. Parking it instead costs one
+           * turn of latency and discards nothing.
            */
-          pending={agent.isRunning || turnsInFlight > 0}
+          pending={agent.isRunning || turnsInFlight > 0 || serverRunning}
           /*
            * A channel outlives its turns, so it is the screen where waiting is worth offering. A
            * correction typed mid-answer is held here, in this tab, and runs as one follow-up turn the
@@ -886,8 +1101,15 @@ export function ChannelChat({
            * The run, not the turn. Stop reaches a run through the core's abort controller, and that
            * controller does not exist until `say` has finished waiting for the runtime agent — so
            * this is the one place the narrower fact is the honest one to draw a button from.
+           *
+           * WITH THE SERVER'S ANSWER, and this is the fix for a Stop button that vanishes when you
+           * navigate back. Both local terms are per-mount and zero on arrival, so a conversation with a
+           * live run on it drew Send — with nothing to stop it and, worse, a next message silently
+           * swallowed. Stop is addressed by THREAD (`/agent/:id/stop/:threadId`) and takes no run id, so
+           * a mount that never started the run can still end it: `agent` is registered by the time this
+           * button can be pressed, and it carries this channel's thread id.
            */
-          stoppable={agent.isRunning || runsInFlight > 0}
+          stoppable={agent.isRunning || runsInFlight > 0 || serverRunning}
           /*
            * At the END OF THE TRANSCRIPT rather than above the composer, which is where this used to
            * be. A turn that ends without an answer leaves a gap exactly where the reply was going to

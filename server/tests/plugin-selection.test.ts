@@ -20,10 +20,23 @@ import {
 
 const tool = (ref: string) => ({ ref });
 
-/** More than `SELECTION_FLOOR`, so selection actually runs. Named for what it is doing. */
+/**
+ * More than `SELECTION_FLOOR`, so selection actually runs. Named for what it is doing.
+ *
+ * Built from the constant rather than a hand-written 16, because `SELECTION_FLOOR` rose at some point
+ * and these stayed at 16. Everything below then took the `under-floor` branch — which answers
+ * `offered: all 16 tools, skills: [], granted: 16` — and every assertion in this file that expected a
+ * narrowed answer failed at once, in a way that read like the selector had broken rather than like the
+ * fixture had quietly fallen under the floor.
+ */
+const MANY_PER_SERVER = 8;
 const manyTools = [
-  ...Array.from({ length: 8 }, (_, index) => tool(`drive/tool_${index}`)),
-  ...Array.from({ length: 8 }, (_, index) => tool(`slack/tool_${index}`)),
+  ...Array.from({ length: SELECTION_FLOOR + MANY_PER_SERVER }, (_, index) =>
+    tool(`drive/tool_${index}`),
+  ),
+  ...Array.from({ length: SELECTION_FLOOR + MANY_PER_SERVER }, (_, index) =>
+    tool(`slack/tool_${index}`),
+  ),
 ];
 
 const skills = [

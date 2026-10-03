@@ -1,0 +1,2 @@
+ALTER TABLE "user_computers" ADD COLUMN "control_holder" text DEFAULT 'bot' NOT NULL;--> statement-breakpoint
+ALTER TABLE "user_computers" ADD COLUMN "control_since" timestamp with time zone DEFAULT now() NOT NULL;

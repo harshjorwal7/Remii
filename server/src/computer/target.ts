@@ -53,14 +53,6 @@ export function isNeverAllowedHostname(hostname: string): boolean {
   return NEVER_ALLOWED_HOSTNAMES.has(canonicalHostname(hostname.toLowerCase()));
 }
 
-/** Hostnames inside the deployment. Reachable only when a deployment opts in. */
-const INTERNAL_HOSTNAMES = new Set([
-  "localhost",
-  "127.0.0.1",
-  "0.0.0.0",
-  "::1",
-]);
-
 export type TargetVerdict =
   | { allowed: true; url: string }
   | { allowed: false; reason: string };
@@ -125,29 +117,6 @@ function embeddedIpv4(groups: number[]): string | null {
   return [high >> 8, high & 255, low >> 8, low & 255].join(".");
 }
 
-/**
- * The IPv6 ranges that are this deployment rather than the internet.
- *
- * Loopback, link-local (`fe80::/10`) and unique-local (`fc00::/7`, which is where cloud providers put
- * internal endpoints) are the IPv6 answers to the RFC1918 list above. The unspecified address is here
- * too: `[::]` reaches localhost the same way `0.0.0.0` does.
- */
-function isPrivateIpv6(hostname: string): boolean {
-  if (!hostname.includes(":")) return false;
-  const groups = expandIpv6(hostname);
-  if (!groups) return false;
-
-  if (groups.every((group) => group === 0)) return true; // ::
-  if (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) {
-    return true; // ::1
-  }
-
-  const [first] = groups as [number, ...number[]];
-  if (first >= 0xfe80 && first <= 0xfebf) return true; // fe80::/10
-  if (first >= 0xfc00 && first <= 0xfdff) return true; // fc00::/7
-  return false;
-}
-
 /** The eight groups of an IPv6 address, or null if it is not one. Compression is expanded. */
 function expandIpv6(hostname: string): number[] | null {
   const halves = hostname.split("::");
@@ -165,22 +134,6 @@ function expandIpv6(hostname: string): number[] | null {
   if (halves.length === 1) return head.length === 8 ? head : null;
   if (missing < 0) return null;
   return [...head, ...Array(missing).fill(0), ...tail];
-}
-
-function isPrivateIpv4(hostname: string): boolean {
-  const parts = hostname.split(".");
-  if (parts.length !== 4) return false;
-  const octets = parts.map((part) => Number.parseInt(part, 10));
-  if (octets.some((value) => Number.isNaN(value) || value < 0 || value > 255)) {
-    return false;
-  }
-  const [a, b] = octets as [number, number, number, number];
-  if (a === 10) return true;
-  if (a === 127) return true;
-  if (a === 169 && b === 254) return true; // link-local, includes metadata
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  return false;
 }
 
 /**
@@ -237,7 +190,7 @@ export function checkComputerAddress(raw: string): TargetVerdict {
  */
 export function checkNavigationTarget(
   raw: string,
-  options: { allowPrivateHosts?: boolean } = {},
+  _options: { allowPrivateHosts?: boolean } = {},
 ): TargetVerdict {
   let url: URL;
   try {
@@ -264,23 +217,9 @@ export function checkNavigationTarget(
     };
   }
 
-  // A local deployment legitimately browses its own services. It is opt-in, never the default, so a
-  // production deployment cannot reach its own network by forgetting to set something.
-  if (options.allowPrivateHosts) {
-    return { allowed: true, url: url.toString() };
-  }
-
-  if (
-    INTERNAL_HOSTNAMES.has(hostname) ||
-    isPrivateIpv4(hostname) ||
-    isPrivateIpv6(hostname)
-  ) {
-    return {
-      allowed: false,
-      reason:
-        "That address is inside this deployment's own network, so the assistant is not allowed to open it.",
-    };
-  }
-
+  // SaaS mode: the person asking is trusted, so the Bot may open anything on the web,
+  // including this deployment's own network (a user's own agent or service legitimately lives at a
+  // private address). The one thing no configuration can reach is the cloud credential endpoint:
+  // fetching that is never the user's task, only a way to steal the deployment's own keys.
   return { allowed: true, url: url.toString() };
 }

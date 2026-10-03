@@ -84,8 +84,21 @@ export function escalationTool(options: {
   from: RunAssertion;
   route: EscalationRoute;
   auditStore?: AuditStore;
+  /**
+   * Told that a question actually reached somebody, so the run can be shown as
+   * WAITING rather than still working.
+   *
+   * The one state a person most needs to see and the one they could not: a Bot
+   * blocked on their answer looks identical to a Bot thinking, and the question
+   * they are being asked may be sitting in a tab they have left.
+   *
+   * Called on DELIVERY only. A route that refused or threw reached nobody, and a
+   * run waiting on a person who was never asked is the exact misreading this
+   * state would otherwise create. Never awaited.
+   */
+  onAsked?: (info: { runId: string; botId: string; actorId: string }) => void;
 }): GrantedTool {
-  const { from, route, auditStore } = options;
+  const { from, route, auditStore, onAsked } = options;
 
   return {
     name: ESCALATE_TOOL,
@@ -172,6 +185,18 @@ export function escalationTool(options: {
             "That did not reach anybody: nobody could be asked just now. Say so plainly, answer " +
             "only what you can settle yourself, and do not tell them a person has been asked.",
         };
+      }
+
+      if ("reached" in outcome) {
+        try {
+          onAsked?.({
+            runId: from.runId,
+            botId: from.botId,
+            actorId: from.actorId,
+          });
+        } catch {
+          // A side effect. The question is asked either way.
+        }
       }
 
       /*

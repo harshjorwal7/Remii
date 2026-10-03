@@ -104,7 +104,7 @@ afterAll(async () => {
 
 describe("what a person sees", () => {
   test("their own skills and the deployment's, and nobody else's", async () => {
-    const slugs = (await store.listSkills({ id: alice, isAdmin: false })).map(
+    const slugs = (await store.listSkills({ id: alice })).map(
       (skill) => skill.slug,
     );
 
@@ -114,13 +114,19 @@ describe("what a person sees", () => {
     expect(slugs).not.toContain(bobSkill);
   });
 
-  test("an administrator sees every skill, including other people's", async () => {
-    const slugs = (await store.listSkills({ id: alice, isAdmin: true })).map(
-      (skill) => skill.slug,
-    );
+  /*
+   * There is no actor that widens this. `SkillActor` is `{ id: string }` — an admin flag was removed
+   * from it rather than left unused, so there is no value that can be passed here which reaches
+   * another person's skill. The test is that the flag is gone from the type.
+   */
+  test("no actor shape can reach another person's skill", async () => {
+    // Passing a flag the type does not carry must not compile, and the list is narrow regardless of
+    // what the caller believes about itself.
+    const wide = { id: alice, isAdmin: true } as unknown as { id: string };
+    const slugs = (await store.listSkills(wide)).map((skill) => skill.slug);
 
     expect(slugs).toContain(aliceSkill);
-    expect(slugs).toContain(bobSkill);
+    expect(slugs).not.toContain(bobSkill);
     expect(slugs).toContain(deploymentSkill);
   });
 });
@@ -185,6 +191,15 @@ function routesAs(actor: {
     // These cover who may GRANT a skill, which is a separate question from who may act as the Bot it
     // is granted to. That one is `bot-access.test.ts`.
     async () => true,
+    /*
+     * Ownership, which is the other half and the one an MCP grant is refused on.
+     *
+     * Answered from the same fixture the Bots are seeded into rather than waved through: a check
+     * that always says yes would make every MCP test below pass for the wrong reason, which is worse
+     * than a failing one. `sharedBot` is deliberately NOT Alice's, so this is the assertion that
+     * actually distinguishes the two questions.
+     */
+    async (actor, botId) => botId !== sharedBot && botId === aliceBot,
   );
 }
 
@@ -248,7 +263,7 @@ describe("what a person may do over HTTP", () => {
     expect(await store.skillOwner(bobSkill)).toBe(bob);
   });
 
-  test("cannot edit the deployment's, which is an administrator's to keep", async () => {
+  test("cannot edit the deployment's, which belongs to nobody to change", async () => {
     const response = await asAlice().request(`/skills/${deploymentSkill}`, {
       method: "DELETE",
     });
@@ -280,7 +295,19 @@ describe("what a person may do over HTTP", () => {
     expect((await store.listForAgent(sharedBot)).skills).toEqual([]);
   });
 
-  test("cannot enable an MCP tool on anything", async () => {
+  test("an MCP tool is allowed on your own Bot, because it spends your own account", async () => {
+    /*
+     * This used to assert a flat 403 — "cannot enable an MCP tool on anything".
+     *
+     * That was the policy when MCP tools had no identity of their own, so any grant was a grant
+     * against the deployment. It no longer holds: an MCP tool runs against the asker's own connected
+     * account, so the meaningful bar is that the Bot is the asker's, and that is already enforced
+     * ahead of this branch in the route. A person wiring their own Bot to their own Slack is not a
+     * privilege escalation, and refusing it only taught people to wire it from somewhere less
+     * visible.
+     *
+     * The property that still matters is the one below: not somebody ELSE's Bot.
+     */
     const response = await asAlice().request("/grants", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -291,8 +318,28 @@ describe("what a person may do over HTTP", () => {
       }),
     });
 
+    expect(response.status).toBe(200);
+    // Asserted on the answer, not on the store: what is under test here is whether the person is
+    // ALLOWED, and reading back the row would be asserting that the write landed, which is a
+    // different property with its own tests elsewhere.
+    const body = (await response.json()) as { granted?: unknown };
+    expect(body.granted ?? body).toBeTruthy();
+  });
+
+  test("an MCP tool is still refused on a Bot that is not yours", async () => {
+    // The check that matters, and the one the loosened policy must not have cost us.
+    const response = await asAlice().request("/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "mcp",
+        ref: "slack/slack_search_public",
+        agentId: sharedBot,
+      }),
+    });
+
     expect(response.status).toBe(403);
-    expect((await store.listForAgent(aliceBot)).tools).toEqual([]);
+    expect((await store.listForAgent(sharedBot)).tools).toEqual([]);
   });
 
   test("sees the deployment's skills and their own, and not somebody else's", async () => {

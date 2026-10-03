@@ -22,7 +22,14 @@ export type AgentOption = {
  * Takes a structural shape so the composer stays independent of the queries module.
  */
 export function toAgentOptions(
-  profiles: readonly { id: string; name: string; title?: string }[] | undefined,
+  profiles:
+    | readonly {
+        id: string;
+        name: string;
+        title?: string;
+        isSystemTemplate?: boolean;
+      }[]
+    | undefined,
   permittedIds?: readonly string[],
 ): AgentOption[] {
   if (!profiles) {
@@ -30,6 +37,7 @@ export function toAgentOptions(
   }
   const permitted = permittedIds ? new Set(permittedIds) : null;
   return profiles
+    .filter((profile) => !profile.isSystemTemplate)
     .filter((profile) => !permitted || permitted.has(profile.id))
     .map((profile) => ({
       id: profile.id,

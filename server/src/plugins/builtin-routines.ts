@@ -461,7 +461,7 @@ export async function callTool(
     }
 
     return failure(
-      `${toolName} is not a tool Routines implements. The stored tool list is out of date; refresh it on the Plugins page.`,
+      `${toolName} is not a tool Routines implements. The stored tool list is out of date; refresh it on App connections.`,
     );
   } catch (error) {
     /*

@@ -1,9 +1,8 @@
 "use client";
 
-import * as React from "react";
 import { Combobox as ComboboxPrimitive } from "@base-ui/react";
-
-import { cn } from "@/lib/utils";
+import { IconCheck, IconChevronDown, IconX } from "@tabler/icons-react";
+import * as React from "react";
 import { Button } from "@/components/ui/button";
 import {
   InputGroup,
@@ -11,7 +10,7 @@ import {
   InputGroupButton,
   InputGroupInput,
 } from "@/components/ui/input-group";
-import { IconChevronDown, IconX, IconCheck } from "@tabler/icons-react";
+import { cn } from "@/lib/utils";
 
 const Combobox = ComboboxPrimitive.Root;
 
@@ -227,7 +226,7 @@ function ComboboxChips({
     <ComboboxPrimitive.Chips
       data-slot="combobox-chips"
       className={cn(
-        "flex min-h-8 flex-wrap items-center gap-1 rounded-lg border border-input bg-transparent bg-clip-padding px-2.5 py-1 text-sm transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 has-aria-invalid:border-destructive has-aria-invalid:ring-3 has-aria-invalid:ring-destructive/20 has-data-[slot=combobox-chip]:px-1 dark:bg-input/30 dark:has-aria-invalid:border-destructive/50 dark:has-aria-invalid:ring-destructive/40",
+        "flex min-h-8 flex-wrap items-center gap-1 rounded-lg border border-input bg-transparent bg-clip-padding px-2.5 py-1 text-sm transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring/50 has-aria-invalid:border-destructive has-aria-invalid:ring-1 has-aria-invalid:ring-destructive/20 has-data-[slot=combobox-chip]:px-1 dark:bg-input/30 dark:has-aria-invalid:border-destructive/50 dark:has-aria-invalid:ring-destructive/40",
         className,
       )}
       {...props}
@@ -285,18 +284,18 @@ function useComboboxAnchor() {
 
 export {
   Combobox,
-  ComboboxInput,
-  ComboboxContent,
-  ComboboxList,
-  ComboboxItem,
-  ComboboxGroup,
-  ComboboxLabel,
-  ComboboxCollection,
-  ComboboxEmpty,
-  ComboboxSeparator,
-  ComboboxChips,
   ComboboxChip,
+  ComboboxChips,
   ComboboxChipsInput,
+  ComboboxCollection,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxGroup,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxLabel,
+  ComboboxList,
+  ComboboxSeparator,
   ComboboxTrigger,
   ComboboxValue,
   useComboboxAnchor,

@@ -5,12 +5,21 @@ import {
 } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { ThemeProvider } from "@/components/theme-provider";
+import { MaintenanceCrashScreen } from "@/components/ui/maintenance-crash-screen";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RouterContext } from "../router-context";
 import "@fontsource-variable/inter/wght.css";
 
 export const Route = createRootRouteWithContext<RouterContext>()({
   component: RootComponent,
+  errorComponent: ({ reset }) => (
+    <MaintenanceCrashScreen
+      onRetry={() => {
+        reset();
+        window.location.reload();
+      }}
+    />
+  ),
   /*
    * An address this build does not know goes home rather than to a dead end. Home sits behind the
    * auth gate, so the guard decides what that means: /sign for a visitor, /onboarding for somebody

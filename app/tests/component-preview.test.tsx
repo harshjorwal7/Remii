@@ -12,7 +12,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render } from "@testing-library/react";
 import {
-  AdminComponentPreview,
+  PublishedComponentPreview,
   ComponentPreview,
 } from "@/components/component-preview";
 import { GALLERY as TABLES } from "@/components/gallery/table";
@@ -77,12 +77,14 @@ test("admin previews asynchronously loaded published source with saved samples i
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   const observe = spyOn(ResizeObserver.prototype, "observe");
+  // Held so the teardown below can unmount it, which is the whole fix for the removeChild failure.
+  let mounted: ReturnType<typeof render> | undefined;
   try {
-    const view = render(
+    const view = (mounted = render(
       <QueryClientProvider client={queryClient}>
-        <AdminComponentPreview kind="sandboxed" name={PUBLISHED.name} />
+        <PublishedComponentPreview kind="sandboxed" name={PUBLISHED.name} />
       </QueryClientProvider>,
-    );
+    ));
     expect(view.queryByTestId("sandbox-renderer")).toBeNull();
     const sandbox = await view.findByTestId("sandbox-renderer");
     expect(fetcher.mock.calls[0]?.[0]).toBe("/api/sandboxed");
@@ -104,6 +106,16 @@ test("admin previews asynchronously loaded published source with saved samples i
     expect(observe.mock.calls).toHaveLength(2);
     expect(view.queryByText("This build cannot draw this.")).toBeNull();
   } finally {
+    /*
+     * Unmount BEFORE clearing the client, and before restoring the spy.
+     *
+     * `queryClient.clear()` while the tree is still mounted drops the cache out from under an
+     * in-flight query, and React re-renders into a container that `afterEach(cleanup)` is about to
+     * empty — which surfaces as `Failed to execute 'removeChild' on 'Node'` from Testing Library's
+     * teardown rather than as anything to do with this file. Unmounting first ends the subscription,
+     * so there is nothing left to render by the time cleanup runs.
+     */
+    mounted?.unmount();
     observe.mockRestore();
     queryClient.clear();
   }
@@ -130,7 +142,7 @@ test("unpublished or never-published source does not reach the renderer", () => 
   expect(renderer).not.toHaveBeenCalled();
 });
 
-test("read-only galleries identify playground components without fetching administrator drafts", () => {
+test("read-only galleries identify playground components without fetching unpublished drafts", () => {
   const view = render(
     <ComponentPreview kind="sandboxed" name={PUBLISHED.name} />,
   );
@@ -146,7 +158,7 @@ test("compiled previews retain their real component and do not fetch sandboxed s
   try {
     const view = render(
       <QueryClientProvider client={queryClient}>
-        <AdminComponentPreview kind="card" name="showTable" />
+        <PublishedComponentPreview kind="card" name="showTable" />
       </QueryClientProvider>,
     );
     expect(view.getByText("Team capacity")).toBeTruthy();

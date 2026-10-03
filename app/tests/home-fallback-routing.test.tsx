@@ -30,11 +30,8 @@ function agent(
 ): AgentProfile {
   return {
     avatarSeed: "seed",
-    builtIn: false,
+    mascot: null,
     canManage: true,
-    endpoint: null,
-    hasAuth: false,
-    hasCallbackToken: false,
     hidden: false,
     mine: true,
     name: "Agent",
@@ -117,13 +114,13 @@ test("/ fallback routing matches the server default when route selection is unav
     id: "own-public",
     mine: true,
     name: "Own Public",
-    visibility: "public",
+    visibility: "private",
   });
   const sharedPublic = agent({
     id: "shared-public",
     mine: false,
     name: "Shared Public",
-    visibility: "public",
+    visibility: "private",
   });
   const starts: string[][] = [];
   installHomeRoutingFetch({
@@ -142,13 +139,13 @@ test("/ keeps a successful route decision ahead of the fallback", async () => {
     id: "own-public",
     mine: true,
     name: "Own Public",
-    visibility: "public",
+    visibility: "private",
   });
   const sharedPublic = agent({
     id: "shared-public",
     mine: false,
     name: "Shared Public",
-    visibility: "public",
+    visibility: "private",
   });
   const starts: string[][] = [];
   installHomeRoutingFetch({

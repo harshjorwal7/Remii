@@ -12,21 +12,29 @@ describe("navigation targets", () => {
     });
   });
 
-  // Each of these is reachable from the Bot's container and not from the person's laptop, which is
-  // the whole reason a browser running inside the deployment needs a floor under it.
+  /*
+   * Each of these IS ALLOWED now, and that is the decision rather than an oversight.
+   *
+   * There used to be a floor under them — "reachable from the Bot's container and not from the
+   * person's laptop" — with an `allowPrivateHosts` opt-in that a deployment had to remember to set.
+   * Individual-user SaaS removed the opt-in entirely: the person asking is trusted, so their Bot may
+   * open anything on the web INCLUDING this deployment's own network, because a user's own service
+   * legitimately lives at a private address and refusing it made the product useless for them.
+   *
+   * What survives is the check that no configuration can reach, and it is tested below: the cloud
+   * metadata endpoints, in every spelling an address can carry. That is the one destination where
+   * "open anything on the web" would hand somebody this deployment's own credentials, so it is the
+   * one that stays refused — and the private-range rule is not a weaker version of it, it was a
+   * different rule about a different question.
+   */
   test.each([
     ["http://localhost:5432", "loopback by name"],
     ["http://127.0.0.1/admin", "loopback by address"],
     ["http://10.0.0.5/", "RFC1918 10/8"],
     ["http://192.168.1.1/", "RFC1918 192.168/16"],
     ["http://172.16.4.4/", "RFC1918 172.16/12"],
-  ])("refuses %s (%s)", (url) => {
-    const verdict = checkNavigationTarget(url);
-
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.allowed === false && verdict.reason).toContain(
-      "inside this deployment's own network",
-    );
+  ])("allows %s (%s), because the person asking is trusted", (url) => {
+    expect(checkNavigationTarget(url).allowed).toBe(true);
   });
 
   // Separated from the list above because these are refused under every configuration; the second
@@ -80,23 +88,8 @@ describe("navigation targets", () => {
     ["http://[fe80::1]/", "link-local IPv6"],
     ["http://[fc00::1]/", "unique local IPv6"],
     ["http://[0:0:0:0:0:0:0:1]/", "IPv6 loopback written out in full"],
-  ])("refuses %s (%s)", (url) => {
-    const verdict = checkNavigationTarget(url);
-
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.allowed === false && verdict.reason).toContain(
-      "inside this deployment's own network",
-    );
-  });
-
-  // The opt-in still means what it says for these forms: a laptop deployment browsing its own
-  // services over IPv6 is the case it exists for.
-  test("allows IPv6 private addresses when the deployment opts in", () => {
-    expect(
-      checkNavigationTarget("http://[::ffff:127.0.0.1]:3000/", {
-        allowPrivateHosts: true,
-      }).allowed,
-    ).toBe(true);
+  ])("allows %s (%s), for the same reason", (url) => {
+    expect(checkNavigationTarget(url).allowed).toBe(true);
   });
 
   // Public IPv6 is most of the internet. Refusing it to be safe would be its own outage.
@@ -123,23 +116,26 @@ describe("navigation targets", () => {
     });
   });
 
-  // A laptop deployment browses its own services on purpose. It has to be asked for explicitly, so
-  // that a production deployment cannot reach its own network by forgetting a setting.
-  test("allows private hosts only when the deployment opts in", () => {
-    expect(checkNavigationTarget("http://localhost:3000").allowed).toBe(false);
-    expect(
-      checkNavigationTarget("http://localhost:3000", {
-        allowPrivateHosts: true,
-      }).allowed,
-    ).toBe(true);
+  // The option is still in the signature and still ignored, which is worth pinning: a caller that
+  // passes `allowPrivateHosts: false` expecting a floor gets the same permissive answer, so the
+  // parameter cannot be mistaken for a control that does something.
+  test("the private-host option no longer changes the answer", () => {
+    for (const allowPrivateHosts of [false, true]) {
+      expect(
+        checkNavigationTarget("http://localhost:3000", { allowPrivateHosts })
+          .allowed,
+      ).toBe(true);
+    }
   });
 
-  // 172.15 and 172.32 sit either side of the private range. Getting the boundary wrong in the safe
-  // direction blocks real websites; in the unsafe direction it exposes the network.
-  test("gets the edges of the 172.16/12 range right", () => {
+  // The edges of 172.16/12 are no longer a boundary, so both sides are allowed along with the range
+  // itself. Kept as a test because these are the three addresses most likely to be caught by a future
+  // range check reintroduced by accident, and this is where it would show.
+  test("all of the 172.16/12 neighbourhood is allowed, boundaries included", () => {
     expect(checkNavigationTarget("http://172.15.0.1/").allowed).toBe(true);
+    expect(checkNavigationTarget("http://172.16.0.1/").allowed).toBe(true);
+    expect(checkNavigationTarget("http://172.31.255.255/").allowed).toBe(true);
     expect(checkNavigationTarget("http://172.32.0.1/").allowed).toBe(true);
-    expect(checkNavigationTarget("http://172.31.255.255/").allowed).toBe(false);
   });
 });
 
@@ -211,16 +207,24 @@ describe("checkComputerAddress", () => {
       expect(verdict.reason).toContain("not a URL");
     }
   });
-  test("refuses 0.0.0.0 written as a mapped IPv6 address", () => {
-    // Only the compatible form keeps 0.0.0.0/8 as IPv6, because :: and ::1 live there.
+  /*
+   * Lives in the `checkComputerAddress` block but exercises `checkNavigationTarget` — it did when it
+   * was written, and moving it would only churn the diff. It is left here rather than relocated.
+   *
+   * The IPv6 spellings of "this machine" are now ALLOWED, for the same reason every other private
+   * address is: the person asking is trusted and their own service may listen on any of them. What
+   * this test is actually guarding is that these are addresses at all rather than something the parser
+   * should refuse, and the metadata cases above are the ones that must stay refused.
+   */
+  test("the unspecified and loopback IPv6 forms are addresses, so they are allowed", () => {
     expect(checkNavigationTarget("http://[::ffff:0.0.0.0]:5432/").allowed).toBe(
-      false,
+      true,
     );
     expect(checkNavigationTarget("http://[::ffff:0:0]:5432/").allowed).toBe(
-      false,
+      true,
     );
-    expect(checkNavigationTarget("http://[::]/").allowed).toBe(false);
-    expect(checkNavigationTarget("http://[::1]/").allowed).toBe(false);
+    expect(checkNavigationTarget("http://[::]/").allowed).toBe(true);
+    expect(checkNavigationTarget("http://[::1]/").allowed).toBe(true);
   });
 
   test("refuses the container credential endpoints even with private hosts allowed", () => {

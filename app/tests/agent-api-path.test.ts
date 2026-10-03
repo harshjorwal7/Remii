@@ -9,8 +9,6 @@ import { createAgentRoutes } from "../../server/src/agents/routes";
 import {
   deleteAgentMutationOptions,
   duplicateAgentMutationOptions,
-  issueCallbackTokenMutationOptions,
-  revokeCallbackTokenMutationOptions,
   setAgentHiddenMutationOptions,
   updateAgentMutationOptions,
 } from "../src/lib/agents/mutations";
@@ -44,13 +42,12 @@ function boundary(id: string, refusal?: "unauthenticated" | "forbidden") {
     ...input,
     id,
     avatarSeed: id,
+    mascot: null,
     ownerUserId: actor.id,
     systemOwned: false,
     hidden: false,
     deletedAt: null,
     endpoint: null,
-    hasAuth: false,
-    hasCallbackToken: false,
   };
   const record = (operation: string, receivedId: string, value?: unknown) => {
     expect(receivedId).toBe(id);
@@ -189,26 +186,6 @@ function operations(client: QueryClient, id: string) {
           id,
         ),
     },
-    {
-      method: "POST",
-      suffix: "/callback-token",
-      body: null,
-      run: () =>
-        new MutationObserver(
-          client,
-          issueCallbackTokenMutationOptions(client),
-        ).mutate(id),
-    },
-    {
-      method: "DELETE",
-      suffix: "/callback-token",
-      body: null,
-      run: () =>
-        new MutationObserver(
-          client,
-          revokeCallbackTokenMutationOptions(client),
-        ).mutate(id),
-    },
   ];
 }
 
@@ -220,28 +197,34 @@ for (const id of [
   "team%2Frisk",
 ]) {
   test(`agent API preserves the exact ID through queries and mutations: ${id}`, async () => {
-    const { calls, requests } = boundary(id);
-    const client = new QueryClient({
-      defaultOptions: {
-        queries: { retry: false },
-        mutations: { retry: false },
-      },
-    });
-    try {
-      expect((await client.fetchQuery(agentQueryOptions(id))).id).toBe(id);
-      expect(client.getQueryData(agentKeys.detail(id))).toBeDefined();
-      expect(
-        (await client.fetchQuery(agentHandoffQueryOptions(id))).enabled,
-      ).toBe(false);
-      for (const operation of operations(client, id)) {
-        await operation.run();
-        expect(requests.at(-1)).toEqual({
-          method: operation.method,
-          path: `/api/agents/${encodeURIComponent(id)}${operation.suffix}`,
-          body: operation.body,
-        });
-      }
-      expect(calls.map((call) => call.id)).toEqual(Array(9).fill(id));
+const { calls, requests } = boundary(id);
+      const client = new QueryClient({
+        defaultOptions: {
+          queries: { retry: false },
+          mutations: { retry: false },
+        },
+      });
+      try {
+        expect((await client.fetchQuery(agentQueryOptions(id))).id).toBe(id);
+        expect(client.getQueryData(agentKeys.detail(id))).toBeDefined();
+        expect(
+          (await client.fetchQuery(agentHandoffQueryOptions(id))).enabled,
+        ).toBe(false);
+        
+        const performed = operations(client, id);
+        for (const operation of performed) {
+          await operation.run();
+          expect(requests.at(-1)).toEqual({
+            method: operation.method,
+            path: `/api/agents/${encodeURIComponent(id)}${operation.suffix}`,
+            body: operation.body,
+          });
+        }
+        // One store call per operation above, plus the two reads, and the id reaches the
+        // store exactly as it was written — which is the property this file exists to hold.
+        expect(calls.map((call) => call.id)).toEqual(
+          Array(performed.length + 2).fill(id),
+        );
       expect(calls.find((call) => call.operation === "update")?.value).toEqual(
         input,
       );
@@ -266,12 +249,16 @@ for (const refusal of ["unauthenticated", "forbidden"] as const) {
       await expect(
         client.fetchQuery(agentHandoffQueryOptions(id)),
       ).rejects.toThrow();
-      for (const operation of operations(client, id))
+      
+      const performed = operations(client, id);
+      for (const operation of performed)
         await expect(operation.run()).rejects.toThrow();
-      expect(requests).toHaveLength(9);
+      // Two reads plus one request per operation, and every one of them refused.
+      const refused = performed.length + 2;
+      expect(requests).toHaveLength(refused);
       expect(calls).toHaveLength(0);
       expect(statuses).toEqual(
-        Array(9).fill(refusal === "unauthenticated" ? 401 : 403),
+        Array(refused).fill(refusal === "unauthenticated" ? 401 : 403),
       );
       expect(
         requests.every((request) =>

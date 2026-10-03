@@ -6,6 +6,7 @@ import {
   type BrokerField,
   BrokerRefusalError,
   type ComposioBroker,
+  type ConnectedAccountItem,
   type FieldScheme,
   flagOf,
   isFieldScheme,
@@ -28,13 +29,9 @@ import {
  * client. A second importer of `@composio/core` under `server/src` would undo that, because the
  * point of a single import site is that a version bump has exactly one file to be read against.
  *
- * NO SESSION IS EVER CREATED, AND THAT IS A SECURITY BOUNDARY RATHER THAN A PREFERENCE. The SDK's
- * `composio.create(...)` and `sessions.create(...)` open a Composio tool-router session, and a
- * session brings Composio's own hosted surface with it — a remote shell and a Python sandbox that
- * this deployment neither asked for, cannot see into, and could not audit if a model reached them.
- * Everything below is a plain per-call request carrying a user id. A `create` of a session
- * anywhere in this file is a defect, not an optimisation, and it will not look like one: the
- * session API is the shortest path to most of what this file does the long way.
+ * A Composio session is created only for the user's sandbox/workbench path. The session is
+ * scoped to the acting user, enables the remote sandbox explicitly, and is kept behind this
+ * adapter so ordinary app actions continue to use the governed per-call path.
  *
  * EVERY LISTING PASSES AN EXPLICIT LIMIT AND EVERY LISTING IS READ TO THE END OF ITS CURSOR.
  * Composio's default page is 20, which is smaller than the number of actions Gmail alone publishes,
@@ -944,7 +941,7 @@ function appOf(row: VendorToolkit, position: number): BrokerApp {
   const name = textOf(row.name);
   if (name === null) {
     throw new BrokerRefusalError(
-      `Composio sent ${sent(row.name)} where the name of ${at} belongs, and ${slug} is a slug rather than a title, so there is nothing to show an administrator choosing between apps. ${VENDOR_SHAPE_REMEDY}`,
+      `Composio sent ${sent(row.name)} where the name of ${at} belongs, and ${slug} is a slug rather than a title, so there is nothing to show somebody choosing between apps. ${VENDOR_SHAPE_REMEDY}`,
     );
   }
 
@@ -1432,7 +1429,7 @@ function withdrawalDeclined(
  *
  * A PLAIN `Error` RATHER THAN A `BrokerRefusalError`, because this listing's failures are not
  * answered to a route. `./composio` records them in an app's `lastError` for an administrator to
- * read on its Plugins page, and `listingSentence` passes an authored message through untouched.
+ * read on App connections, and `listingSentence` passes an authored message through untouched.
  */
 function actionOf(
   row: VendorToolRow,
@@ -1734,7 +1731,7 @@ function vendorRefusal(
      */
     case "ComposioToolNotFoundError":
       return refusal(
-        `Composio would not hand that action over at the version this deployment recorded for it, so ${outcome}. This deployment's @composio/core reports an action Composio has withdrawn and a request for one that failed — a timeout, a dropped connection, a 500, a refused key — under one condition and says nothing that tells the two apart, so neither can this deployment. Refreshing ${app}'s tools on its Plugins page records what Composio publishes now, which settles it where the action is gone; where every action of every app is failing the same way, it is the request rather than the action, and Composio's status page is where that shows.`,
+        `Composio would not hand that action over at the version this deployment recorded for it, so ${outcome}. This deployment's @composio/core reports an action Composio has withdrawn and a request for one that failed — a timeout, a dropped connection, a 500, a refused key — under one condition and says nothing that tells the two apart, so neither can this deployment. Refreshing ${app}'s tools on App connections records what Composio publishes now, which settles it where the action is gone; where every action of every app is failing the same way, it is the request rather than the action, and Composio's status page is where that shows.`,
       );
 
     /*
@@ -1745,7 +1742,7 @@ function vendorRefusal(
      */
     case "ComposioToolVersionRequiredError":
       return refusal(
-        `Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so ${outcome}. A dated version is recorded when an app's actions are listed, so refreshing ${app}'s tools on its Plugins page replaces "latest" with a version Composio will accept.`,
+        `Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so ${outcome}. A dated version is recorded when an app's actions are listed, so refreshing ${app}'s tools on App connections replaces "latest" with a version Composio will accept.`,
       );
 
     /*
@@ -2343,7 +2340,7 @@ export type ComposioVendor = {
  * and the two are otherwise indistinguishable. The name is the only field this deployment gets to
  * choose, so it is where the provenance goes.
  */
-const CONFIG_SUFFIX = "(OpenBot)";
+const CONFIG_SUFFIX = "(Remii)";
 
 /**
  * How many different unrecognised statuses one refusal names before it stops naming them.
@@ -2868,7 +2865,15 @@ export function buildComposioClient(
         ),
       );
 
-      return tools.map((row, position) => actionOf(row, position, toolkit));
+      const seen = new Set<string>();
+      const unique = tools.filter((row) => {
+        if (typeof row.slug !== "string" || row.slug.trim() === "") return true;
+        const slug = row.slug.trim();
+        if (seen.has(slug)) return false;
+        seen.add(slug);
+        return true;
+      });
+      return unique.map((row, position) => actionOf(row, position, toolkit));
     },
 
     async execute(call, args): Promise<ComposioResult> {
@@ -2962,7 +2967,7 @@ export function buildComposioClient(
         throw new Error(
           `${call.slug} was not sent to Composio: this connection is for ${call.toolkit}, and Composio resolves that action to ${
             ran ?? "no app at all"
-          }. Refreshing this app's tools on its Plugins page recovers it where the action was recorded against a url that has since changed.`,
+          }. Refreshing this app's tools on App connections recovers it where the action was recorded against a url that has since changed.`,
         );
       }
 
@@ -2986,6 +2991,49 @@ export function buildComposioClient(
           }),
       );
     },
+  };
+
+  /**
+   * Automatically provisions this deployment's auth config at Composio on the fly if
+   * one does not exist yet. This ensures apps like Gmail can be connected immediately
+   * without requiring an administrator to manually remove and re-add them.
+   */
+  const _ensureAuthConfigIfMissing = async (slug: string) => {
+    const current = await configsFor(slug);
+    if (current.ours.length > 0 || current.unreadable.length > 0) {
+      return current;
+    }
+
+    try {
+      const apps = await broker.listApps();
+      const found = apps.find((a) => a.slug === slug);
+      if (found) {
+        await broker.ensureAuthConfig({
+          toolkit: found.slug,
+          name: found.name,
+          connection: found.connection,
+        });
+        return await configsFor(slug);
+      }
+
+      const detail = (await askVendor(
+        { outcome: `what ${slug} asks for could not be read`, app: slug },
+        () => vendor.toolkits.retrieve(slug) as Promise<any>,
+      )) as any;
+      if (detail && typeof detail === "object") {
+        const conn = connectionOf(detail);
+        const name = textOf(detail.name) ?? slug;
+        await broker.ensureAuthConfig({
+          toolkit: slug,
+          name,
+          connection: conn,
+        });
+        return await configsFor(slug);
+      }
+    } catch {
+      // Auto-provisioning failed; caller will handle ours.length === 0
+    }
+    return current;
   };
 
   const broker: ComposioBroker = {
@@ -3249,7 +3297,7 @@ export function buildComposioClient(
          * {@link ComposioBroker.deleteAuthConfig} states.
          *
          * IT IS A BLOCK, AND THE BLOCK IS THE POINT. The app's row survives this throw —
-         * `removeServer` deletes it only after this returns — so the app stays on its Plugins page
+         * `removeServer` deletes it only after this returns — so the app stays on App connections
          * and stays removable, which is the one thing a silent success took away. The remedy is an
          * operator's and it is one act in a dashboard: rename the config back so it ends with the
          * suffix and remove the app again, which finishes the withdrawal, or satisfy yourself that
@@ -3305,7 +3353,7 @@ export function buildComposioClient(
        * unreadable next time.
        *
        * STILL A REFUSAL, WHICH IS THE HALF THAT DOES NOT MOVE. `removeServer` deletes the app's row
-       * only after this returns, so the app stays on its Plugins page and stays removable; a quiet
+       * only after this returns, so the app stays on App connections and stays removable; a quiet
        * return here would file the app away over rows that may be this deployment's own configs,
        * holding live grants, under an answer it could not read.
        */
@@ -3349,7 +3397,7 @@ export function buildComposioClient(
          * reported after — {@link readableConfigs} says why at length: refusing before the first
          * delete meant one unreadable row made an app permanently unremovable, with the readable
          * configs of ours standing the whole time. It is still a refusal, so `removeServer` does
-         * not delete the app's row and the app stays on its Plugins page.
+         * not delete the app's row and the app stays on App connections.
          *
          * TWO CLAUSES BECAUSE THEY ARE TWO REMEDIES. A config Composio refused is one a second press
          * reaches. A row it described with no id or no name is not — it will be exactly as
@@ -3424,7 +3472,7 @@ export function buildComposioClient(
           );
         }
         throw new BrokerRefusalError(
-          `This deployment has no authorization config at Composio for ${toolkit}, so there is nothing to connect an account against. An administrator removing the app on its Plugins page and adding it again creates one.`,
+          `This deployment has no authorization config at Composio for ${toolkit}, so there is nothing to connect an account against. Removing the app under App connections and adding it again creates one.`,
         );
       }
 
@@ -3501,7 +3549,7 @@ export function buildComposioClient(
         const disabled = ours.length - unsettled.length;
         if (disabled > 0) {
           left.push(
-            `Composio calls ${disabled} of this deployment's ${ours.length} authorization configs for ${toolkit} disabled, and an administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
+            `Composio calls ${disabled} of this deployment's ${ours.length} authorization configs for ${toolkit} disabled. Enable it in Composio's dashboard, or remove the app under App connections and add it again.`,
           );
         }
         if (unsettled.length > 0) {
@@ -3566,16 +3614,9 @@ export function buildComposioClient(
        * about this deployment's own pages. It is never logged and never quoted in the refusal
        * below, for the reason the url itself is not.
        *
-       * NO `allowMultiple`, WHICH LEAVES THE VENDOR ENFORCING THE RULE THIS DEPLOYMENT ALREADY
-       * STATES. One person holds one account per app here, because the call that runs an action
-       * names the person and not the account — so with two accounts attached, which mailbox a Bot
-       * reads would be Composio's choice and nothing here could say which one it had been. The
-       * route refuses a second connection before it ever reaches this method, and that refusal is
-       * the sentence a person reads; this is the same rule one layer further down, where the
-       * vendor is the only party that can still see an account this deployment's rows have lost
-       * track of. `toolkits.authorize` passed `allowMultiple: true` unconditionally — the SDK
-       * calls it a "magic function" for exactly that — which is the opposite of what this
-       * deployment wants.
+       * `allowMultiple: true`, so the vendor does not enforce one account per person per app.
+       * Multi-account storage (one row per vendor account) is what decides which account a call
+       * runs in; product-level limits on extra connections live in the routes, not here.
        *
        * THE ANSWER IS AN OBJECT BY CONSTRUCTION AND ITS ONE FIELD IS NOT. `link` builds what it
        * returns with `createConnectionRequest(client, response.connected_account_id, INITIATED,
@@ -3595,6 +3636,7 @@ export function buildComposioClient(
         () =>
           vendor.connectedAccounts.link(userId, config.id, {
             callbackUrl: returnUrl,
+            ...({ allowMultiple: true } as any),
           }),
       );
 
@@ -3678,6 +3720,29 @@ export function buildComposioClient(
           })
         ).length > 0
       );
+    },
+
+    async listAccounts({ userId, toolkit }): Promise<ConnectedAccountItem[]> {
+      const rows = await accountsFor(userId, toolkit, CONNECTED);
+      return rows
+        .map((r: any) => {
+          const id = textOf(r.id) ?? "";
+          const label =
+            textOf(r.alias) ??
+            textOf(r.data?.email) ??
+            textOf(r.params?.email) ??
+            textOf(r.data?.username) ??
+            textOf(r.params?.username) ??
+            (id ? `Account (${id.slice(0, 8)})` : null);
+          return {
+            id,
+            label,
+            status: textOf(r.status) ?? "ACTIVE",
+            createdAt: textOf(r.createdAt) ?? new Date().toISOString(),
+            updatedAt: textOf(r.updatedAt) ?? undefined,
+          };
+        })
+        .filter((a) => a.id.length > 0);
     },
 
     async revoke({ userId, toolkit }): Promise<boolean> {
@@ -4104,7 +4169,7 @@ export function buildComposioClient(
        */
       if (mode === undefined || mode === null) {
         throw new BrokerRefusalError(
-          `Composio no longer publishes a ${authScheme} connection for ${toolkit}, and ${toolkit}'s authorization config here was created as ${authScheme}, so there is nothing to ask this person for — and an empty form is a box they cannot fill in and a connection carrying no credential at all. An administrator removing the app on its Plugins page and adding it again is what records the scheme Composio publishes for it now.`,
+          `Composio no longer publishes a ${authScheme} connection for ${toolkit}, and ${toolkit}'s authorization config here was created as ${authScheme}, so there is nothing to ask this person for — and an empty form is a box they cannot fill in and a connection carrying no credential at all. Removing the app under App connections and adding it again is what records the scheme Composio publishes for it now.`,
         );
       }
       /*
@@ -4423,7 +4488,7 @@ export function buildComposioClient(
           );
         }
         throw new BrokerRefusalError(
-          `This deployment has no authorization config at Composio for ${toolkit}, so there is nothing to connect an account against and nothing was sent. An administrator removing the app on its Plugins page and adding it again creates one.`,
+          `This deployment has no authorization config at Composio for ${toolkit}, so there is nothing to connect an account against and nothing was sent. Removing the app under App connections and adding it again creates one.`,
         );
       }
 
@@ -4464,7 +4529,7 @@ export function buildComposioClient(
         const disabled = ours.length - unsettled.length;
         if (disabled > 0) {
           left.push(
-            `Composio calls ${disabled} of this deployment's ${ours.length} authorization configs for ${toolkit} disabled, and an administrator can enable it in Composio's dashboard, or remove the app on its Plugins page and add it again.`,
+            `Composio calls ${disabled} of this deployment's ${ours.length} authorization configs for ${toolkit} disabled. Enable it in Composio's dashboard, or remove the app under App connections and add it again.`,
           );
         }
         if (unsettled.length > 0) {
@@ -4757,8 +4822,47 @@ export function createComposioClient(apiKey: string): {
      */
   });
   const client = composio.getClient();
+  type WorkbenchSession = Awaited<ReturnType<typeof composio.sessions.create>>;
+  const workbenchSessions = new Map<string, Promise<WorkbenchSession>>();
+  const sessionFor = (userId: string) => {
+    let sessionPromise = workbenchSessions.get(userId);
+    if (!sessionPromise) {
+      sessionPromise = composio.sessions.create(userId, {
+        mcp: true,
+        manageConnections: false,
+        sandbox: {
+          enable: true,
+          enableProxyExecution: true,
+        },
+      });
+      workbenchSessions.set(userId, sessionPromise);
+    }
+    return sessionPromise;
+  };
+  const workbench = {
+    prepare: async (userId: string) => {
+      await sessionFor(userId);
+    },
+    execute: async (request: {
+      userId: string;
+      toolSlug: "COMPOSIO_REMOTE_WORKBENCH" | "COMPOSIO_REMOTE_BASH_TOOL";
+      args: Record<string, unknown>;
+      signal?: AbortSignal;
+    }) => {
+      try {
+        request.signal?.throwIfAborted();
+        const session = await sessionFor(request.userId);
+        const result = await session.execute(request.toolSlug, request.args);
+        request.signal?.throwIfAborted();
+        return result;
+      } catch (error) {
+        workbenchSessions.delete(request.userId);
+        throw error;
+      }
+    },
+  };
 
-  return buildComposioClient({
+  const built = buildComposioClient({
     tools: {
       // The listing is the raw client's because the wrapper has no cursor; the single-tool read and
       // the execute stay the SDK's, because both are one call about one action and neither pages.
@@ -4801,4 +4905,8 @@ export function createComposioClient(apiKey: string): {
       delete: (id, params) => client.connectedAccounts.delete(id, params),
     },
   });
+  return {
+    ...built,
+    broker: { ...built.broker, workbench },
+  };
 }

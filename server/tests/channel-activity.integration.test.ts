@@ -218,6 +218,9 @@ describe("channel activity", () => {
       text: "Categorized three expenses.",
     });
 
+    // A `Date`, not a string. `channelSummaryDto` is the ROUTE's projection; this is the store, which
+    // hands back its own row — so the ISO serialisation is somebody else's business and this test
+    // should not be asserting it. `activity` is a real store field and does belong here.
     expect((await store.list(owner)).channels).toEqual([
       {
         ...channel,
@@ -229,6 +232,9 @@ describe("channel activity", () => {
         createdAt: expect.any(Date),
         pinned: false,
         lastReadAt: null,
+        // Present, and null: a channel has had no live turn here. Named because `toEqual` is exact
+        // and the field is a real one the roster carries.
+        activity: null,
       },
     ]);
   });

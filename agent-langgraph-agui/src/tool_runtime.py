@@ -1,7 +1,7 @@
 """The current run's tools, with the same ownership contract as agent-langgraph.
 
 Computer/UI tools finish the run for the surface to execute and resume. Only tools
-marked by OpenBot's server execute here, through its signed callback. The request
+marked by Remii's server execute here, through its signed callback. The request
 context is deliberately outside graph state: assertions must never enter a
 checkpoint, model message, or AG-UI state snapshot.
 """
@@ -28,7 +28,7 @@ class RunTools:
     assertion: str = field(default="", repr=False)
 
 
-_current: ContextVar[RunTools | None] = ContextVar("openbot_run_tools", default=None)
+_current: ContextVar[RunTools | None] = ContextVar("remii_run_tools", default=None)
 
 
 def current_tools() -> RunTools:
@@ -42,8 +42,8 @@ class UnofferedToolError(ValueError):
 class ToolAwareAgent(ParallelToolAgent):
     async def run(self, input: RunAgentInput):
         props = input.forwarded_props if isinstance(input.forwarded_props, dict) else {}
-        names = props.get("openbotDeploymentTools", [])
-        assertion = props.get("openbotRun", "")
+        names = props.get("remiiDeploymentTools", [])
+        assertion = props.get("remiiRun", "")
         context = RunTools(
             tools=tuple(input.tools or []),
             context=tuple(input.context or []),
@@ -63,10 +63,10 @@ class ToolAwareAgent(ParallelToolAgent):
                 for key, value in props.items()
                 if key
                 not in {
-                    "openbotRun",
-                    "openbotDeploymentTools",
-                    "openbot_run",
-                    "openbot_deployment_tools",
+                    "remiiRun",
+                    "remiiDeploymentTools",
+                    "remii_run",
+                    "remii_deployment_tools",
                 }
             }
             async with aclosing(
@@ -164,7 +164,7 @@ async def _call_tool(call, context):
                 True,
             )
         url = (
-            os.environ.get("OPENBOT_TOOL_URL")
+            os.environ.get("REMII_TOOL_URL")
             or "http://127.0.0.1:3001/api/agent-tools/call"
         )
         try:
@@ -172,7 +172,7 @@ async def _call_tool(call, context):
             async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
                 response = await client.post(
                     url,
-                    headers={"x-openbot-agent-token": token},
+                    headers={"x-remii-agent-token": token},
                     json={
                         "name": call["name"],
                         "args": call["args"],

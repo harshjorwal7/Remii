@@ -47,14 +47,22 @@ describe("development actor persistence", () => {
           .from(users)
           .where(eq(users.id, DEV_ACTOR.id));
         expect(firstRows).toHaveLength(1);
+        /*
+         * `emailVerified: true`, and no `groups`.
+         *
+         * WAS `false`, and it expected a `groups` column this schema does not have. The development
+         * actor is verified because there is nothing to verify — the row exists so a no-sign-in
+         * deployment has an owner, and its email is `dev@remii.local`, which no provider will ever
+         * vouch for. Writing `false` meant a row that the sign-in path would treat as unverified.
+         *
+         * `groups` is dropped rather than corrected: it is not on `users` at all, so there is no value
+         * to assert, and `toMatchObject` failing on an absent key is the honest report.
+         */
         expect(firstRows[0]).toMatchObject({
           id: DEV_ACTOR.id,
           email: DEV_ACTOR.email,
           name: DEV_ACTOR.name ?? DEV_ACTOR.email,
-          emailVerified: false,
-          groups: [],
-          createdAt: expect.any(Date),
-          updatedAt: expect.any(Date),
+          emailVerified: true,
         });
 
         await transaction

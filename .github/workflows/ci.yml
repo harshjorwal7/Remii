@@ -50,43 +50,23 @@ jobs:
             exit 1
           fi
 
-  # The two packages that are deployables in their own right rather than root workspaces. Root
-  # `typecheck` is `bun run --filter '*' typecheck`, and `--filter '*'` enumerates `workspaces`, which
-  # is app, server and worker. So both of these ship a `typecheck` script that nothing has ever run:
-  # `agent-computer` holds the only `spawn` in the deployment and `supervisor` is the only thing
-  # holding a Docker socket, which is a poor pair to leave untyped. Both are clean today, so this
-  # changes nothing about main and only stops the next change being the first one a type checker sees.
+  # No `deployables` matrix any more, and the comment that used to sit here is the reason it is
+  # worth saying so plainly.
   #
-  # Not by adding them to `workspaces`: each is built from its own lockfile and the Dockerfile depends
-  # on that, so they are installed separately here for the same reason they are installed separately
-  # there. A matrix rather than two jobs, so each package reports its own result and a third one is a
-  # line in the list below and nothing in `verify`, which sees the whole matrix as one entry.
-  deployables:
-    name: types (${{ matrix.package }})
-    runs-on: ubuntu-latest
-    strategy:
-      # One red package must not hide whether the other is red too.
-      fail-fast: false
-      matrix:
-        package: [agent-computer, supervisor]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.3.14
-      # Two installs, and the root one is load-bearing. Both packages set `types: ["bun"]` in
-      # their tsconfig while `@types/bun` is a root devDependency, so tsc resolves it by walking up
-      # to the root node_modules. Without it the typecheck fails with TS2688 on a fresh checkout.
-      # This is the order the image uses for the same reason: Dockerfile installs at the root
-      # before installing agent-computer.
-      - run: bun install --frozen-lockfile
-      - run: bun install --frozen-lockfile
-        working-directory: ${{ matrix.package }}
-      - run: bun run typecheck
-        working-directory: ${{ matrix.package }}
-
+  # It typechecked `agent-computer` and `supervisor` — two packages that were deployables in their
+  # own right rather than root workspaces, each built from its own lockfile, and installed here
+  # separately for exactly that reason. Root `typecheck` is `bun run --filter '*' typecheck`, and
+  # `--filter '*'` enumerates `workspaces`, which is app, server and worker, so a package outside that
+  # list needed a job of its own to be typed at all.
+  #
+  # Both existed to run a Chromium container per Bot. The computer is a Daytona desktop now,
+  # provisioned per person and reached over Daytona's API, so neither has anything left to do, neither
+  # is in `.github/published-images.json`, and neither is built. A matrix over them would fail on the
+  # checkout rather than on anything worth catching.
+  #
+  # The typecheck they gave is not lost, only relocated: `server/src/computer/` holds that logic now
+  # and is inside the `server` workspace, so `bun run --filter '*' typecheck` covers it — including
+  # `provisioner.ts`, which is where the Daytona SDK is called at all.
   chart:
     name: chart (${{ matrix.target }})
     runs-on: ubuntu-latest
@@ -495,9 +475,9 @@ jobs:
       - if: always()
         run: docker rm -f openbot-ci >/dev/null 2>&1 || true
 
-  # The five images the release publishes alongside the one above. Nothing else here builds them:
-  # they are built by `docker compose up --build`, which only the smoke journey runs and which
-  # cannot run in CI. So a broken `supervisor/Dockerfile` used to surface during a release, after
+  # The component images the release publishes alongside the one above. Nothing else here builds
+  # them: they are built by `docker compose up --build`, which only the smoke journey runs and
+  # which cannot run in CI. So a broken component Dockerfile used to surface during a release, after
   # the `openbot` image had already been pushed, which is the one failure this repository calls out
   # as leaving a published image with nothing pointing at it.
   #
@@ -511,9 +491,8 @@ jobs:
   component-dockerfiles:
     name: component dockerfiles
     runs-on: ubuntu-latest
-    # The same cost gate as `image` above, and for the same reason: `agent-computer` pulls
-    # Playwright's base and `server` builds the app, so this is minutes rather than seconds. On main
-    # and through the release's workflow_call it always runs.
+    # The same cost gate as `image` above, and for the same reason: `server` builds the app, so this
+    # is minutes rather than seconds. On main and through the release's workflow_call it always runs.
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')

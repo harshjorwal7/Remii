@@ -81,7 +81,7 @@ async function renderPicker(onChoose: (choice: unknown) => void = () => {}) {
       <ProviderPicker
         chosen={null}
         held={{}}
-        root=" /tmp/openbot-provider-root "
+        root=" /tmp/remii-provider-root "
         onBack={() => {}}
         onChoose={onChoose}
       />,
@@ -102,7 +102,7 @@ async function renderPickerWithHeld(
       <ProviderPicker
         chosen={null}
         held={held}
-        root=" /tmp/openbot-provider-root "
+        root=" /tmp/remii-provider-root "
         onBack={() => {}}
         onChoose={onChoose}
       />,
@@ -117,7 +117,7 @@ test("a completed plan sign-in enables and submits only its issuing provider", a
   invokeHandler = async (command, args) => {
     if (command === "providers") return providers;
     if (command === "begin_chatgpt_sign_in") {
-      expect(args).toEqual({ root: "/tmp/openbot-provider-root" });
+      expect(args).toEqual({ root: "/tmp/remii-provider-root" });
       return "https://chatgpt.test";
     }
     if (command === "finish_chatgpt_sign_in") return "chatgpt-token";
@@ -225,7 +225,7 @@ for (const provider of providers) {
         if (session === "fresh") {
           const signIn = provider.id === "openai" ? "chatgpt" : "claude";
           if (command === `begin_${signIn}_sign_in`) {
-            expect(args).toEqual({ root: "/tmp/openbot-provider-root" });
+            expect(args).toEqual({ root: "/tmp/remii-provider-root" });
             return "https://sign-in.example";
           }
           if (command === `finish_${signIn}_sign_in`) return planToken;

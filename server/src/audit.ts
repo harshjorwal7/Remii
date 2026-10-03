@@ -25,6 +25,9 @@ const sensitiveKeys = new Set([
   "content",
   "credential",
   "credentials",
+  "card_number",
+  "cardnumber",
+  "cvv",
   "document_content",
   "documentcontent",
   "encrypted_value",
@@ -44,6 +47,22 @@ const sensitiveKeys = new Set([
   "toolarguments",
   "tool_result",
   "toolresult",
+  /*
+   * The vault's own columns, which are envelopes rather than plaintext and so are harmless where
+   * they are, but which are worth redacting anyway: a payload carrying one is a payload that learned
+   * to hold the vault's business, and the rule that stops it is cheaper than an argument about
+   * whether an AES-GCM ciphertext is sensitive. `value` and `number` are here because the vault's
+   * agent items and cards use them, and a redaction list that only matched the credential table's
+   * spelling would let the new tables be the way secrets start reaching the trail.
+   */
+  "card_number_encrypted",
+  "cvv_encrypted",
+  "encrypted_card_number",
+  "encrypted_cvv",
+  "encrypted_password",
+  "encrypted_value",
+  "password_encrypted",
+  "value_encrypted",
 ]);
 
 export const auditEventTypes = [
@@ -79,20 +98,6 @@ export const auditEventTypes = [
    * `payload.mechanism` names how, so a later hard delete is distinguishable from this one.
    */
   "channel.deleted",
-  /**
-   * An address this deployment declined to dial for a Bot, and why.
-   *
-   * The stored endpoint is re-checked on the way out of every run, and so is each address it
-   * redirects to. When one of those is refused the run fails and the person sees why, which is the
-   * whole of what anybody learns without this row.
-   *
-   * That is the wrong shape for the thing worth knowing. A registration is one person at one moment;
-   * a stored agent quietly beginning to redirect somewhere it should not is a fact about an endpoint,
-   * happening on every run, with nobody watching. It reads as an agent being flaky until somebody can
-   * count it. The row names the address and the reason, so a reader can tell an agent that moved from
-   * one aimed at the metadata endpoint.
-   */
-  "agent.dial_refused",
   /**
    * A Bot's stream stopped producing anything and the turn was ended for it.
    *
@@ -327,46 +332,17 @@ export const auditEventTypes = [
    * broke, and filing a broken query as a policy event teaches a reader to distrust the policy
    * events that are real.
    */
-  "component.function_granted",
-  "component.function_revoked",
   "component.function_called",
   "component.function_refused",
   "component.function_failed",
   /*
-   * Who may use this deployment, and at what level.
+   * Getting in.
    *
-   * On the trail rather than only in the table, because the table holds the current answer and this
-   * is the only place that says who changed it and when. "Why does this person have admin" and "who
-   * removed them" are questions a table of current state cannot answer at all.
-   */
-  "person.role_changed",
-  "person.access_revoked",
-  "person.access_restored",
-  /*
-   * Getting in, and being turned away.
-   *
-   * The trail had nothing about sign-in at all, which left two questions unanswerable. Anybody who
-   * could edit `INITIAL_ADMIN_EMAILS` granted themselves the administrator role on their next
-   * sign-in and no row anywhere said it had happened, because the floor is re-applied silently by
-   * design. And revoking somebody deletes their sessions, which were the only record that they had
-   * ever been here: after a revocation the deployment could not show that the person had signed in,
-   * let alone when or how often.
-   *
-   * `session.refused` is the one somebody investigating actually reaches for. A revoked person still
-   * holding a bookmark, or an address outside the deployment trying the front door, produces nothing
-   * else anywhere.
+   * Individual-user SaaS has no roles to grant, nobody to revoke, and no
+   * company identity provider to register: every account that can
+   * authenticate may sign in, and the signed-in row is the trail of it.
    */
   "session.signed_in",
-  "session.refused",
-  "person.admin_by_configuration",
-  /*
-   * A company's own identity provider, added or taken away.
-   *
-   * Whoever holds this decides who can sign in at all, so the two ends of its life belong on the
-   * trail next to the roles it hands out.
-   */
-  "identity_provider.registered",
-  "identity_provider.removed",
   /*
    * What a Bot is and what it may reach.
    *
@@ -435,6 +411,32 @@ export const auditEventTypes = [
    * withholds; the offered credential never does.
    */
   "routines.dispatch_refused",
+  /*
+   * Something read a secret out of somebody's vault, and why that is worth a row.
+   *
+   * Every other event here answers a question about a decision. This one answers a question about a
+   * secret leaving the place it was kept, which is the only event in this list where the absence of
+   * a record is indistinguishable from it never having happened. So: a person copying a password out
+   * of their own vault is recorded (`vault.value_read`), and a Bot being handed one mid-run is
+   * recorded with the coworker that asked (`vault.value_used`) — because "who had my API key and
+   * when" is precisely the question a vault cannot answer from its own rows, which only know that
+   * something was used.
+   *
+   * NEVER A VALUE. The payload carries the kind, the item's label, and the outcome. `redactAuditPayload`
+   * would drop a value that arrived under a name on the list, but a secret that arrives under a name
+   * somebody invented later is the case the list cannot cover, so the call sites here pass no value in
+   * the first place and the list is the second line rather than the first.
+   */
+  "vault.value_read",
+  "vault.value_used",
+  /**
+   * A save, an edit or a delete in somebody's vault.
+   *
+   * Recorded for the same reason as the two above, and with the same discipline: the kind of item,
+   * its label, and whether anything changed — never the password, the number or the value, and never
+   * even the username, which is not secret but is not what this row is for.
+   */
+  "vault.item_changed",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];

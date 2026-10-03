@@ -8,12 +8,12 @@ import { SidebarToggle, useSidebarToggleVisible } from "./sidebar-toggle";
 /**
  * The frame every configuration screen sits in.
  *
- * WHAT THIS IS FIXING. Admin was nine pages that shared no layout: four container widths plus three
- * pages with no container at all, four heading sizes, four padding schemes, and a sidebar 20px wider
- * than the rest of the app. Three of those pages imported nothing from `components/ui` and drew
- * their own buttons, inputs and tables. The result did not read as a different screen, it read as a
- * different application — which is the impression an administrator forms at exactly the moment they
- * are deciding whether to trust it with credentials.
+ * WHAT THIS IS FIXING. The settings screens were once nine pages that shared no layout: four
+ * container widths plus three pages with no container at all, four heading sizes, four padding
+ * schemes, and a sidebar 20px wider than the rest of the app. Three of those pages imported nothing
+ * from `components/ui` and drew their own buttons, inputs and tables. The result did not read as a
+ * different screen, it read as a different application — which is the impression somebody forms at
+ * exactly the moment they are deciding whether to trust it with their credentials.
  *
  * The shape was never in doubt: Skills and Settings already had it. So this is that shape, extracted
  * once and used everywhere, INCLUDING by Skills and Settings. Leaving those two as hand-written
@@ -41,6 +41,7 @@ export function PageShell({
   children,
   className,
   description,
+  icon,
   title,
   width = "prose",
   backButton,
@@ -50,6 +51,7 @@ export function PageShell({
   children: React.ReactNode;
   className?: string;
   description?: React.ReactNode;
+  icon?: React.ReactNode;
   title: string;
   width?: ShellWidth;
   backButton?: {
@@ -122,7 +124,10 @@ export function PageShell({
         >
           <header className="flex flex-col gap-2">
             <div className="flex flex-row items-center justify-between gap-4">
-              <h1 className="font-bold text-2xl">{title}</h1>
+              <div className="flex items-center gap-3 min-w-0">
+                {icon}
+                <h1 className="font-bold text-2xl truncate">{title}</h1>
+              </div>
               {action}
             </div>
             {description ? (

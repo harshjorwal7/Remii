@@ -1,4 +1,5 @@
 import { useForm } from "@tanstack/react-form";
+import { SkillRepo } from "@/components/skills/skill-repo";
 import { SkillTools } from "@/components/skills/skill-tools";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,12 +13,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { type SkillFormValues, skillFormSchema } from "@/lib/skills/form";
 
 /**
- * The four things a person decides about a skill: what they type, what it is called, what it is
- * for, and what the Bot is actually told.
+ * The five things a person decides about a skill: what they type, what it is called, what it is
+ * for, what the Bot is actually told, and which public repository it is about.
  *
  * Written as its own component rather than inline in the panel because creating and editing a skill
- * are the same four fields, and the second one is coming — a skill whose instructions can only be
+ * are the same five fields, and the second one is coming — a skill whose instructions can only be
  * set once is a skill nobody will correct.
+ *
+ * THE ORDER OF THE LAST TWO IS A CLAIM. Repository before Tools, because both answer "what will this
+ * Bot have when it runs", and the repository is the one that decides whether there is a new capability
+ * on the table at all: it is the only field here that can add three tools to a run, where the tools
+ * list can only narrow what a grant already gave. Somebody reading the form top to bottom meets the
+ * widening one first.
  */
 export function SkillFields({
   defaultValues,
@@ -188,6 +195,14 @@ export function SkillFields({
               </Field>
             );
           }}
+        </form.Field>
+        <form.Field name="repo">
+          {(field) => (
+            <SkillRepo
+              onChange={field.handleChange}
+              value={field.state.value}
+            />
+          )}
         </form.Field>
         <form.Field name="tools">
           {(field) => (

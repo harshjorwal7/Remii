@@ -33,7 +33,7 @@ function signedIn(): MiddlewareHandler<{ Variables: AppVariables }> {
   return async (context, next) => {
     context.set("actor", {
       id: "user-1",
-      email: "person@openbot.test",
+      email: "person@remii.test",
       role: "user",
     } as never);
     await next();
@@ -80,8 +80,12 @@ function app(input: {
     store as never,
     signedIn(),
     async () => true,
+    // `canManageBot`, a fourth POSITIONAL argument ahead of the options bag. Passing the bag in its
+    // place left `connect` undefined, so `connectedAccountsUrlFor` got no app URL and every redirect
+    // came back origin-relative — which on this deployment's API origin is a page that does not exist.
+    async () => true,
     {
-      publicUrl: "https://openbot.example",
+      publicUrl: "https://remii.example",
       appUrl: "https://app.example",
       encryptionKey: KEY,
       personHasAccess: input.personHasAccess ?? (async () => true),
@@ -455,7 +459,7 @@ describe("a token endpoint that is not a usable address", () => {
           clientId: "dyn-1",
           clientSecret: "",
           code: "code-1",
-          redirectUri: "https://openbot.example/api/plugins/oauth/callback",
+          redirectUri: "https://remii.example/api/plugins/oauth/callback",
           verifier: "v-1",
         }),
       ).toBeNull();

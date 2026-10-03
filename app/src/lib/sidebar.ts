@@ -6,7 +6,8 @@
  * this app on a server, and nothing ever read that cookie back — so the preference lives here
  * instead, in the same shape and the same storage as the theme preference next door.
  */
-export const SIDEBAR_STORAGE_KEY = "openbot-sidebar";
+export const SIDEBAR_STORAGE_KEY = "remii-sidebar";
+export const LEGACY_SIDEBAR_STORAGE_KEY = "openbot-sidebar";
 
 /**
  * Only the exact stored `collapsed` starts the sidebar closed.

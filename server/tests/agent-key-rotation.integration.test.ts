@@ -3,35 +3,28 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { createAgentProfileStore } from "../src/agents/profile-store";
 import type { AgentActor } from "../src/agents/profile-types";
-import { createCredentialStore } from "../src/credentials";
 import { createDatabase } from "../src/db/client";
 import { testDatabaseUrl } from "./support/database";
 import { agentProfiles, agents, credentials, users } from "../src/db/schema";
 
 /**
- * Editing a Bot's key, against a real database.
+ * Editing a coworker, against a real database, on a pool of exactly one connection.
  *
- * The rotation tests elsewhere hand `storeAgentAuth` a fake store, which can answer any call
- * instantly and holds no locks. That is enough to prove which vault call is made and useless for
- * proving the call can be made at all: every failure this file exists to catch is a lock taken by
- * one connection and waited for by another, and a fake has neither.
+ * WAS about rotating a Bot's bearer key, and the pool size was the whole point: a second vault write
+ * on its own connection is a second session competing with the transaction the edit is already
+ * inside, and at `max: 1` it cannot even be handed a connection until that transaction ends — which
+ * it never will, because the transaction is awaiting the call.
  *
- * The pool is pinned to one connection deliberately. A second vault write on its own connection is
- * a second session competing with the transaction the edit is already inside, and at `max: 1` it
- * cannot even be handed a connection until that transaction ends — which it never will, because the
- * transaction is awaiting the call. The edit hangs until something times it out. At the driver's
- * default pool the same shape survives as a row-lock wait instead, slower to hit and identical in
- * effect, so one connection is the honest setting for the question being asked.
+ * That hazard is gone with the feature it was guarding. A coworker can no longer carry a key of its
+ * own, so an edit writes one row and one profile row inside the transaction and reaches for nothing
+ * outside it. The pool is still pinned to one connection, because the property worth keeping is the
+ * general one: an edit must return on a deployment that has no spare connection to hand out, which is
+ * what a laptop with everything else closed looks like.
  */
 
 const database = createDatabase(testDatabaseUrl(), { max: 1 });
 
-const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-const store = createCredentialStore(database);
-const profiles = createAgentProfileStore(database, undefined, {
-  store,
-  encryptionKey,
-});
+const profiles = createAgentProfileStore(database);
 
 const suite = randomUUID().slice(0, 8);
 const actor: AgentActor = { id: `user_${suite}`, role: "admin" };
@@ -60,7 +53,7 @@ async function within<T>(label: string, work: Promise<T>): Promise<T> {
   }
 }
 
-async function liveKeysFor(agentId: string) {
+async function liveCredentialsFor(agentId: string) {
   return database
     .select({ id: credentials.id })
     .from(credentials)
@@ -76,18 +69,17 @@ async function liveKeysFor(agentId: string) {
 beforeAll(async () => {
   await database.insert(users).values({
     id: actor.id,
-    email: `${actor.id}@openbot.test`,
-    name: "Key rotation tester",
+    email: `${actor.id}@remii.test`,
+    name: "Edit tester",
     emailVerified: true,
   });
 
   const profile = await profiles.create(actor, {
-    name: `key rotation ${suite}`,
+    name: `edit ${suite}`,
     title: "Tester",
-    roleDescription: "Holds a key that gets replaced.",
+    roleDescription: "Holds an instruction that gets edited.",
     visibility: "private",
-    endpoint: "https://example.invalid/agent",
-    auth: { header: "Authorization", value: "first-secret" },
+    systemPrompt: "First instruction.",
   });
   created.push(profile.id);
 });
@@ -98,64 +90,47 @@ afterAll(async () => {
       .delete(agentProfiles)
       .where(inArray(agentProfiles.agentId, created));
     await database.delete(agents).where(inArray(agents.id, created));
-    await database
-      .delete(credentials)
-      .where(inArray(credentials.keyId, created));
   }
   await database.delete(users).where(eq(users.id, actor.id));
   await database.$client.end();
 });
 
-describe("editing a Bot's key", () => {
-  test("returns, and leaves exactly one live credential", async () => {
+describe("editing a coworker", () => {
+  test("returns on a pool of one connection, and the edit is what landed", async () => {
     const [agentId] = created;
-    expect(await liveKeysFor(agentId)).toHaveLength(1);
-    const [before] = await liveKeysFor(agentId);
 
-    await within(
+    const edited = await within(
       "the edit",
       profiles.update(actor, agentId, {
-        name: `key rotation ${suite}`,
+        name: `edit ${suite}`,
         title: "Tester",
-        roleDescription: "Holds a key that gets replaced.",
+        roleDescription: "Second instruction.",
         visibility: "private",
-        endpoint: "https://example.invalid/agent",
-        auth: { header: "Authorization", value: "second-secret" },
       }),
     );
 
-    const live = await liveKeysFor(agentId);
-    expect(live).toHaveLength(1);
-    expect(live[0]?.id).not.toBe(before?.id);
+    expect(edited.name).toBe(`edit ${suite}`);
+    expect(edited.roleDescription).toBe("Second instruction.");
   });
 
-  test("the credential it replaced is revoked, not merely unreferenced", async () => {
+  test("a coworker runs on instructions only, and holds no credential of its own", async () => {
+    // The property that replaced key rotation: there is no key to rotate, so there is nothing for a
+    // vault write inside the transaction to contend on.
     const [agentId] = created;
-    const rows = await database
-      .select({ id: credentials.id, revokedAt: credentials.revokedAt })
-      .from(credentials)
-      .where(
-        and(eq(credentials.kind, "agent"), eq(credentials.keyId, agentId)),
-      );
-
-    expect(rows).toHaveLength(2);
-    expect(rows.filter((row) => row.revokedAt === null)).toHaveLength(1);
-    expect(rows.filter((row) => row.revokedAt !== null)).toHaveLength(1);
+    expect(await liveCredentialsFor(agentId)).toHaveLength(0);
   });
 
-  test("deleting the Bot retires the key it was still holding", async () => {
+  test("deleting the coworker returns on a pool of one connection too", async () => {
     const profile = await profiles.create(actor, {
-      name: `key deletion ${suite}`,
+      name: `deletion ${suite}`,
       title: "Tester",
-      roleDescription: "Holds a key until it is deleted.",
+      roleDescription: "Deleted before the deadline.",
       visibility: "private",
-      endpoint: "https://example.invalid/agent",
-      auth: { header: "Authorization", value: "only-secret" },
+      systemPrompt: "An instruction.",
     });
     created.push(profile.id);
 
-    expect(await liveKeysFor(profile.id)).toHaveLength(1);
     await within("the deletion", profiles.softDelete(actor, profile.id));
-    expect(await liveKeysFor(profile.id)).toHaveLength(0);
+    expect(await profiles.get(actor, profile.id)).toBeNull();
   });
 });

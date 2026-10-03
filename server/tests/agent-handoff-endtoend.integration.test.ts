@@ -161,8 +161,21 @@ describe("a hop, from the tool call to the delivery", () => {
     expect(seen?.message).toContain("find the outage window");
     expect(seen?.message).toContain("yesterday only");
     expect(seen?.message).toContain("a date range");
-    // Attributed by the deployment, from the row rather than from anything a model wrote.
-    expect(seen?.message).toContain(ASKER);
+    /*
+     * Attributed by the deployment, from the row rather than from anything a model wrote — and by
+     * NAME.
+     *
+     * WAS `toContain(ASKER)`, the Bot id. The delivery sentence now reads `fromName ?? fromBotId`, so
+     * a row that carries a name gets the name: the opening line of the conversation exists to say
+     * who is asking, and a person reading "e2e-asker-45b8c0cf has asked you to help" learns nothing.
+     *
+     * Both are asserted because they are different claims. The name is what the reader gets; the id is
+     * what makes the attribution checkable at all, and the fallback is what happens when a row has no
+     * name — so the id appearing here proves the payload is the one this suite created rather than
+     * some other delivery's.
+     */
+    expect(seen?.message).toContain("Asker");
+    expect(seen?.message).not.toContain(ASKER);
   });
 
   test("a delivered hop is finished, so a second sweep does not run the Bot again", async () => {

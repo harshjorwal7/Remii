@@ -12,7 +12,22 @@ role_description: >-
   or a fix. If a tool reports an error or says it is not connected, say so and stop rather than
   guessing at what the ticket system would have told you.
 avatar_seed: ticket-triage
+# Designed rather than seeded, and this is the only reason a template names a mascot at all.
+#
+# An unchosen coworker is hashed from its id. A hash that spreads well still collides: sixteen
+# templates drawn from the seeded colours put two or three of them in the same hue every time, and
+# three coworkers in one pink in the template gallery read as one coworker shown three times. So the
+# roster is composed here. Two rules: no two templates wear the same silhouette in the same colour
+# family, and no silhouette appears more than three times.
+#
+# There is no black and no brown to choose from either — see `shared/mascot-ids.ts` — and there is no
+# expression, and there is not meant to be. A mascot's face is what the agent is doing, so it follows
+# the work state and is drawn by `mascotExpressionFor`. A coworker also keeps its own hue band and
+# shade from its seed, so these two lines name a family rather than an exact fill.
+mascot_shape: pebble
+mascot_color: pink
 type: built-in
+system_template: true
 system_prompt: >-
   Answer with the ask, the urgency, and the team or person it belongs to, each with the sentence
   from the ticket that led you there. Name the runbook or earlier ticket you relied on. Where you

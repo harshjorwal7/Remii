@@ -135,6 +135,22 @@ export function ProposedSkillCard({
             </dd>
           </>
         ) : null}
+        {/*
+         * THE REPOSITORY, SHOWN BECAUSE IT CHANGES WHAT THE SKILL CAN DO.
+         *
+         * Everything else on this card is words the Bot wrote, and a person can read those and judge
+         * them. This one hands the Bot three tools it will not otherwise have — it is the only line on
+         * the card that adds capability to a run — and a person approving a skill should not have to
+         * open the form to find out which codebase it is about to be pointed at.
+         */}
+        {values.repo ? (
+          <>
+            <dt className="truncate text-muted-foreground">Repository</dt>
+            <dd className="min-w-0 break-words font-mono text-xs">
+              {values.repo.replace(/^https:\/\/github\.com\//, "")}
+            </dd>
+          </>
+        ) : null}
       </dl>
 
       <p className="mt-3 text-muted-foreground text-xs">Instructions</p>
@@ -145,8 +161,8 @@ export function ProposedSkillCard({
 
       {values.tools.length > 0 ? (
         <p className="mt-2 text-muted-foreground text-xs">
-          Naming a tool grants nothing. A Bot is offered these only if an
-          administrator has already granted them to it.
+          Naming a tool grants nothing. A Bot is offered these only if they have
+          already been granted to it.
         </p>
       ) : null}
 

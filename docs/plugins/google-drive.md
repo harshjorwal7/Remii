@@ -13,14 +13,13 @@ The tool names match Google's MCP server exactly, so a later swap back to it wou
 
 Setting it up takes two people, and neither can do the other's half:
 
-| Who               | Does                                                    | Where                                    |
-| ----------------- | ------------------------------------------------------- | ---------------------------------------- |
-| An administrator  | Registers the OAuth client and enables the connector    | Google Cloud console, then `/admin/plugins/google-drive` |
-| Each person       | Consents with their own Google account                  | `/settings/connected-accounts/google-drive`              |
+| Who             | Does                                              | Where                                                                                           |
+| --------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Whoever deploys | Registers the OAuth client and adds the connector | Google Cloud console, then the app's own page under `/settings/connected-accounts/google-drive` |
+| Each person     | Consents with their own Google account            | `/settings/connected-accounts/google-drive`                                                     |
+There is deliberately no endpoint for one person to connect an account on somebody else's behalf.
 
-There is deliberately no endpoint for an administrator to connect an account on somebody's behalf.
-
-## What an administrator does
+## What the person deploying it does
 
 ### 1. Enable the Drive API
 
@@ -42,51 +41,51 @@ credential is otherwise good is most often this API not being enabled on the pro
 Type **Web application**. Under **Authorised redirect URIs**, add this deployment's callback:
 
 ```
-<OPENBOT_PUBLIC_URL>/api/plugins/oauth/callback
+<REMII_PUBLIC_URL>/api/plugins/oauth/callback
 ```
 
 Locally that is `http://localhost:3001/api/plugins/oauth/callback` — port 3001, the API, not 3010,
 the app. The callback lands on the API and redirects back to the app afterwards.
 
-It has to match character for character: scheme, host, port, path, no trailing slash. OpenBot shows
-the exact string to paste under the **Connection** section of the plugin page, built from
-`OPENBOT_PUBLIC_URL` rather than from the incoming request — a redirect URI assembled from a request
-header is one an attacker has a say in. Copy it from there rather than typing it.
+It has to match character for character: scheme, host, port, path, no trailing slash. The exact
+string to paste is served by the server from `REMII_PUBLIC_URL` rather than assembled from the
+incoming request — a redirect URI built from a request header is one an attacker has a say in. Copy
+it from there rather than typing it.
 
 Keep the client ID and client secret for the next step.
 
-### 4. Enable the connector in OpenBot
+### 4. Add the connector
 
-At `/admin/plugins/google-drive`:
-
-1. Turn on **Enable for this deployment**.
-2. Open **OAuth client** and paste the client ID and secret. The secret is encrypted with
-   `KEY_ENCRYPTION_KEY` and never read back out to the browser.
-3. Press **Refresh tools**, which records the four read tools this connector implements.
+`POST /api/plugins/servers` with the catalogue key `google-drive` writes the row, and
+`POST /api/plugins/servers/google-drive/oauth-client` records the client against it. Both are
+ordinary per-user calls: every signed-in person is treated alike, and there is no role that could
+authorize one over another. The secret is encrypted with `KEY_ENCRYPTION_KEY` and never read back
+out to the browser. A refresh of the app's tool list then records the four read tools this connector
+implements.
 
 That completes setup. No personal account is needed to get this far — the tool list for this
-connector is OpenBot's own code rather than an answer from a remote server, so there is nothing to
+connector is Remii's own code rather than an answer from a remote server, so there is nothing to
 authenticate in order to read it.
 
-To check it actually works, use **Your account** on the same page: it connects *your* Google account
-and returns you here. That is a personal grant like anybody else's, reaching your documents only, and
-it is not part of configuring the connector — a deployment is correctly set up whether or not the
-administrator ever connects.
+To check it actually works, connect *your* Google account from the same page: that is a personal
+grant like anybody else's, reaching your documents only, and it is not part of adding the connector —
+the connector is correctly set up whether or not you ever connect.
 
 ### 5. Grant tools to a Bot
 
-Enabling the connector does not give any Bot access to it. Each tool is granted per Bot, the same as
-every other plugin tool. Every call then checks the grant, evaluates the action policy, and writes an
-audit row.
+Adding the connector does not give any Bot access to it. Each tool is granted per Bot, the same as
+every other plugin tool, and the grant is made on the coworker's own screen: open it from `/agents`
+and use its **Connection** tab. Every call then checks the grant, evaluates the action policy, and
+writes an audit row.
 
 ## What each person does
 
-At `/settings/connected-accounts`, Google Drive appears once an administrator has enabled it. Open it
-and press **Connect**. That leaves OpenBot for Google's own consent screen — the arrow on the button
+At `/settings/connected-accounts`, Google Drive appears once the connector has been added. Open it
+and press **Connect**. That leaves Remii for Google's own consent screen — the arrow on the button
 says so — and returns to the same page, which then reads **Connected** with the scope Google actually
 granted.
 
-Nothing is cached. OpenBot stores the refresh token and mints a short-lived access token for each
+Nothing is cached. Remii stores the refresh token and mints a short-lived access token for each
 call, so revoking access at Google takes effect on the next call rather than whenever a cache
 expires.
 
@@ -99,7 +98,7 @@ that would report access withdrawn when it had not been.
 
 ## Troubleshooting
 
-Every message below is what OpenBot actually shows. They are worth reading literally: the connector
+Every message below is what Remii actually shows. They are worth reading literally: the connector
 distinguishes "the credential was refused" from "the credential was accepted and the request was
 refused", and those have completely different fixes.
 
@@ -113,14 +112,14 @@ event type is the answer to "whose problem is this":
 | `mcp.call_succeeded` | The vendor answered.                                                    |
 
 A Bot that appears to have no access and leaves **no rows at all** never called the tool, which is a
-grant problem rather than a connection problem: check that the tool is granted to *that* Bot at
-`/admin/plugins/google-drive`. Enabling the connector and connecting your account both being done
-still leaves each tool ungranted.
+grant problem rather than a connection problem: check the coworker's own **Connection** tab, under
+`/agents`. Adding the connector and connecting your account both being done still leaves each tool
+ungranted.
 
 ### `redirect_uri_mismatch` on the consent screen
 
-Google is comparing the `redirect_uri` OpenBot sent against the list on the OAuth client, as exact
-strings. Compare the value shown under **Connection** on the plugin page with what is registered,
+Google is comparing the `redirect_uri` Remii sent against the list on the OAuth client, as exact
+strings. Compare the value Remii builds from `REMII_PUBLIC_URL` with what is registered,
 character for character. Common mismatches: `127.0.0.1` against `localhost`, the app's port instead
 of the API's, `https` against `http`, a trailing slash.
 
@@ -161,7 +160,7 @@ by design, since a fallback would answer with somebody else's access.
 
 ### The connection worked and stopped about an hour later
 
-That is an access token with no refresh token behind it, which OpenBot refuses to store precisely so
+That is an access token with no refresh token behind it, which Remii refuses to store precisely so
 this cannot happen; if you see it, say so, because it means something got past that check. Google
 returns no refresh token when it believes the person already consented, which is why the
 authorization URL sends both `access_type=offline` and `prompt=consent`.
@@ -174,7 +173,7 @@ rather than handed an empty string it would fill in from memory.
 ## See also
 
 - [Architecture](../architecture.md) — where plugins, grants, policy and audit sit.
-- [Configuration](../configuration.md) — `OPENBOT_PUBLIC_URL`, `OPENBOT_APP_URL`,
+- [Configuration](../configuration.md) — `REMII_PUBLIC_URL`, `REMII_APP_URL`,
   `KEY_ENCRYPTION_KEY`.
 - [Google Drive API](https://developers.google.com/workspace/drive/api/reference/rest/v3) — the REST
   API this connector calls.

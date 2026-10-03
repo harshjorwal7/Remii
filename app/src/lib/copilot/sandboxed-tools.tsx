@@ -96,7 +96,7 @@ function SandboxedTool({
       if (!isHeld) {
         return (
           <RefusedCard
-            reason={`${component.name} is not available to this Bot at the moment. An administrator grants components per Bot.`}
+            reason={`${component.name} is not available to this Bot at the moment.`}
             title={component.name}
           />
         );

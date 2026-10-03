@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   EMPTY_REPLY_FALLBACK,
+  isLoopLimit,
+  LOOP_LIMIT_FALLBACK,
   type RunStreamEvent,
   streamRun,
 } from "../src/stream";
@@ -245,5 +247,124 @@ describe("a failure mid-stream", () => {
 
     expect(types(sent)).toEqual(["RUN_ERROR"]);
     expect(sent[0]).toMatchObject({ message: "could not build graph" });
+  });
+});
+
+/*
+ * The tool loop running out of steps is an outcome, not a fault.
+ *
+ * It used to reach the surface as the framework's own exception — a recursion-limit sentence naming
+ * a step count this Bot does not use, plus a troubleshooting URL for a graph the person cannot see.
+ * Worse, arriving as RUN_ERROR made it a refusal the delivery would offer again, so one Bot going
+ * round its loop cost five whole runs and four minutes of a conversation that had already stopped
+ * moving. It now ends as a finished turn carrying a sentence about the person's own question.
+ */
+describe("a run that runs out of tool-loop steps", () => {
+  test("ends finished, with a sentence rather than a framework error", async () => {
+    const sent = await collect(async () => {
+      throw new Error(
+        "Recursion limit of 25 reached without hitting a stop condition. Troubleshooting URL: https://docs.langchain.com/oss/javascript/langgraph/GRAPH_RECURSION_LIMIT/",
+      );
+    });
+
+    expect(types(sent)).toEqual([
+      "TEXT_MESSAGE_START",
+      "TEXT_MESSAGE_CONTENT",
+      "TEXT_MESSAGE_END",
+      "RUN_FINISHED",
+    ]);
+    const words = sent
+      .filter((event) => event.type === "TEXT_MESSAGE_CONTENT")
+      .map((event) => String((event as { delta?: unknown }).delta ?? ""))
+      .join("");
+    expect(words).toBe(LOOP_LIMIT_FALLBACK);
+    // None of the framework's own wording reaches the person.
+    expect(words).not.toContain("Recursion limit");
+    expect(words).not.toContain("Troubleshooting URL");
+  });
+
+  test("is recognised whatever the framework calls it", () => {
+    expect(isLoopLimit(new Error("Recursion limit of 12 reached"))).toBe(true);
+    expect(isLoopLimit(new Error("recursionLimit"))).toBe(true);
+    expect(isLoopLimit("Recursion limit")).toBe(true);
+    expect(isLoopLimit(new Error("provider hung up"))).toBe(false);
+    expect(isLoopLimit(new Error("fetch failed"))).toBe(false);
+  });
+
+  test("a real failure is still an error, not a finished turn", async () => {
+    const sent = await collect(async () => {
+      throw new Error("provider hung up");
+    });
+
+    expect(types(sent)).toContain("RUN_ERROR");
+    expect(types(sent)).not.toContain("RUN_FINISHED");
+  });
+});
+
+/*
+ * A run that already said its answer is finished, however it stopped.
+ *
+ * This is the case that made a real audit look broken. The run read DNS, DMARC, TLS and CORS,
+ * wrote its report, stated its findings — and then reached the graph's step bound, which was reported
+ * as a failure. The answer was already on the wire. Worse, the delivery read the failure as worth
+ * retrying and ran the whole audit again, four more times, against a target that had asked for one
+ * non-destructive pass.
+ *
+ * So the bound is where a long job stops, not a verdict on it, and a run that has spoken is closed
+ * as it stands.
+ */
+describe("a long run that already spoke before the bound", () => {
+  /** A run that streamed real prose, and only then ran out of steps. */
+  const spokeThenRanOut = () =>
+    collect(async () =>
+      (async function* (): AsyncGenerator<RunStreamEvent> {
+        yield modelStream("Assessment complete. Report saved.");
+        throw new Error(
+          "Recursion limit of 60 reached without hitting a stop condition.",
+        );
+      })(),
+    );
+
+  test("keeps the answer and finishes, rather than reporting a failure", async () => {
+    const sent = await spokeThenRanOut();
+
+    expect(types(sent)).toEqual([
+      "TEXT_MESSAGE_START",
+      "TEXT_MESSAGE_CONTENT",
+      "TEXT_MESSAGE_END",
+      "RUN_FINISHED",
+    ]);
+    expect(sent[1]).toMatchObject({
+      delta: "Assessment complete. Report saved.",
+    });
+    // Not a failure, so nothing retries the whole job.
+    expect(types(sent)).not.toContain("RUN_ERROR");
+  });
+
+  test("does not overwrite a real answer with the bound's own sentence", async () => {
+    const sent = await spokeThenRanOut();
+
+    const words = sent
+      .filter((event) => event.type === "TEXT_MESSAGE_CONTENT")
+      .map((event) => String((event as { delta?: unknown }).delta ?? ""))
+      .join("");
+    expect(words).toBe("Assessment complete. Report saved.");
+    expect(words).not.toBe(LOOP_LIMIT_FALLBACK);
+  });
+
+  test("a run that reached the bound having said nothing still gets the sentence", async () => {
+    const sent = await collect(async () => {
+      throw new Error(
+        "Recursion limit of 60 reached without hitting a stop condition.",
+      );
+    });
+
+    expect(types(sent)).toEqual([
+      "TEXT_MESSAGE_START",
+      "TEXT_MESSAGE_CONTENT",
+      "TEXT_MESSAGE_END",
+      "RUN_FINISHED",
+    ]);
+    expect(sent[1]).toMatchObject({ delta: LOOP_LIMIT_FALLBACK });
   });
 });

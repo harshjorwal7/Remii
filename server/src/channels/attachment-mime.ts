@@ -1,6 +1,9 @@
 import {
+  ACCEPTED_AUDIO_MIME,
+  ACCEPTED_DOCUMENT_MIME,
   ACCEPTED_IMAGE_MIME,
   ACCEPTED_TEXT_MIME,
+  ACCEPTED_VIDEO_MIME,
   mediaTypeOf,
   namesNoFormat,
 } from "../../../shared/attachments";
@@ -49,6 +52,14 @@ function hasSignature(
   return signature.every((byte, i) => bytes[offset + i] === byte);
 }
 
+function hasAsciiAt(bytes: Uint8Array, text: string, offset = 0): boolean {
+  if (bytes.length < offset + text.length) return false;
+  for (let i = 0; i < text.length; i++) {
+    if (bytes[offset + i] !== text.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
 function sniffImageType(bytes: Uint8Array): string | null {
   if (hasSignature(bytes, [0x89, 0x50, 0x4e, 0x47])) return "image/png";
   if (hasSignature(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg";
@@ -61,6 +72,140 @@ function sniffImageType(bytes: Uint8Array): string | null {
   }
   return null;
 }
+
+/**
+ * The container formats this app can name from their bytes alone.
+ *
+ * WHY THE BYTES GET THE VOTE, AND WHY THAT MATTERS MORE HERE THAN FOR IMAGES. An image has a magic
+ * number in its first few bytes and nothing else in the file contradicts it. The formats below are
+ * mostly ZIP archives — a `.docx`, a `.xlsx` and a `.pptx` are all one — and the archive's own
+ * directory, which is at the END and is the only part that says which of the three this is, is
+ * reached by inflating bytes somewhere in the middle of the file. So this cannot read a member and
+ * must not pretend to: everything here is decided by the signature and the claimant's agreement.
+ *
+ * The one thing it is careful about is not naming a format the file is not. `PK\x03\x04` on its own
+ * says ZIP and nothing more, so a bare zip returns `application/zip` — which is `binary` and is
+ * stored and handed back whole. It does not become a `.docx` because a browser said so, and it
+ * certainly does not become one because a file was renamed.
+ */
+function sniffContainerType(
+  bytes: Uint8Array,
+  normalizedClaim: string,
+): string | null {
+  // PDF. The header is `%PDF-` and, importantly, the version after it — a real file is
+  // `%PDF-1.4` or newer, and the 1.0–1.3 range is what every producer since about 1999 writes.
+  if (hasAsciiAt(bytes, "%PDF-")) return "application/pdf";
+
+  /*
+   * ZIP, and the OOXML formats that are ZIPs.
+   *
+   * The empty-archive signature is `PK\x05\x06` and a spanned one is `PK\x07\x08`; both are legal
+   * first bytes for a zip and neither is a `.docx`, because an OOXML file always has members. They
+   * are included so a genuine empty archive is named `application/zip` rather than falling through
+   * to the UTF-8 guess, which would call it text.
+   */
+  const zip =
+    hasSignature(bytes, [0x50, 0x4b, 0x03, 0x04]) ||
+    hasSignature(bytes, [0x50, 0x4b, 0x05, 0x06]) ||
+    hasSignature(bytes, [0x50, 0x4b, 0x07, 0x08]);
+  if (zip) {
+    /*
+     * Named only where the claimant and the bytes agree, and the agreement is checked against the
+     * list rather than trusted: a client claiming `application/pdf` over a zip gets `zip`.
+     */
+    return OOXML_CLAIMS.has(normalizedClaim)
+      ? normalizedClaim
+      : "application/zip";
+  }
+
+  /*
+   * The pre-2007 binary Office set. One container, three formats, and — like the OOXML ones — the
+   * directory at the end is what says which. Accepted as `binary` and never claimed as any of the
+   * three: this app has no extractor for them, and naming one would put an empty preview in front of
+   * somebody holding a real `.doc`.
+   */
+  if (hasSignature(bytes, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])) {
+    return "application/x-ole-storage";
+  }
+
+  // Compressed streams. `1f 8b` is gzip; `42 5a 68` is bzip2; `fd 37 7a 58 5a 00` is xz.
+  if (hasSignature(bytes, [0x1f, 0x8b])) return "application/gzip";
+  if (hasAsciiAt(bytes, "BZh")) return "application/x-bzip2";
+  if (hasSignature(bytes, [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])) {
+    return "application/x-xz";
+  }
+
+  // `7z bc af 27 1c`.
+  if (hasSignature(bytes, [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) {
+    return "application/x-7z-compressed";
+  }
+
+  // Media, where the container is identifiable from the first box or frame.
+  if (hasAsciiAt(bytes, "ftyp", 4)) {
+    // ISO base media, which is what MP4 and QuickTime are. A browser will play a `.m4a` as audio
+    // and an `.mp4` as video from the same four bytes, so this names the container and lets the
+    // claimant pick the track type — the same agreement rule as the OOXML case above.
+    return MP4_FAMILY_CLAIMS.has(normalizedClaim)
+      ? normalizedClaim
+      : "video/mp4";
+  }
+  if (hasAsciiAt(bytes, "OggS")) {
+    return OGX_CLAIMS.has(normalizedClaim)
+      ? normalizedClaim
+      : "application/ogg";
+  }
+  if (hasAsciiAt(bytes, "fLaC")) return "audio/flac";
+  if (
+    hasSignature(bytes, [0x1a, 0x45, 0xdf, 0xa3]) ||
+    hasSignature(bytes, [0x49, 0x44, 0x33])
+  ) {
+    return "audio/mpeg";
+  }
+  if (hasSignature(bytes, [0x57, 0x45, 0x42, 0x50])) return "audio/webm";
+  if (hasSignature(bytes, [0x52, 0x49, 0x46, 0x46])) {
+    return "audio/wav";
+  }
+  if (hasSignature(bytes, [0x4d, 0x4d, 0x00, 0x2a])) {
+    return "audio/mid";
+  }
+  if (
+    hasSignature(bytes, [0x49, 0x49, 0x2a, 0x00]) ||
+    hasSignature(bytes, [0x4d, 0x4d, 0x00, 0x2b])
+  ) {
+    return "image/tiff";
+  }
+
+  return null;
+}
+
+/** The OOXML media types, as a set, for the agreement check in `sniffContainerType`. */
+const OOXML_CLAIMS = new Set<string>(ACCEPTED_DOCUMENT_MIME);
+
+/**
+ * Which of the ISO-base-media types this app will name for a file whose first box says `ftyp`.
+ *
+ * Deliberately not a sniff: the four bytes genuinely do not distinguish audio from video, and the
+ * file's own contents are not consulted. A file outside this set is `video/mp4` by default, which
+ * is `binary` in every case where the claim is missing or wrong — so the failure is a file stored
+ * and handed back whole, never a file played as the wrong thing.
+ */
+const MP4_FAMILY_CLAIMS = new Set<string>([
+  ...ACCEPTED_VIDEO_MIME,
+  "video/quicktime",
+  "audio/mp4",
+  "audio/x-m4a",
+  "audio/aac",
+  "video/x-m4v",
+]);
+
+/** As above for Ogg: the container holds Vorbis, Opus, Theora and FLAC indistinguishably. */
+const OGX_CLAIMS = new Set<string>([
+  "audio/ogg",
+  "audio/opus",
+  "video/ogg",
+  "video/theora",
+  "application/ogg",
+]);
 
 // TextDecoder in "fatal" mode throws on invalid UTF-8 instead of substituting
 // U+FFFD, which is what lets the checks below tell "genuinely UTF-8 text"
@@ -144,6 +289,28 @@ export function sniffMimeType(bytes: Uint8Array, claimed: string): string {
   if (sniffedImage) return sniffedImage;
 
   /*
+   * `mediaTypeOf` FIRST, BECAUSE THE CONTAINER SNIFF NEEDS IT.
+   *
+   * Several of the formats below are containers that do not say which format they are until their
+   * own directory is read — a `.docx`, a `.xlsx` and a `.pptx` are all one ZIP — and this function
+   * does not read directories. So the claim is consulted as part of the sniffing rather than after
+   * it, and only ever to break a tie the bytes cannot.
+   */
+  const normalizedClaim = mediaTypeOf(claimed);
+
+  /*
+   * The container formats, then.
+   *
+   * BEFORE the text-claim corroboration below, and that ordering is load-bearing. A `.docx` is
+   * valid UTF-8 for the first few hundred bytes of its first member, so a text claim reaching the
+   * check below would be corroborated and returned as `text/markdown` — the zip would be stored and
+   * served from this origin as Markdown. The bytes name a container before anybody gets to argue
+   * about whether they are text.
+   */
+  const sniffedContainer = sniffContainerType(bytes, normalizedClaim);
+  if (sniffedContainer) return sniffedContainer;
+
+  /*
    * `mediaTypeOf`, NOT A LOCAL COPY OF WHAT IT DOES.
    *
    * This line used to be `claimed.toLowerCase().split(";")[0].trim()` —
@@ -163,8 +330,9 @@ export function sniffMimeType(bytes: Uint8Array, claimed: string): string {
    * redundancy, not waste: it is exported for callers holding a raw claim, so
    * it cannot assume it has been through here first, and the operation is
    * idempotent.
+   *
+   * (Declared once, above the container sniff, which needs it too.)
    */
-  const normalizedClaim = mediaTypeOf(claimed);
 
   /*
    * A text claim this app accepts is corroborated the only way text can be:
@@ -212,6 +380,33 @@ export function sniffMimeType(bytes: Uint8Array, claimed: string): string {
    * failure, which is the right direction for this to break in.
    */
   if ((ACCEPTED_IMAGE_MIME as readonly string[]).includes(normalizedClaim)) {
+    return "application/octet-stream";
+  }
+
+  /*
+   * The same rule for the other families this app previews, and for the same reason.
+   *
+   * Reaching this line with an accepted document or media claim means `sniffContainerType` above
+   * did not recognise these bytes — so the file is not that format, whatever it says it is. The
+   * claim is dropped for the generic name, which `classifyAttachment` calls `binary`: the file is
+   * still stored and still handed back whole, which is the right outcome for a file whose format
+   * the app cannot read, and it is NOT served under a type the app has promised a viewer for.
+   *
+   * The failure this is shaped like: an HTML document, or any other bytes, uploaded with a `.pdf`
+   * content type would otherwise be stored and served from this origin as `application/pdf`, and a
+   * client that trusts the type — which is the whole of what a `Content-Type` header asks — would
+   * hand it to a PDF viewer. Nothing here executes, so this is a mislabelling rather than an XSS,
+   * and it is refused anyway because the alternative is a header this app cannot stand behind.
+   *
+   * As with images, the coupling runs one way: adding a type to one of these lists without a
+   * signature in `sniffContainerType` refuses every file of that type. A loud failure, which is the
+   * right direction for this to break in.
+   */
+  if (
+    (ACCEPTED_DOCUMENT_MIME as readonly string[]).includes(normalizedClaim) ||
+    (ACCEPTED_AUDIO_MIME as readonly string[]).includes(normalizedClaim) ||
+    (ACCEPTED_VIDEO_MIME as readonly string[]).includes(normalizedClaim)
+  ) {
     return "application/octet-stream";
   }
 

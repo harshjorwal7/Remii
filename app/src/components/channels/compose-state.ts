@@ -4,9 +4,17 @@
  * Pure helpers so recipient-cap and sendability behavior stay testable without rendering.
  */
 
+import type { MascotChoice } from "../../../../shared/mascot-ids";
+
 export type Recipient = {
   id: string;
   name: string;
+  /**
+   * The coworker's chosen mascot, carried so the chip can draw the same face as the card the person
+   * picked it from. Absent or null seeds from the id, which is what an undressed coworker gets
+   * everywhere else — see `mergeMascotChoice`.
+   */
+  mascot?: Partial<MascotChoice> | null;
 };
 
 /**

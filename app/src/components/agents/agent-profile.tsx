@@ -72,6 +72,7 @@ export function AgentProfile({ agentId }: { agentId: string }) {
         <AbstractAvatar
           name={profile.name}
           seed={profile.avatarSeed}
+          mascot={profile.mascot}
           size={80}
         />
         <div className="flex w-full flex-col items-center gap-0.5">
@@ -83,10 +84,11 @@ export function AgentProfile({ agentId }: { agentId: string }) {
           </p>
         </div>
 
-        <div className="flex flex-wrap justify-center gap-1.5">
-          <Tag>{profile.visibility === "private" ? "Private" : "Public"}</Tag>
-          {profile.systemOwned ? <Tag>System owned</Tag> : null}
-        </div>
+        {profile.systemOwned ? (
+          <div className="flex flex-wrap justify-center gap-1.5">
+            <Tag>System owned</Tag>
+          </div>
+        ) : null}
       </header>
 
       <section className="grid gap-2">

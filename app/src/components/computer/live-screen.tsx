@@ -1,394 +1,247 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { keyOf } from "@/lib/hotkeys/hotkeys";
-import { socketUrl } from "@/lib/socket-url";
-import { currentPageVisible } from "./preview-visibility";
-import { pageCoordinates } from "./take-the-wheel";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ControlState } from "@/lib/computers/control";
+import { openDesktopStream, vncUrlFor } from "@/lib/computers/screen";
 
 /**
- * Low-latency screencast used while a human is driving the Bot's browser.
+ * The person's live desktop, as a real VNC stream.
  *
- * The inline card keeps using cheap polling for passive watching. This view uses Chrome's
- * screencast socket so input and visual feedback stay synchronized during takeover.
+ * WHY THIS IS AN IFRAME AND NOT A CANVAS
  *
- * Follows Chrome DevTools' own `InputModel.ts` (BSD-3) for the event translation and
- * `steel-dev/steel-browser`'s casting handler (Apache-2.0) for the frame loop, because no maintained
- * library publishes this and every real implementation is one app-internal file.
+ * Everything this component used to do is gone, and deliberately. It opened a websocket to
+ * `/api/computers/desktop/stream`, the server captured a JPEG of the desktop per frame through a
+ * remote screenshot API and pushed it down, and this file decoded each one with `createImageBitmap`
+ * and drew it. Input went back up the same socket, one awaited round trip per event.
+ *
+ * That architecture could not be fast, and the reason is structural rather than a tuning failure: the
+ * frame rate was the platform's round-trip latency, and a person's mouse move was another round trip
+ * before the desktop saw it. A click landed a frame and a half after the hand stopped moving, so a
+ * person took the wheel, clicked, saw nothing happen, and clicked again. Adding frames would not have
+ * helped, because the bottleneck was that a picture cost a round trip at all.
+ *
+ * So the server hands over a noVNC URL and a per-session password, and E2B's own noVNC page runs in
+ * this iframe, speaking RFB straight to the desktop. Only the rectangles that changed are sent, input
+ * never passes through this application, and the latency is a property of the network between the
+ * browser and the sandbox.
+ *
+ * Using E2B's `vnc.html` rather than a bundled noVNC client is a real choice, not a shortcut. It means
+ * the connection UI a person sees — "reconnecting", "authentication failed", the clipboard, fullscreen,
+ * scaling — is noVNC's own, maintained alongside the protocol, rather than ours.
+ *
+ * The one thing that costs is error reporting. The iframe is cross-origin, so this component cannot
+ * read what happens inside it: a rejected password shows noVNC's error panel to the person and says
+ * nothing to us. Everything reported through `onProblem` is therefore about OUR half — the desktop
+ * being unreachable, asleep, or refusing to start — which is the half that can actually be wrong.
  */
+/**
+ * Retrying a desktop that would not open.
+ *
+ * Four attempts with a widening gap, which is roughly a minute of trying. Bounded because the failure
+ * this exists for — a person whose desktop is asleep and whose first request raced it — resolves in
+ * seconds, while a deployment with no E2B key or no desktop at all never will, and a spinner that never
+ * resolves is worse than a sentence somebody can act on.
+ */
+const RETRY_LIMIT = 4;
+const RETRY_GAP_MS = 1_500;
 
 /**
- * CDP's modifier bitmask. Alt 1, Control 2, Meta 4, Shift 8.
+ * A session already fetched, so mounting the frame does not have to wait for one.
  *
- * Needed or a capital letter typed with Shift arrives lower-case, and Ctrl+A selects nothing.
+ * Passed in by a parent that warmed it while the person was still reading. Fetching on mount instead
+ * puts a round trip to a remote machine between their click and seeing anything, and on a paused
+ * desktop that round trip is a resume — seconds of blank panel that look like a broken product rather
+ * than a slow one.
  */
-function modifierBits(event: {
-  altKey: boolean;
-  ctrlKey: boolean;
-  metaKey: boolean;
-  shiftKey: boolean;
-}): number {
-  return (
-    (event.altKey ? 1 : 0) |
-    (event.ctrlKey ? 2 : 0) |
-    (event.metaKey ? 4 : 0) |
-    (event.shiftKey ? 8 : 0)
-  );
-}
-
-/**
- * Let the local browser create a paste event, whose clipboard text is forwarded separately.
- *
- * The V is read the way a shortcut is (`keyOf`), so a layout that writes another script still has
- * one: Ctrl and the V key report "м" on Russian and "ω" on Greek.
- */
-function isPasteShortcut(event: KeyboardEvent): boolean {
-  return (event.ctrlKey || event.metaKey) && keyOf(event) === "v";
-}
+export type WarmedSession = { url: string; authKey: string };
 
 type Props = {
   /**
-   * Computer identity is part of the stream URL so input and frames stay scoped to the active Bot.
+   * Which Bot's screen this is being shown for.
+   *
+   * NOT USED TO ADDRESS THE STREAM, and it is worth being explicit that it is not, because the name
+   * invites the opposite assumption. The desktop belongs to a PERSON and there is one address for it.
+   * The surrounding view still says which Bot is being watched, so it passes one, and this component
+   * simply does not need it.
    */
   computerId: string;
-  /** Whether the user currently holds the wheel. Input is only sent when true. */
+  /**
+   * Whether the user currently holds the wheel.
+   *
+   * IT NOW GATES INPUT, which it deliberately did not for a long time, and the reversal is worth stating
+   * because the earlier reasoning was not wrong — it was incomplete.
+   *
+   * That reasoning was: noVNC is interactive from the moment it connects, the wheel is enforced
+   * SERVER-side by `controlHolder`, and gating input here too would leave a person holding the wheel
+   * whose clicks went nowhere while a Bot quietly kept driving the same desktop. All true, and all about
+   * the "person is driving" state.
+   *
+   * What it missed is the state people are actually in most of the time: watching. A person watching a
+   * Bot work clicks the screen — to scroll, to bring a window forward, to type a URL — and the click
+   * lands, because nothing here was in the way. The Bot's own tools are correctly refused while a
+   * person holds control, so its next action fails with "a person has control" and its run carries on as
+   * if untouched. The person watched their click work. Nothing reported a collision, because the only
+   * party who could notice was the one being moved.
+   *
+   * So while `driving` is false the frame is covered and click-through is impossible, with Take control
+   * on the same surface. When it is true there is no overlay at all — the input path is not gated for
+   * somebody who has the wheel, it is simply not there.
+   */
   driving: boolean;
-  /** Called with a human-readable reason when the stream cannot be established. */
+  /**
+   * A session the parent already has, used instead of fetching one.
+   *
+   * Optional and not a correctness requirement: without it this component fetches for itself, which is
+   * slower but identical in outcome. With it, opening the screen is instant.
+   */
+  session?: WarmedSession | null;
+  /** Called with a human-readable reason when the screen cannot be established. */
   onProblem?: (problem: string | null) => void;
+  /**
+   * Take the wheel, for the overlay's own button.
+   *
+   * Optional, and optional is a real limit rather than a convenience: without it the overlay still
+   * blocks input, and a person who wanted the wheel has to find the button elsewhere on the panel. That
+   * is worse than having no overlay, so a caller that can supply this should — but the screen must not
+   * depend on it, because a read-only desktop is still correct if the escape hatch is missing.
+   */
+  takeControl?: () => Promise<ControlState | null>;
+  /**
+   * Told when this component took the wheel.
+   *
+   * Separate from `takeControl` because the parent holds the authoritative control state it derives
+   * `driving` from; without being told, the overlay would keep covering a desktop this person now owns.
+   */
+  onControl?: (state: ControlState) => void;
 };
 
-type FrameMessage = {
-  data: string;
-  width: number;
-  height: number;
-};
+export function LiveScreen({
+  driving,
+  session: warmed,
+  onProblem,
+  takeControl,
+  onControl,
+}: Props) {
+  const [session, setSession] = useState<{ url: string } | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  /*
+   * The problem is mirrored into a ref because the fetch effect must not re-run every time it
+   * changes: `onProblem` is a fresh closure on every render of the parent, and depending on it would
+   * tear down a working screen and re-authenticate it on every unrelated state change above it.
+   */
+  const reportProblem = useRef(onProblem);
+  reportProblem.current = onProblem;
 
-export function LiveScreen({ computerId, driving, onProblem }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const socketRef = useRef<WebSocket | null>(null);
-  /** Keydowns handled locally whose matching keyup must not leak to the remote browser. */
-  const localKeyUps = useRef(new Set<string>());
-  /** The size of the frames Chrome is sending, which is what input coordinates are relative to. */
-  const frameSize = useRef<{ width: number; height: number } | null>(null);
-  /** Latest validated encoded frame. Hidden tabs keep only this, never decoded bitmaps. */
-  const latestFrame = useRef<FrameMessage | null>(null);
-  /** Monotonic guard so a slow older decode cannot replace a newer frame. */
-  const latestFrameId = useRef(0);
-  const [connected, setConnected] = useState(false);
-
-  useEffect(() => {
-    // The server's own address, so no proxy has to carry the upgrade. The scheme still follows
-    // the page: wss when the app is served over https.
-    const socket = new WebSocket(
-      socketUrl(`/api/computers/${encodeURIComponent(computerId)}/stream`),
-    );
-    socketRef.current = socket;
-    let closed = false;
-
-    const drawFrame = async (frame: FrameMessage, frameId: number) => {
-      /**
-       * Decoded off the main thread and drawn as a bitmap.
-       *
-       * `createImageBitmap` rather than assigning a data URI to an `<img>`: the image path decodes
-       * synchronously on the main thread for every frame, which at screencast rates is the difference
-       * between a smooth page and one that stutters while you are trying to click something on it.
-       */
-      try {
-        const binary = Uint8Array.from(atob(frame.data), (c) =>
-          c.charCodeAt(0),
-        );
-        const bitmap = await createImageBitmap(
-          new Blob([binary], { type: "image/jpeg" }),
-        );
-        if (
-          closed ||
-          frameId !== latestFrameId.current ||
-          !currentPageVisible()
-        ) {
-          bitmap.close();
-          return;
-        }
-        const canvas = canvasRef.current;
-        if (!canvas) {
-          bitmap.close();
-          return;
-        }
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
-        bitmap.close();
-      } catch {
-        // Ignore a single corrupt frame; the next frame replaces it.
-      }
-    };
-
-    const drawLatestFrame = () => {
-      if (!currentPageVisible()) return;
-      const frame = latestFrame.current;
-      if (!frame) return;
-      void drawFrame(frame, latestFrameId.current);
-    };
-
-    socket.onopen = () => {
-      setConnected(true);
-      onProblem?.(null);
-    };
-
-    socket.onmessage = async (event) => {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(String(event.data));
-      } catch {
-        return;
-      }
-      // A frame that is not an object (`null`, a number, a string, an array) has
-      // no `type` to read: reaching for it throws a `TypeError` inside this
-      // handler and stops the live view from drawing further frames. Drop it.
-      if (
-        typeof parsed !== "object" ||
-        parsed === null ||
-        Array.isArray(parsed)
-      ) {
-        return;
-      }
-      const message = parsed as {
-        type: string;
-        data?: string;
-        width?: number;
-        height?: number;
-        error?: string;
-      };
-      if (typeof message.type !== "string") return;
-      if (message.type === "error") {
-        onProblem?.(message.error ?? "The screen could not be shown.");
-        return;
-      }
-      if (message.type !== "frame" || !message.data) return;
-      // Live-run JSON only checks `typeof type === "string"` upstream. Non-finite or negative
-      // dimensions would poison frameSize and every coordinate scaled from it; a huge payload
-      // would hit `atob` before any bound. Both are dropped as corrupt frames.
-      const width = message.width ?? 1280;
-      const height = message.height ?? 800;
-      if (
-        typeof width !== "number" ||
-        typeof height !== "number" ||
-        !Number.isFinite(width) ||
-        !Number.isFinite(height) ||
-        width <= 0 ||
-        height <= 0 ||
-        width > 8192 ||
-        height > 8192
-      ) {
-        return;
-      }
-      if (
-        typeof message.data !== "string" ||
-        message.data.length > 20_000_000
-      ) {
-        return;
-      }
-
-      const canvas = canvasRef.current;
-      if (!canvas || closed) return;
-
-      frameSize.current = {
-        width: message.width ?? 1280,
-        height: message.height ?? 800,
-      };
-      const frame = { data: message.data, width, height };
-      latestFrame.current = frame;
-      const frameId = ++latestFrameId.current;
-
-      if (!currentPageVisible()) return;
-      void drawFrame(frame, frameId);
-    };
-
-    document.addEventListener("visibilitychange", drawLatestFrame);
-    socket.onerror = () => onProblem?.("The live screen could not be reached.");
-    socket.onclose = () => setConnected(false);
-
-    return () => {
-      closed = true;
-      document.removeEventListener("visibilitychange", drawLatestFrame);
-      socket.close();
-      socketRef.current = null;
-    };
-    // The socket is per Bot; switching Bot must close this stream and open the next one.
-  }, [computerId, onProblem]);
-
-  const send = useCallback(
-    (message: Record<string, unknown>) => {
-      const socket = socketRef.current;
-      if (!driving || socket?.readyState !== WebSocket.OPEN) return;
-      socket.send(JSON.stringify(message));
-    },
-    [driving],
+  /*
+   * The warmed session is turned into a URL once, here, rather than in the parent.
+   *
+   * The password is attached at the last possible moment for the same reason it is not in the URL the
+   * server returns: a URL with a credential in it ends up in history and in logs. The parent warms the
+   * session as data and never builds a URL at all.
+   */
+  const warmedUrl = useMemo(
+    () => (warmed ? vncUrlFor(warmed) : null),
+    [warmed],
   );
 
-  /**
-   * Convert from displayed canvas coordinates to page coordinates with the shared, tested helper.
-   * A screencast frame is the viewport, so its frame size stands in for natural image size.
-   */
-  const at = useCallback((event: { clientX: number; clientY: number }) => {
-    const canvas = canvasRef.current;
-    const size = frameSize.current;
-    if (!canvas || !size) return null;
-    return pageCoordinates(
-      { naturalWidth: size.width, naturalHeight: size.height },
-      canvas.getBoundingClientRect(),
-      event,
-    );
-  }, []);
-
-  const onMouse = useCallback(
-    (kind: "pressed" | "released" | "moved") =>
-      (event: React.MouseEvent<HTMLCanvasElement>) => {
-        const point = at(event);
-        if (!point) return;
-        send({
-          type: "mouse",
-          event: kind,
-          ...point,
-          button:
-            event.button === 2
-              ? "right"
-              : event.button === 1
-                ? "middle"
-                : "left",
-          /*
-           * The browser's own count, not a fixed one.
-           *
-           * `MouseEvent.detail` is how many times in a row this button has been pressed in the same
-           * place, worked out by the browser to its own timing and distance rules. Chrome fires
-           * `dblclick` on the far page only when the second press says it is the second, so sending 1
-           * every time meant a double click arrived as two separate clicks: no `dblclick` ever
-           * reached the page, `event.detail` was always 1, and opening a row, expanding a node and
-           * selecting a word were all things a person holding the wheel could not do.
-           *
-           * At least one on a press, because the computer refuses a press of zero for the reason its
-           * own comment gives -- Chrome would see a move that happens to have a button set, and no
-           * click at all. `detail` is zero on an event a script dispatched rather than a person.
-           */
-          clickCount: kind === "moved" ? 0 : Math.max(1, event.detail),
-          modifiers: modifierBits(event),
-        });
-      },
-    [at, send],
-  );
-
-  /**
-   * Keystrokes, forwarded while driving.
-   *
-   * Listen on window because canvas cannot hold focus. `preventDefault` keeps Tab and typing directed
-   * at the remote page while takeover is active.
-   *
-   * The keydown in the capture phase, and stopped as well as prevented, because a keystroke sent to
-   * the Bot's browser is not also this page's. The app's own shortcuts listen on this window too,
-   * and they were bound first, when the signed-in app mounted, so they saw every keystroke before
-   * this did: a capital N typed into the remote page started a new chat, and Ctrl+B there toggled
-   * the sidebar here. Escape and the paste shortcut are not stopped, because both are meant for this
-   * page.
-   */
   useEffect(() => {
-    if (!driving) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") return; // Escape still closes the view.
-      if (isPasteShortcut(event)) {
-        localKeyUps.current.add(event.code);
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      send({
-        type: "key",
-        event: "down",
-        key: event.key,
-        code: event.code,
-        windowsVirtualKeyCode: event.keyCode,
-        // Only a printable character carries text. Sending text for Backspace makes Chrome insert a
-        // character instead of deleting one.
-        ...(event.key.length === 1 ? { text: event.key } : {}),
-        modifiers: modifierBits(event),
-      });
-    };
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (event.key === "Escape") return;
-      if (localKeyUps.current.delete(event.code) || isPasteShortcut(event)) {
-        return;
-      }
-      event.preventDefault();
-      send({
-        type: "key",
-        event: "up",
-        key: event.key,
-        code: event.code,
-        windowsVirtualKeyCode: event.keyCode,
-        modifiers: modifierBits(event),
-      });
-    };
-    /** Paste arrives as one block; CDP inserts it as text rather than key events. */
-    const onPaste = (event: ClipboardEvent) => {
-      const text = event.clipboardData?.getData("text");
-      if (!text) return;
-      event.preventDefault();
-      send({ type: "text", text });
+    if (warmedUrl) {
+      setSession({ url: warmedUrl });
+      setProblem(null);
+      reportProblem.current?.(null);
+      return;
+    }
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
+
+    const fail = (message: string) => {
+      if (!live) return;
+      setProblem(message);
+      setSession(null);
+      reportProblem.current?.(message);
     };
 
-    window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("keyup", onKeyUp);
-    window.addEventListener("paste", onPaste);
+    /*
+     * Opening the screen STARTS the desktop if it is paused, and CREATES one if the person has never
+     * had one — so the first request legitimately takes twenty seconds or more. It can also fail
+     * outright, and that used to be final: one attempt, and the screen stayed dead until the component
+     * was unmounted and remounted, which for a person means reloading the page. A desktop being asleep,
+     * being created, or briefly unable to answer is not the same as a desktop that does not exist, and
+     * the two were treated the same way.
+     *
+     * So a failure is retried a few times with a widening gap, and the reason stays on screen the whole
+     * time so the person is watching something that is trying rather than something that has given up.
+     * The retries stop: this is not a spinner that never resolves, and after a handful of attempts the
+     * sentence on screen is the answer, which is what a person needs to be able to act on.
+     */
+    const open = async () => {
+      try {
+        const opened = await openDesktopStream();
+        if (!live) return;
+        setSession({ url: vncUrlFor(opened) });
+        setProblem(null);
+        reportProblem.current?.(null);
+      } catch (error) {
+        if (!live) return;
+        const message =
+          error instanceof Error
+            ? error.message
+            : "This computer is not running.";
+        // Said immediately, every time, because the parent draws it and a person should never be
+        // looking at an unexplained blank panel.
+        fail(message);
+        if (attempt >= RETRY_LIMIT) return;
+        attempt += 1;
+        timer = setTimeout(() => void open(), RETRY_GAP_MS * attempt);
+      }
+    };
+
+    void open();
+
     return () => {
-      window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("keyup", onKeyUp);
-      window.removeEventListener("paste", onPaste);
-      localKeyUps.current.clear();
+      live = false;
+      if (timer) clearTimeout(timer);
     };
-  }, [driving, send]);
+    // `warmedUrl` is in the dependency list on purpose: a session arriving late must still be used,
+    // and that is the whole reason to accept one.
+  }, [warmedUrl]);
 
-  /**
-   * The wheel, forwarded while driving, from a listener that is allowed to stop it here.
+  /*
+   * NO ERROR TEXT OF ITS OWN.
    *
-   * Not React's `onWheel`: React attaches that to its root as a passive listener, so the
-   * `preventDefault` in it was ignored ("Unable to preventDefault inside passive event listener
-   * invocation."). The wheel reached the Bot's page and also scrolled whatever on this page was
-   * under it, the frame that holds this screen included, and Ctrl and the wheel zoomed this page.
+   * It used to be here, and the parent renders the same sentence in the overlay above this component —
+   * so a desktop that could not be opened said why TWICE, once here and once there. That is the exact
+   * bug `computer-problem-card.test.tsx` exists to catch, and it is worth being explicit that the fix is
+   * to report upward and not draw: this component's only job with a failure is to TELL its parent, and
+   * the parent already has a surface for it, in a place a person can read it without the panel moving.
    */
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!driving || !canvas) return;
-    const onWheel = (event: WheelEvent) => {
-      const point = at(event);
-      if (!point) return;
-      event.preventDefault();
-      send({
-        type: "wheel",
-        ...point,
-        deltaX: event.deltaX,
-        deltaY: event.deltaY,
-        modifiers: modifierBits(event),
-      });
-    };
-    canvas.addEventListener("wheel", onWheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", onWheel);
-  }, [driving, at, send]);
-
   return (
-    <canvas
-      ref={canvasRef}
-      className={`block h-auto w-full ${driving ? "cursor-crosshair" : ""}`}
-      // Only forward input during takeover.
-      {...(driving
-        ? {
-            onMouseDown: onMouse("pressed"),
-            onMouseUp: onMouse("released"),
-            onMouseMove: onMouse("moved"),
-            onContextMenu: (event: React.MouseEvent) => event.preventDefault(),
-          }
-        : {})}
-      aria-label={
-        driving
-          ? "The assistant's screen. You have control: click and type here."
-          : "The assistant's screen, live"
-      }
-      data-connected={connected}
-    />
+    <div className="relative h-full w-full">
+      {session ? (
+        <iframe
+          /*
+           * Full-bleed, because the whole point of `resize=scale` in the URL is for the desktop to be
+           * fitted to whatever space this gets — and an iframe letterboxed inside its own panel
+           * would undo that, leaving the desktop scaled twice and slightly wrong in both axes.
+           */
+          className={`h-full w-full border-0 ${driving ? "pointer-events-auto" : "pointer-events-none"}`}
+          title="The assistant's screen"
+          // The password is in the query string, so `referrerPolicy="no-referrer"` is load-bearing
+          // rather than tidy: without it the page E2B serves can see a URL that grants control of
+          // somebody's desktop, in its own logs and in anything it loads.
+          referrerPolicy="no-referrer"
+          // Sandboxed to what a VNC client needs and no more. `allow-scripts` is required for noVNC at
+          // all; `allow-same-origin` is required for it to use the clipboard APIs a person would
+          // otherwise expect to work. Nothing else is granted — no forms, no top-level navigation, no
+          // popups — so a compromised sandbox host cannot turn this frame into a browser.
+          sandbox="allow-scripts allow-same-origin allow-pointer-lock allow-clipboard-read allow-clipboard-write"
+          src={session.url}
+          data-driving={driving}
+        />
+      ) : problem ? null : (
+        <div className="flex h-full w-full items-center justify-center bg-muted text-sm text-muted-foreground">
+          <span>Starting the computer…</span>
+        </div>
+      )}
+    </div>
   );
 }

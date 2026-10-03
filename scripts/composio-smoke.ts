@@ -21,8 +21,8 @@
  * it was asked whether anybody had created, and a read-only diagnostic may not do that. Making the
  * distinction real therefore means a new read on that seam and in its adapter — a change to
  * `server/src`, not to this file, and one nobody should infer from a docblock. Until it exists, an
- * operator separates the two on the app's page under `/admin/plugins`, which is where enabling an app
- * creates the config.
+ * operator separates the two in the Composio directory under Settings → App connections, which is
+ * where adding an app creates the config.
  *
  *     COMPOSIO_API_KEY=... bun run composio:smoke -- --user <id> [--call]
  *
@@ -219,13 +219,13 @@ function failed(
  * What to say when one of this script's READS failed and Composio explained nothing.
  *
  * NOT {@link unexplained}, AND THAT IS THE CORRECTION. That sentence ends "Check that this app is
- * still connected on its Plugins page", which is the right advice for what it was written for — a
- * named ACTION that failed, where a lapsed connection is the likeliest cause by a wide margin and
- * the reader fixes it in two clicks. Every {@link ask} below was handing it a STEP instead, so
- * "Listing the apps this key can see" and "Listing gmail's actions" both answered with advice about
- * one person's connection. A catalogue that will not list and a key Composio has stopped accepting
- * are faults in the deployment, and the person whose connection that sentence sends the reader to
- * inspect is the one party who cannot do anything about either.
+ * still connected on the app's own page under Settings", which is the right advice for what it was
+ * written for — a named ACTION that failed, where a lapsed connection is the likeliest cause by a
+ * wide margin and the reader fixes it in two clicks. Every {@link ask} below was handing it a STEP
+ * instead, so "Listing the apps this key can see" and "Listing gmail's actions" both answered with
+ * advice about one person's connection. A catalogue that will not list and a key Composio has
+ * stopped accepting are faults in the deployment, and the person whose connection that sentence
+ * sends the reader to inspect is the one party who cannot do anything about either.
  *
  * SO IT NAMES THE TWO THINGS ACTUALLY IN QUESTION AT THIS STAGE, in the order worth checking: the
  * key this deployment sent, then Composio itself. By the time any read here runs, nothing about
@@ -452,7 +452,7 @@ const connected = await ask(
 say(
   connected
     ? `${user} has a live ${APP} connection.`
-    : `${user} has no live ${APP} connection, and this script cannot say which of two reasons it is. Either no administrator has enabled ${APP} on this deployment, so there is no authorization config for anybody to connect against — check the app's page under /admin/plugins — or the app is enabled and ${user} never finished the consent page, which they do in their own browser; nothing here can do it for them.`,
+    : `${user} has no live ${APP} connection, and this script cannot say which of two reasons it is. Either ${APP} has not been added on this deployment, so there is no authorization config for anybody to connect against — check the Composio directory under Settings → App connections — or the app is there and ${user} never finished the consent page, which they do in their own browser; nothing here can do it for them.`,
 );
 
 if (!call) {
@@ -486,7 +486,7 @@ const listed = await ask(`Listing ${APP}'s actions`, () =>
 say(
   listed.length >= LISTING_LIMIT
     ? `Composio answered with ${listed.length} ${APP} actions, which is the whole page it will answer with (${LISTING_LIMIT}), so that listing came back full and is likely cut off.`
-    : `Composio listed ${listed.length} of the ${app.actionCount} actions ${app.name} publishes.`,
+    : `Composio listed ${listed.length} actions for ${app.name}; its catalogue metadata reports ${app.actionCount}. The metadata is informational and may be stale.`,
 );
 const action = listed.find((candidate) => candidate.slug === READ_ACTION);
 if (!action) {

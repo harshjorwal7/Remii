@@ -39,22 +39,43 @@ export const botCardAnswer = {
     name: string;
     granted: readonly string[];
     failed: readonly string[];
+    /**
+     * Fields that were cut to fit their limit, when any were.
+     *
+     * Said to the model because it is the one that wrote the long version. Without this it reads a
+     * coworker whose instructions are shorter than the brief it sent, has no way to tell a deliberate
+     * edit from a truncated one, and either proposes the same length again — which is the loop this
+     * replaces — or assumes the tail was never important.
+     */
+    trimmed?: readonly TrimmedField[];
   }) => {
     const parts = [
       `${CREATED_MARKER} ${input.name} now exists and is private.`,
     ];
-    if (input.granted.length > 0) {
-      parts.push(`It holds ${input.granted.map((s) => `/${s}`).join(", ")}.`);
-    }
     /*
      * Said out loud rather than rounded up. Creating and granting are two calls, so a grant that
      * fails after the coworker exists leaves it with fewer skills than the person agreed to — and a
      * Bot that reported the whole set would send somebody away believing in a skill that is not
      * there.
      */
+    if (input.granted.length > 0) {
+      parts.push(`It holds ${input.granted.map((s) => `/${s}`).join(", ")}.`);
+    }
     if (input.failed.length > 0) {
       parts.push(
         `${input.failed.map((s) => `/${s}`).join(", ")} could not be put on it; tell the person to add ${input.failed.length === 1 ? "it" : "them"} from the coworker's profile.`,
+      );
+    }
+    if (input.trimmed && input.trimmed.length > 0) {
+      parts.push(
+        `Its proposal was over the length these fields allow, so ${input.trimmed
+          .map(
+            (entry) =>
+              `the ${entry.field} was cut from ${entry.was} to ${entry.now} characters`,
+          )
+          .join(
+            " and ",
+          )}. The person saw the shortened text and agreed to it. Anything important that fell off the end belongs in the work you hand it, not in its standing instructions.`,
       );
     }
     parts.push(
@@ -67,7 +88,7 @@ export const botCardAnswer = {
     "The person did not create this coworker. Ask what to change rather than proposing the same one again.",
   /** A proposal the fields refuse, answered rather than shown as a question. See the card. */
   unwritable: (problems: readonly string[]) =>
-    `Not created, and the person was not asked, because the coworker is not valid: ${problems.join(" ")} Fix those and propose it again.`,
+    `Not created, and the person was not asked, because the coworker is missing something it cannot run without: ${problems.join(" ")} Fill that in and propose it again.`,
 };
 
 /** Whether a completed card's recorded answer is one that made a coworker. */
@@ -118,16 +139,19 @@ export const BOT_CREATOR_SLUG = "bot-creator";
 export const proposedBotSchema = z.object({
   name: z
     .string()
+    .max(80, "Name must be 80 characters or fewer.")
     .describe(
       "What the coworker is called, as a person would say it: `Renewal Desk`, not `renewal_desk_bot`. Up to 80 characters.",
     ),
   title: z
     .string()
+    .max(120, "Title must be 120 characters or fewer.")
     .describe(
       "The job it does, the way a job title reads: `Accounts Receivable`, `Support Operations`. Up to 120 characters. This is given to the model on every turn, so it is part of what the coworker is rather than a label.",
     ),
   roleDescription: z
     .string()
+    .max(1000, "Role description must be 1000 characters or fewer.")
     .describe(
       "The coworker's standing instructions, written as directions to it in the imperative, up to 1000 characters. Say what it does, what it must not conclude, and what it says when the evidence is thin. This text is given to a model on every turn in every channel, so write the rules that should always hold rather than a description of the coworker in the third person. Do not address the person talking to it.",
     ),
@@ -141,9 +165,107 @@ export const proposedBotSchema = z.object({
 
 export type ProposedBot = z.infer<typeof proposedBotSchema>;
 
+/**
+ * The limits a proposal is held to, read from one place.
+ *
+ * These are the same numbers `agentFormSchema` and the server enforce, restated here because the
+ * trimming below has to know what it is trimming to. They are the schema's rules applied, not a
+ * second opinion: `checkProposal` still parses against the schema, and these only decide what to cut
+ * before it does.
+ */
+const PROPOSAL_LIMITS = {
+  name: 80,
+  title: 120,
+  roleDescription: 1000,
+} as const;
+
+/**
+ * The unit a person sees as one character.
+ *
+ * `Array.from` splits on code points, which is right for a plain emoji and wrong for every emoji
+ * built out of more than one — a flag is two regional indicators, a family is three people joined by
+ * zero-width joiners, a keycap is a digit plus a variation selector plus an enclosing mark. Cut
+ * between any of those and what is left is not a shorter emoji but a boxed letter or a bare digit.
+ * Mirrors `server/src/channels/text.ts`, which cuts the same way for the same reason.
+ */
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * Cut a field to its limit at a boundary a reader would have chosen.
+ *
+ * A LINE first, then a word, and only then mid-word. Role descriptions are written as sentences and
+ * short paragraphs, so a line break inside the limit is almost always a place the author finished a
+ * thought, and a space is nearly as good. A hard cut lands inside a word and leaves a coworker's
+ * standing instructions beginning with half a syllable, which is the sort of thing nobody notices
+ * and everybody inherits.
+ *
+ * THE LIMIT IS COUNTED IN UTF-16 CODE UNITS, which is what `agentFormSchema` measures and what the
+ * server measures, and the cut walks GRAPHEMES to decide where to stop. Both, and the order matters:
+ * a string's `.length` — the thing `.max(1000)` compares against — is code units, so a cut that took
+ * the first 1000 *characters* could hand back 4000 units of emoji and be refused by the very schema
+ * this exists to satisfy. So each grapheme is added only while the running code-unit total stays
+ * inside the limit, which puts the boundary between characters and under the number that will be
+ * checked.
+ */
+export function trimToLimit(text: string, limit: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= limit) return trimmed;
+
+  /*
+   * The easy case first, and the common one: over-length text is overwhelmingly plain ASCII, where a
+   * code unit is a character and the whole boundary search can be done on the string directly.
+   */
+  if (trimmed.length === [...trimmed].length) {
+    const window = trimmed.slice(0, limit);
+    const lastNewline = window.lastIndexOf("\n");
+    const lastSpace = window.lastIndexOf(" ");
+    const cut =
+      lastNewline > limit * 0.5
+        ? lastNewline
+        : lastSpace > limit * 0.5
+          ? lastSpace
+          : window.length;
+    return window.slice(0, cut).trimEnd();
+  }
+
+  let kept = "";
+  for (const { segment } of GRAPHEMES.segment(trimmed)) {
+    if (kept.length + segment.length > limit) break;
+    kept += segment;
+  }
+  const lastNewline = kept.lastIndexOf("\n");
+  const lastSpace = kept.lastIndexOf(" ");
+  if (lastNewline > limit * 0.5) kept = kept.slice(0, lastNewline);
+  else if (lastSpace > limit * 0.5) kept = kept.slice(0, lastSpace);
+  return kept.trimEnd();
+}
+
+/** What was cut to make a proposal fit, said in the field's own name. */
+export type TrimmedField = {
+  field: keyof typeof PROPOSAL_LIMITS;
+  /** The length the model sent. */
+  was: number;
+  /** The length it was cut to. */
+  now: number;
+};
+
 /** What checking a proposal answers with: the values to create, or the problems to fix. */
 export type CheckedBot =
-  | { ok: true; values: AgentFormValues; skills: string[] }
+  | {
+      ok: true;
+      values: AgentFormValues;
+      skills: string[];
+      /**
+       * Fields that were cut to fit, empty when the proposal arrived within the limits.
+       *
+       * Carried rather than acted on silently for two reasons. The person pressing the button is
+       * agreeing to instructions that will run on their behalf, and the card's own rule is that a
+       * clamp must not hide the second half of those from them; so it draws the cut. And the model
+       * wrote the long version, so it is told as well — otherwise it proposes the same length again
+       * and reads nothing but a coworker that came out shorter than it expected.
+       */
+      trimmed: TrimmedField[];
+    }
   | { ok: false; problems: string[] };
 
 /**
@@ -151,13 +273,19 @@ export type CheckedBot =
  *
  * Checked here rather than left to the server because the alternative is a person being shown a card
  * for a coworker that cannot be created, pressing the button, and reading a validation message as
- * though they had done something wrong. A problem the model can fix should reach the model.
+ * though they had done something wrong.
  *
- * The three fields the model does not supply are fixed rather than offered. `visibility` is private
- * because a coworker somebody has not read yet has no business on everybody's roster, and making it
- * public is one control on its profile. `endpoint` and `authValue` are empty because the card cannot
- * point a coworker at a host: with no address the server binds it in-process on the role description
- * above, which is the whole reason this interview can end without asking somebody for a URL.
+ * LENGTH IS CUT HERE RATHER THAN REFUSED, and this is the change. The limits are fixed by storage
+ * and by what a model can usefully be given on every turn, not by whether the coworker is any good:
+ * a security reviewer's brief is long because the job is broad, so the natural proposal for one runs
+ * past 1000 characters, and a model handed "trim at least 347 characters" has no way to count and
+ * lands near the line rather than under it. Asked again it lands near the line again. That loop spent
+ * whole turns and produced no coworker, so the over-length text is cut to the limit here, at a
+ * boundary, and the cut is reported to the person and the model both.
+ *
+ * WHAT IS STILL REFUSED is what trimming cannot repair: a blank name, a blank job, no instructions
+ * at all. Those are a proposal that is missing its content rather than one that has too much, and
+ * there is nothing to keep when the whole thing is dropped.
  */
 export function checkProposal(args: {
   name?: unknown;
@@ -165,17 +293,38 @@ export function checkProposal(args: {
   roleDescription?: unknown;
   skills?: unknown;
 }): CheckedBot {
+  const trimmed: TrimmedField[] = [];
+  const fit = (field: keyof typeof PROPOSAL_LIMITS, value: unknown): string => {
+    const text = typeof value === "string" ? value : "";
+    const was = text.trim().length;
+    const fitted = trimToLimit(text, PROPOSAL_LIMITS[field]);
+    if (was > PROPOSAL_LIMITS[field]) {
+      trimmed.push({
+        field,
+        was,
+        now: fitted.length,
+      });
+    }
+    return fitted;
+  };
+
+  const name = fit("name", args.name);
+  const title = fit("title", args.title);
+  const roleDescription = fit("roleDescription", args.roleDescription);
+
   const parsed = agentFormSchema.safeParse({
-    name: typeof args.name === "string" ? args.name : "",
-    title: typeof args.title === "string" ? args.title : "",
-    roleDescription:
-      typeof args.roleDescription === "string" ? args.roleDescription : "",
+    name,
+    title,
+    roleDescription,
     visibility: "private",
-    endpoint: "",
-    authValue: "",
   });
   if (parsed.success) {
-    return { ok: true, skills: skillSlugsIn(args.skills), values: parsed.data };
+    return {
+      ok: true,
+      skills: skillSlugsIn(args.skills),
+      values: parsed.data,
+      trimmed,
+    };
   }
   return {
     ok: false,
@@ -229,10 +378,15 @@ export function describeBots(agents: readonly AgentProfile[]): string {
   if (agents.length === 0) {
     return "No coworkers exist here yet. Anything you propose is the first.";
   }
-  const lines = agents.map((agent) => {
-    const where = agent.endpoint ? "runs at its own address" : "runs here";
-    return `- ${agent.name} — ${agent.title} (${ownershipOf(agent)}, ${where})`;
-  });
+  const lines = agents.map(
+    (agent) => `- ${agent.name} — ${agent.title} (${ownershipOf(agent)})`,
+  );
+  /*
+   * The roster line carries no address and no "runs here". Where a coworker runs is not a per-Bot
+   * fact any more — every one of them runs on this deployment's own engine — so repeating it on every
+   * line told the reader something that is true of all of them and distinguishing none. `read_bot`
+   * says it once, where the instructions are.
+   */
   return [
     `${agents.length} coworker${agents.length === 1 ? "" : "s"} already exist here. If one of them already does the job being described, say so and offer that one instead of making a second.`,
     ...lines,
@@ -249,9 +403,9 @@ export function describeBots(agents: readonly AgentProfile[]): string {
 export function describeBot(agent: AgentProfile): string {
   return [
     `${agent.name} — ${agent.title} (${ownershipOf(agent)})`,
-    agent.endpoint
-      ? "Runs at its own address, which a coworker made here cannot be given."
-      : "Runs on this deployment, on the instructions below.",
+    // Said once, and said as a fact rather than an option: every coworker runs on this deployment's
+    // own engine, so a Bot building a new one must not come away believing it could pick an address.
+    "Runs on this deployment, on the instructions below.",
     "Instructions:",
     agent.roleDescription,
   ].join("\n");

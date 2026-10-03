@@ -102,6 +102,9 @@ export type VendorTransport = {
       actorId?: string;
       /** The Bot the run belongs to. A routine runs as its Bot, which is never a name a model supplies. */
       botId?: string;
+      /** Composio connected account id for multi-account pinning. */
+      accountId?: string | null;
+      signal?: AbortSignal;
     },
     toolName: string,
     args: Record<string, unknown>,

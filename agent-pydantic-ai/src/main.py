@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic_ai import Agent
 from pydantic_ai.ui.ag_ui import AGUIAdapter
 
-TOKEN_HEADER = "x-openbot-agent-token"
+TOKEN_HEADER = "x-remii-agent-token"
 
 
 def _model_id() -> str:

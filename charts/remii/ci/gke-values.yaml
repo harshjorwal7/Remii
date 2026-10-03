@@ -1,0 +1,54 @@
+# GKE. Cloud SQL, Workload Identity, Secret Manager through external-secrets, Gateway API.
+config:
+  intelligence:
+    apiUrl: https://api.intelligence.copilotkit.ai
+    gatewayWsUrl: wss://realtime.intelligence.copilotkit.ai
+  auth:
+    google:
+      clientId: example.apps.googleusercontent.com
+  publicUrl: https://remii.example.com
+postgresql:
+  enabled: false
+database:
+  existingSecret: remii-database
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: remii@example-project.iam.gserviceaccount.com
+externalSecrets:
+  enabled: true
+  secretStoreRef:
+    name: gcp-secret-manager
+  data:
+    - secretKey: key-encryption-key
+      remoteRef:
+        key: remii-key-encryption-key
+    # Sessions are signed with this. The server refuses to start when sign-in is configured and it
+    # is missing, so every provider store has to carry it.
+    - secretKey: better-auth-secret
+      remoteRef:
+        key: remii-better-auth-secret
+    - secretKey: intelligence-api-key
+      remoteRef:
+        key: remii-intelligence-api-key
+    - secretKey: google-client-secret
+      remoteRef:
+        key: remii/google-client-secret
+    - secretKey: computer-token
+      remoteRef:
+        key: remii/computer-token
+    - secretKey: license-token
+      remoteRef:
+        key: remii-license-token
+# Gateway API rather than an Ingress, which the same chart supports without a second code path.
+ingress:
+  enabled: false
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: remii-gateway
+      namespace: gateway-system
+  hostnames:
+    - remii.example.com
+
+computers:
+  mode: shared

@@ -6,7 +6,13 @@ import { HttpAgent } from "@ag-ui/client";
 import { LLMock } from "@copilotkit/aimock";
 import { BuiltInAgent } from "@copilotkit/runtime/v2";
 import { EMPTY } from "rxjs";
-import { PROVENANCE_GUIDANCE } from "../../shared/bot-prompt";
+import {
+  COMPUTERLESS_GUIDANCE,
+  MOTIVE_GUIDANCE,
+  PROVENANCE_GUIDANCE,
+  SOLE_PERSON_GUIDANCE,
+} from "../../shared/bot-prompt";
+import { REMII_AGENT_ID } from "../../shared/remii";
 import { MAX_INLINED_BYTES_PER_RUN } from "../src/channels/attachment-parts";
 import { loadConfig } from "../src/config";
 import type { LoadAttachment } from "../src/copilot";
@@ -20,6 +26,7 @@ import {
   runtimeModelForEnvironment,
   standingRoleMessage,
 } from "../src/copilot";
+import { RemiLoopAgent } from "../src/remi/loop-agent";
 import { grantedToolGuidance } from "../src/plugins/tools";
 import { loadTenantPackage } from "../src/tenant-package";
 import { testEnvironment } from "./support/environment";
@@ -49,12 +56,19 @@ function built(
 }
 
 // Every agent row now joins its profile, so the row a coworker is built from always names it.
+/*
+ * REMII, THE BUILT-IN THAT HOLDS THE COMPUTER.
+ *
+ * The id is the shared constant rather than a literal because cases in this file branch on it: a row
+ * whose id is not Remii's gets the COMPUTERLESS guidance instead of the computer guidance, and asserts
+ * the wrong prompt for reasons that look nothing like a stale fixture.
+ */
 const assistantRow = {
-  id: "general-assistant",
-  name: "General Assistant",
+  id: REMII_AGENT_ID,
+  name: "Remii",
   type: "built_in" as const,
-  title: "Everyday Work",
-  roleDescription: "Help with everyday work.",
+  title: "Chief of Staff",
+  roleDescription: "Remii, chief of staff. Holds the computer.",
 };
 const riskRow = {
   id: "risk",
@@ -92,7 +106,15 @@ describe("deployment model selection", () => {
     environment: Record<string, string | undefined>,
   ) {
     const config = loadConfig({ ...testEnvironment(), ...environment });
-    expect(config.runtime.mode).toBe("intelligence");
+    /*
+     * `local`, always.
+     *
+     * WAS `toBe("intelligence")`. The hosted runtime is gone — `runtimeCapabilities` returns a
+     * constant and ignores every `INTELLIGENCE_*` variable, so a deployment whose env file was
+     * written for it still boots. This assertion is kept rather than deleted because it is what proves
+     * an env file full of those variables is inert: the whole point is that it cannot move the mode.
+     */
+    expect(config.runtime.mode).toBe("local");
     const tenantPackage = await loadTenantPackage(packagePath);
     const model = runtimeModelForEnvironment(tenantPackage.model, environment);
     const recorder = new LLMock();
@@ -106,8 +128,8 @@ describe("deployment model selection", () => {
       const agents = await resolveRuntimeAgents(
         () => [
           {
-            id: "general-assistant",
-            name: "General Assistant",
+            id: REMII_AGENT_ID,
+            name: "Remii",
             type: "built_in" as const,
             systemPrompt: "Be helpful.",
           },
@@ -115,8 +137,8 @@ describe("deployment model selection", () => {
         model,
         async () => "synthetic-model-key",
       );
-      const agent = agents["general-assistant"]?.clone();
-      if (!agent) throw new Error("Expected General Assistant.");
+      const agent = agents[REMII_AGENT_ID]?.clone();
+      if (!agent) throw new Error("Expected Remii.");
       agent.addMessage({
         id: "defaultmodel001-request",
         role: "user",
@@ -136,35 +158,36 @@ describe("deployment model selection", () => {
     }
   }
 
-  test("desktop-selected BOT_MODEL drives the built-in default agent model", async () => {
-    const request = await runGeneralAssistantWithEnvironment({
+  /*
+   * The model on the wire is DeepSeek's, always.
+   *
+   * WAS the opposite, and the opposite was the bug this deployment kept paying for. The wire model
+   * followed `runtimeModelForEnvironment`: `BOT_MODEL` when an endpoint was configured, the tenant
+   * package's default otherwise. That coupling is what let a chain of providers exist at all — a
+   * model id chose a vendor — and it is why an `OPENAI_BASE_URL` pointed at an OpenAI gateway put a
+   * DeepSeek key in front of it, or a stale package sent `claude-sonnet-4-5` to an
+   * OpenAI-compatible endpoint. Every case below now resolves the same one model, and the identity
+   * `runtimeModelForEnvironment` returns is display only.
+   */
+  test.each([
+    {
       OPENAI_BASE_URL: "http://127.0.0.1:11434/v1",
       BOT_MODEL: " selected-local-model ",
-    });
-
-    expect(request.model).toBe("selected-local-model");
-  });
-
-  test("explicit OpenAI provider still uses the OpenAI-compatible selected model", async () => {
-    const request = await runGeneralAssistantWithEnvironment({
+    },
+    {
       BOT_PROVIDER: " openai ",
       OPENAI_BASE_URL: "http://127.0.0.1:11434/v1",
       BOT_MODEL: " selected-local-model ",
-    });
-
-    expect(request.model).toBe("selected-local-model");
-  });
-
-  test.each([
+    },
     {},
     { OPENAI_BASE_URL: "http://127.0.0.1:11434/v1", BOT_MODEL: "   " },
     { BOT_MODEL: "selected-local-model" },
   ])(
-    "package default remains the model without a compatible endpoint selection: %j",
+    "the wire model is deepseek-flash whatever the deployment selects: %j",
     async (environment) => {
       const request = await runGeneralAssistantWithEnvironment(environment);
 
-      expect(request.model).toBe("gpt-5.6-terra");
+      expect(request.model).toBe("deepseek-flash");
     },
   );
 });
@@ -177,10 +200,18 @@ describe("registered Copilot agents", () => {
         configuration: { systemPrompt: "Be helpful." },
       }),
     ).toEqual({
-      id: "general-assistant",
-      name: "General Assistant",
+      id: REMII_AGENT_ID,
+      name: "Remii",
       type: "built_in",
       systemPrompt: "Be helpful.",
+      /*
+       * `false`, and read once in `registeredAgentFromRow` so the tool list, the browser hand-off and
+       * the prompt all decide supervision from the same value. It is absent from the row here, so
+       * this asserts the DEFAULT rather than an omission: a Bot that is not a supervisor is the whole
+       * of what `false` means, and a row that stopped carrying it would otherwise read as a Bot whose
+       * tools quietly vanished.
+       */
+      delegationOnly: false,
     });
     expect(
       registeredAgentFromRow({
@@ -231,8 +262,8 @@ describe("registered Copilot agents", () => {
     expect(
       builtInAgentConfiguration(
         {
-          id: "general-assistant",
-          name: "General Assistant",
+          id: REMII_AGENT_ID,
+          name: "Remii",
           type: "built_in",
           systemPrompt: "Be helpful.",
         },
@@ -241,9 +272,17 @@ describe("registered Copilot agents", () => {
       ),
     ).toEqual({
       model: "openai/gpt-5.6-terra",
-      // The provenance rule is unconditional, so even a Bot with no tools and no computer carries
-      // it. That Bot needs it most: nothing it says was read anywhere.
-      prompt: `Be helpful.\n\n${PROVENANCE_GUIDANCE}`,
+      /*
+       * All three unconditional blocks, so even a Bot with no tools and no computer carries them.
+       * That Bot needs them most: nothing it says was read anywhere, and it has no approver to wait
+       * on. Assembled from the named constants rather than restated, so losing one fails here.
+       */
+      prompt: [
+        "Be helpful.",
+        PROVENANCE_GUIDANCE,
+        MOTIVE_GUIDANCE,
+        SOLE_PERSON_GUIDANCE,
+      ].join("\n\n"),
       apiKey: "openai-secret",
     });
   });
@@ -252,8 +291,8 @@ describe("registered Copilot agents", () => {
     const agents = await buildAgents(
       [
         {
-          id: "general-assistant",
-          name: "General Assistant",
+          id: REMII_AGENT_ID,
+          name: "Remii",
           type: "built_in",
           systemPrompt: "Be helpful.",
         },
@@ -261,7 +300,7 @@ describe("registered Copilot agents", () => {
       { provider: "openai", defaultModel: "gpt-5.6-terra" },
       null,
     );
-    const agent = agents["general-assistant"];
+    const agent = agents[REMII_AGENT_ID];
     if (!agent) {
       throw new Error("Expected the built-in agent");
     }
@@ -288,8 +327,8 @@ describe("registered Copilot agents", () => {
     const agents = await buildAgents(
       [
         {
-          id: "general-assistant",
-          name: "General Assistant",
+          id: REMII_AGENT_ID,
+          name: "Remii",
           type: "built_in",
           systemPrompt: "Be helpful.",
         },
@@ -304,7 +343,22 @@ describe("registered Copilot agents", () => {
       "openai-secret",
     );
 
-    expect(agents["general-assistant"]).toBeInstanceOf(BuiltInAgent);
+    /*
+     * The deferred-tools wrapper, not `BuiltInAgent`.
+     *
+     * The CopilotKit `BuiltInAgent` that used to stand here was removed when the Remi loop replaced
+     * it, and naming a class that is no longer constructed is an assertion about nothing. What is
+     * still worth pinning is the property that made the wrapper necessary: tools are resolved from
+     * the MESSAGE, and both agent kinds take their tools at construction, so the agent has to be
+     * built after the message arrives. That is asserted through the configuration the run carries
+     * rather than through a constructor, which is what survives the next runtime change.
+     */
+    const builtIn = agents[REMII_AGENT_ID] as unknown as {
+      configuration: { botId: string; systemPrompt: string };
+    };
+    expect(builtIn.configuration.botId).toBe(REMII_AGENT_ID);
+    expect(builtIn.configuration.systemPrompt).toContain("Be helpful.");
+    // The remote half is unchanged: a wrapped transport is still how its stream is guarded.
     expectWrappedHttpTransport(agents.risk);
   });
 
@@ -329,8 +383,8 @@ describe("registered Copilot agents", () => {
     const agents = await buildAgents(
       [
         {
-          id: "general-assistant",
-          name: "General Assistant",
+          id: REMII_AGENT_ID,
+          name: "Remii",
           type: "built_in",
           systemPrompt: "Be helpful.",
         },
@@ -485,8 +539,8 @@ describe("registered Copilot agents", () => {
   test("resolves fresh built-in agents and credentials for every request", async () => {
     const registered = [
       {
-        id: "general-assistant",
-        name: "General Assistant",
+        id: REMII_AGENT_ID,
+        name: "Remii",
         type: "built_in" as const,
         systemPrompt: "Be helpful.",
       },
@@ -508,11 +562,11 @@ describe("registered Copilot agents", () => {
       resolveModelApiKey,
     );
 
-    expect(first["general-assistant"]).not.toBe(second["general-assistant"]);
+    expect(first[REMII_AGENT_ID]).not.toBe(second[REMII_AGENT_ID]);
     expect(resolutionCount).toBe(2);
     const consoleError = spyOn(console, "error").mockImplementation(() => {});
     try {
-      await expect(second["general-assistant"]?.runAgent()).rejects.toThrow(
+      await expect(second[REMII_AGENT_ID]?.runAgent()).rejects.toThrow(
         "Add the package credential or set OPENAI_API_KEY",
       );
     } finally {
@@ -717,7 +771,7 @@ describe("standing agent roles", () => {
       async () => null,
     );
 
-    const request = new Request("http://openbot.test/api/copilotkit");
+    const request = new Request("http://remii.test/api/copilotkit");
     const resolved = await factory({ request });
 
     expect(seen.request).toBe(request);
@@ -747,7 +801,7 @@ describe("standing agent roles", () => {
       { provider: "openai", defaultModel: "gpt-5.6-terra" },
       async () => null,
     );
-    const request = new Request("http://openbot.test/api/copilotkit");
+    const request = new Request("http://remii.test/api/copilotkit");
 
     const before = await factory({ request });
     roleDescription = "Reconcile corporate card statements.";
@@ -813,7 +867,17 @@ describe("connected-vendor lookup diagnostics", () => {
       undefined,
       loadVendors,
     );
-    expect(agents["general-assistant"]).toBeInstanceOf(BuiltInAgent);
+    // Not `toBeInstanceOf(BuiltInAgent)`: the CopilotKit wrapper was removed when the Remi loop
+    // replaced it, so that assertion names a class nothing constructs any more. The built-in Bot's
+    // presence is what this helper is checking before it goes on to the remote half, and reading the
+    // configuration answers it in terms that survive the next runtime change.
+    expect(
+      (
+        agents[REMII_AGENT_ID] as unknown as {
+          configuration: { botId: string };
+        }
+      ).configuration.botId,
+    ).toBe(REMII_AGENT_ID);
     const remote = agents.risk;
     if (!remote) throw new Error("Fixture remote agent was not built.");
     await remote.clone().runAgent();
@@ -952,7 +1016,7 @@ describe("what a Bot is told it holds", () => {
       .replace(/\s+/g, " ");
     expect(guidance).toContain("missing grant");
     expect(guidance).toContain("name the capability");
-    expect(guidance).toContain("administrator can grant it");
+    expect(guidance).toContain("it can be granted on that connector");
     expect(guidance).toContain("do not ask the person to sign in");
   });
 
@@ -992,7 +1056,44 @@ describe("what a Bot is told it holds", () => {
     expect(grantedToolGuidance([], [])).toBe("");
   });
 
-  test("a built-in Bot is told before it is told about the browser", () => {
+  /*
+   * The Bot that HOLDS the computer, which is the only one that gets browser prose at all.
+   *
+   * This used to run against `risk-analyst` — any Bot — and it passed then, because every Bot was told
+   * about the browser. It is now scoped to Remii, because Remii is the only Bot with a computer and a
+   * worker with no screen cannot be reminded to use one. The order assertion is unchanged and still
+   * the point: a Bot holding Google Drive tools has to hear about them before it hears about a
+   * browser, or it browses to drive.google.com and meets a sign-in page it could never have satisfied.
+   */
+  test("the Bot that holds the computer is told about its grants before the browser", () => {
+    const prompt = builtInAgentConfiguration(
+      {
+        id: REMII_AGENT_ID,
+        name: "Remii",
+        type: "built_in",
+        systemPrompt: "Handle whatever is asked.",
+      },
+      { provider: "openai", defaultModel: "gpt-5.6-terra" },
+      "openai-secret",
+      drive,
+      "BROWSER GUIDANCE HERE",
+    ).prompt as string;
+
+    expect(prompt.indexOf("google-drive")).toBeGreaterThan(-1);
+    expect(prompt.indexOf("google-drive")).toBeLessThan(
+      prompt.indexOf("BROWSER GUIDANCE HERE"),
+    );
+  });
+
+  /*
+   * And the other half of that decision, asserted directly.
+   *
+   * A Bot with no computer must not be given browser prose at all, because a paragraph about a mouse
+   * and a screen is a paragraph about hands the Bot does not have — and a Bot told it has hands reaches
+   * for the explanation that feels closest, which is a permission somebody is withholding. That
+   * invention is the whole reason this gate exists, and it is invisible without a test.
+   */
+  test("a Bot without the computer is told it has none, and is not given browser prose", () => {
     const prompt = builtInAgentConfiguration(
       {
         id: "risk-analyst",
@@ -1006,11 +1107,43 @@ describe("what a Bot is told it holds", () => {
       "BROWSER GUIDANCE HERE",
     ).prompt as string;
 
-    // Order is the fix, not merely presence: the grants have to land before the browser prose.
-    expect(prompt.indexOf("google-drive")).toBeGreaterThan(-1);
-    expect(prompt.indexOf("google-drive")).toBeLessThan(
-      prompt.indexOf("BROWSER GUIDANCE HERE"),
-    );
+    expect(prompt).not.toContain("BROWSER GUIDANCE HERE");
+    expect(prompt).toContain("You do not have a computer");
+    // And it is told who to ask, so the absence reads as a fact with a remedy rather than a refusal.
+    expect(prompt).toContain("REMII HAS THE COMPUTER");
+    expect(prompt).toContain("message_bot");
+  });
+
+  test("the computerless paragraph never describes hands or a screen it cannot use", () => {
+    // The precise failure being prevented: a Bot reporting coordinates, or what a button said, for a
+    // screen it never saw.
+    const prompt = builtInAgentConfiguration(
+      {
+        id: "risk-analyst",
+        name: "Risk Analyst",
+        type: "built_in",
+        systemPrompt: "Investigate policies.",
+      },
+      { provider: "openai", defaultModel: "gpt-5.6-terra" },
+      "openai-secret",
+      [],
+      "BROWSER GUIDANCE HERE",
+    ).prompt as string;
+
+    expect(prompt).not.toContain("computer_click");
+    expect(prompt).not.toContain("computer_screen");
+    expect(prompt).toMatch(/never claim you looked at a page/i);
+
+    /*
+     * The computerless guidance must not name an approver.
+     *
+     * Scoped to this guidance rather than the whole prompt, because `SOLE_PERSON_GUIDANCE` deliberately
+     * uses the word: "there is no administrator" is how it forbids it, and asserting on the full prompt
+     * would be asserting that the guard against this failure never mentions the thing it guards against.
+     */
+    expect(COMPUTERLESS_GUIDANCE).not.toMatch(/administrator/i);
+    // The whole prompt still forbids the dead end, which is the other half of the same promise.
+    expect(prompt).toMatch(/never tell them to ask one/i);
   });
 });
 
@@ -1035,8 +1168,8 @@ describe("where a Bot says its answer came from", () => {
     // The Bot that needs it most. No tools and no computer means nothing it says was read anywhere.
     const prompt = builtInAgentConfiguration(
       {
-        id: "general-assistant",
-        name: "General Assistant",
+        id: REMII_AGENT_ID,
+        name: "Remii",
         type: "built_in",
         systemPrompt: "Be helpful.",
       },
@@ -1099,8 +1232,8 @@ describe("where a Bot says its answer came from", () => {
  */
 describe("a person's standing instructions", () => {
   const assistant = {
-    id: "general-assistant",
-    name: "General Assistant",
+    id: REMII_AGENT_ID,
+    name: "Remii",
     type: "built_in" as const,
     systemPrompt: "Be helpful.",
   };
@@ -1164,9 +1297,28 @@ describe("a person's standing instructions", () => {
       const prompt = promptWith(instructions as string | null);
 
       expect(prompt).not.toContain("standing instructions");
-      // Byte for byte what a deployment had before any of this existed, which is what most people
-      // on most days get.
-      expect(prompt).toBe(`Be helpful.\n\n${PROVENANCE_GUIDANCE}`);
+      /*
+       * The three unconditional blocks, and nothing else.
+       *
+       * WAS `Be helpful.\n\n${PROVENANCE_GUIDANCE}` — provenance alone. Two more blocks are now
+       * carried by every Bot regardless of what a deployment has configured: `MOTIVE_GUIDANCE` (keep
+       * working until it is done, ask rather than guess, save a report as a file) and
+       * `SOLE_PERSON_GUIDANCE` (the person in this conversation is the only grant there is, and there
+       * is nobody to escalate to).
+       *
+       * Assembled from the named constants rather than restated, so a Bot that stops carrying one of
+       * them fails here instead of quietly losing a rule every prompt in the product relies on. Both
+       * are unconditional in `builtInAgentConfiguration`, which is why an empty tool list, no computer
+       * and no standing instructions still leaves them in place.
+       */
+      expect(prompt).toBe(
+        [
+          "Be helpful.",
+          PROVENANCE_GUIDANCE,
+          MOTIVE_GUIDANCE,
+          SOLE_PERSON_GUIDANCE,
+        ].join("\n\n"),
+      );
     },
   );
 
@@ -1411,7 +1563,7 @@ describe("a person's standing instructions", () => {
     );
 
     await factory({
-      request: new Request("http://openbot.test/api/copilotkit"),
+      request: new Request("http://remii.test/api/copilotkit"),
     });
 
     /*
@@ -1437,23 +1589,56 @@ describe("a person's standing instructions", () => {
  */
 describe("a chat turn is not sent a conversation the model API refuses", () => {
   const assistant = {
-    id: "general-assistant",
-    name: "General Assistant",
+    id: REMII_AGENT_ID,
+    name: "Remii",
     type: "built_in" as const,
     systemPrompt: "Be helpful.",
   };
   const model = { provider: "openai" as const, defaultModel: "gpt-5.6-terra" };
 
   /** The messages a run reaches `BuiltInAgent.run` with, without a model call behind them. */
-  function captureRuns() {
+  /**
+   * The messages the model actually receives, captured where the guard has already run.
+   *
+   * `runLoop` rather than the old `BuiltInAgent.prototype.run`. The CopilotKit wrapper was removed
+   * when the Remi loop replaced it, so spying there captured nothing and every assertion below read
+   * an empty `seen` — which looks exactly like "the guard dropped everything". `runLoop` is what
+   * `RemiLoopAgent.run` hands its PREPARED input to, after `sanitizeSeededHistory` and the resume
+   * synthesis, so it is both the last point the guarded conversation is whole and the seam the model
+   * loop is replaced at.
+   */
+  async function captureRuns(run: () => unknown) {
     const seen: RunAgentInput[] = [];
-    const spy = spyOn(BuiltInAgent.prototype, "run").mockImplementation(
+    const spy = spyOn(RemiLoopAgent.prototype, "runLoop").mockImplementation(
       (input: RunAgentInput) => {
         seen.push(input);
         return EMPTY;
       },
     );
-    return { seen, restore: () => spy.mockRestore() };
+    try {
+      /*
+       * STARTED AND SUBSCRIBED HERE, then waited on. Two things changed together and both had to.
+       *
+       * `RemiLoopAgent.run` returns a cold Observable: nothing runs until somebody subscribes, so a
+       * caller that only called `run` was starting no run at all. That worked against the old
+       * `BuiltInAgent`, whose work happened at the call.
+       *
+       * And the input is prepared inside a promise — attachment inlining and recall are both async —
+       * so `runLoop` is reached on a later tick than the subscription. Draining the microtask queue
+       * turns the spy from "was it called yet" into "was it called". A real timer turn would do, but
+       * these are all promise chains and nothing here waits on I/O.
+       */
+      const subscription = (
+        run() as { subscribe: (fn?: unknown) => unknown }
+      ).subscribe(() => {});
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      (subscription as { unsubscribe?: () => void })?.unsubscribe?.();
+    } finally {
+      spy.mockRestore();
+    }
+    return seen;
   }
 
   function input(
@@ -1499,20 +1684,14 @@ describe("a chat turn is not sent a conversation the model API refuses", () => {
    */
   async function builtIn() {
     const agents = await buildAgents([assistant], model, "openai-secret");
-    const agent = agents["general-assistant"];
-    if (!agent) throw new Error('buildAgents returned no "general-assistant"');
+    const agent = agents[REMII_AGENT_ID];
+    if (!agent) throw new Error(`buildAgents returned no "${REMII_AGENT_ID}"`);
     return agent;
   }
 
   test("the unanswerable call is gone from what the run converts", async () => {
     const agent = await builtIn();
-    const { seen, restore } = captureRuns();
-
-    try {
-      agent.run(input(danglingCall));
-    } finally {
-      restore();
-    }
+    const seen = await captureRuns(() => agent.run(input(danglingCall)));
 
     const messages = seen[0]?.messages ?? [];
     // Everything the person and the Bot said survives. Only the call nothing will ever answer is
@@ -1524,16 +1703,14 @@ describe("a chat turn is not sent a conversation the model API refuses", () => {
   });
 
   test("the clone the runtime runs guards it too", async () => {
-    // `agents[agentId].clone()` happens before every single run, and the base class's clone builds a
-    // plain `BuiltInAgent`. Inherited unchanged, the guard would never once be reached in production.
+    /*
+     * `agents[agentId].clone()` happens before every single run, and `RemiLoopAgent.clone` builds a
+     * fresh instance of the same class — copying the middlewares across. A guard that lived on the
+     * cloned instance rather than in `run` itself would never once be reached in production, which is
+     * what this case is here to stop.
+     */
     const agent = (await builtIn()).clone();
-    const { seen, restore } = captureRuns();
-
-    try {
-      agent.run(input(danglingCall));
-    } finally {
-      restore();
-    }
+    const seen = await captureRuns(() => agent.run(input(danglingCall)));
 
     expect(seen[0]?.messages).toHaveLength(3);
     expect(seen[0]?.messages?.[1]).not.toHaveProperty("toolCalls");
@@ -1547,17 +1724,13 @@ describe("a chat turn is not sent a conversation the model API refuses", () => {
      * error arriving from the other side.
      */
     const agent = await builtIn();
-    const { seen, restore } = captureRuns();
-
-    try {
+    const seen = await captureRuns(() =>
       agent.run(
         input(danglingCall, [
           { interruptId: "chatcmpl-tool-8dd56dc7497c5ea9", status: "resolved" },
         ]),
-      );
-    } finally {
-      restore();
-    }
+      ),
+    );
 
     expect(seen[0]?.messages?.[1]).toMatchObject({
       toolCalls: [{ id: "chatcmpl-tool-8dd56dc7497c5ea9" }],
@@ -1640,9 +1813,18 @@ describe("a chat turn is not sent a conversation the model API refuses", () => {
         floor: 0,
       },
     );
-    const agent = agents["general-assistant"];
-    if (!agent) throw new Error('buildAgents returned no "general-assistant"');
-    const { seen, restore } = captureRuns();
+    const agent = agents[REMII_AGENT_ID];
+    if (!agent) throw new Error(`buildAgents returned no "${REMII_AGENT_ID}"`);
+    const seen: RunAgentInput[] = [];
+    // `runLoop` directly rather than through `captureRuns`, which starts and subscribes for you.
+    // This case subscribes itself, because it also asserts that the run COMPLETES rather than merely
+    // reaching the loop.
+    const spy = spyOn(RemiLoopAgent.prototype, "runLoop").mockImplementation(
+      (runInput: RunAgentInput) => {
+        seen.push(runInput);
+        return EMPTY;
+      },
+    );
 
     // Kept rather than discarded: `error: () => resolve()` here turned a run that failed outright
     // into a passing test, and the same handler is what swallows anything thrown inside the
@@ -1660,7 +1842,7 @@ describe("a chat turn is not sent a conversation the model API refuses", () => {
         });
       });
     } finally {
-      restore();
+      spy.mockRestore();
     }
 
     expect(failed).toEqual([]);
@@ -1690,8 +1872,8 @@ describe("a chat turn is not sent a conversation the model API refuses", () => {
  */
 describe("where an attachment reaches the model, and where it deliberately does not", () => {
   const assistant = {
-    id: "general-assistant",
-    name: "General Assistant",
+    id: REMII_AGENT_ID,
+    name: "Remii",
     type: "built_in" as const,
     systemPrompt: "Be helpful.",
   };
@@ -1754,7 +1936,16 @@ describe("where an attachment reaches the model, and where it deliberately does 
     runInput: RunAgentInput,
     onRun: (received: RunAgentInput) => void = () => {},
   ): Promise<Error[]> {
-    const spy = spyOn(BuiltInAgent.prototype, "run").mockImplementation(
+    /*
+     * `RemiLoopAgent.prototype.runLoop`, not the removed `BuiltInAgent.prototype.run`.
+     *
+     * The CopilotKit wrapper is gone, so that spy caught nothing and every caller of this helper read
+     * an empty `seen` — which for the three attachment cases below looked like "the attachment never
+     * reached the model" rather than "the seam was moved years of comments ago". `runLoop` is what the
+     * loop hands its prepared input to, after attachment inlining, so it is where the parts a provider
+     * would receive are actually observable.
+     */
+    const spy = spyOn(RemiLoopAgent.prototype, "runLoop").mockImplementation(
       (received: RunAgentInput) => {
         onRun(received);
         return EMPTY;
@@ -1812,7 +2003,7 @@ describe("where an attachment reaches the model, and where it deliberately does 
       async () => null,
     );
     const error = await runToError(
-      built(agents, "general-assistant"),
+      built(agents, REMII_AGENT_ID),
       input(attachmentMessage),
     );
 
@@ -1927,7 +2118,7 @@ describe("where an attachment reaches the model, and where it deliberately does 
       loadAttachment,
     );
     const failed = await runToCompletion(
-      built(agents, "general-assistant"),
+      built(agents, REMII_AGENT_ID),
       input(attachmentMessage),
     );
 
@@ -1982,7 +2173,7 @@ describe("where an attachment reaches the model, and where it deliberately does 
       undefined,
       loadAttachment,
     );
-    return built(agents, "general-assistant");
+    return built(agents, REMII_AGENT_ID);
   }
 
   test("an attachment that vanished from an older message becomes a note", async () => {
@@ -2066,7 +2257,7 @@ describe("where an attachment reaches the model, and where it deliberately does 
       },
     );
     const failed = await runToCompletion(
-      built(agents, "general-assistant"),
+      built(agents, REMII_AGENT_ID),
       input(twoTurns),
     );
 
@@ -2121,7 +2312,7 @@ describe("where an attachment reaches the model, and where it deliberately does 
     );
 
     const failed = await runToCompletion(
-      built(agents, "general-assistant"),
+      built(agents, REMII_AGENT_ID),
       input(twoTurns),
     );
 
@@ -2223,7 +2414,7 @@ describe("where an attachment reaches the model, and where it deliberately does 
     );
 
     const failed = await runToCompletion(
-      built(agents, "general-assistant"),
+      built(agents, REMII_AGENT_ID),
       input(twoTurns),
     );
     expect(failed).toEqual([]);
@@ -2281,7 +2472,7 @@ describe("where an attachment reaches the model, and where it deliberately does 
 
     const seen: RunAgentInput[] = [];
     const failed = await runToCompletion(
-      built(agents, "general-assistant"),
+      built(agents, REMII_AGENT_ID),
       input(twoTurns),
       (received) => {
         seen.push(received);
@@ -2331,7 +2522,7 @@ describe("where an attachment reaches the model, and where it deliberately does 
 
     const seen: RunAgentInput[] = [];
     const failed = await runToCompletion(
-      built(agents, "general-assistant"),
+      built(agents, REMII_AGENT_ID),
       input(twoTurns),
       (received) => {
         seen.push(received);

@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { createApp } from "../src/app";
 import { AuditQueryError, auditQueryFromUrl } from "../src/audit";
-import { loadConfig } from "../src/config";
 import { PAGE_LIMIT_ERROR } from "../src/paging";
-import { testEnvironment } from "./support/environment";
 
 /**
  * The audit trail's page size, held to the same rule as every other list.
@@ -14,20 +11,9 @@ import { testEnvironment } from "./support/environment";
  * people lists already answer 400 through `parsePageLimit`; this endpoint was the odd one.
  */
 
-const config = loadConfig({ ...testEnvironment() });
-
-const adminAuth = {
-  handler: () => new Response(null, { status: 204 }),
-  api: {
-    getSession: async () => ({
-      user: { id: "admin", email: "admin@openbot.test" },
-    }),
-  },
-};
-
 function query(search: string) {
   return auditQueryFromUrl(
-    new URL(`http://openbot.local/api/admin/audit-events${search}`),
+    new URL(`http://remii.local/api/admin/audit-events${search}`),
   );
 }
 
@@ -69,47 +55,12 @@ describe("audit-events limit validation", () => {
     );
   });
 
-  test("the admin route answers 400 for a malformed limit and never reads", async () => {
-    const app = createApp(
-      config,
-      adminAuth,
-      { rolesForUser: async () => ["admin"] },
-      {
-        list: async () => {
-          throw new Error("must not reach the store with a bad limit");
-        },
-      },
-    );
-
-    const response = await app.request(
-      "http://openbot.local/api/admin/audit-events?limit=12abc",
-    );
-
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: PAGE_LIMIT_ERROR,
-    });
-  });
-
-  test("the admin route still pages with a valid limit", async () => {
-    const queries: { limit?: number }[] = [];
-    const app = createApp(
-      config,
-      adminAuth,
-      { rolesForUser: async () => ["admin"] },
-      {
-        list: async (received) => {
-          queries.push({ limit: (received as { limit: number }).limit });
-          return { events: [], nextCursor: undefined };
-        },
-      },
-    );
-
-    const response = await app.request(
-      "http://openbot.local/api/admin/audit-events?limit=10",
-    );
-
-    expect(response.status).toBe(200);
-    expect(queries).toEqual([{ limit: 10 }]);
-  });
+  /*
+   * WAS two tests here, driving `createApp` against `/api/admin/audit-events?limit=...` — one
+   * expecting 400 for a malformed limit and no store call, one expecting 200 and `{ limit: 10 }`.
+   *
+   * That route went with the admin surface, so both were answering 404. The parser is still there and
+   * the case above already asserts it directly — what these added was the wiring, and there is none
+   * left to add to.
+   */
 });

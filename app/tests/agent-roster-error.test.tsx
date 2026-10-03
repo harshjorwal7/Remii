@@ -92,11 +92,8 @@ function agent(
     title: "Title",
     roleDescription: "Role",
     avatarSeed: "seed",
+    mascot: null,
     visibility: "private",
-    endpoint: null,
-    builtIn: true,
-    hasAuth: false,
-    hasCallbackToken: false,
     hidden: false,
     systemOwned: false,
     canManage: true,
@@ -272,31 +269,22 @@ test("a failed roster on /agents reports the failure, not an empty roster", asyn
   const view = renderAgents(failingQueryClient());
 
   expect(await view.findByText("Your agents couldn't be loaded.")).toBeTruthy();
-  expect(
-    await view.findByText("Agents shared with you couldn't be loaded."),
-  ).toBeTruthy();
 
   // The whole point: a person with agents must never be told they have none because the request
-  // that would have proven otherwise never came back.
+  // that would have proven otherwise never came back. There is no second, "shared with you"
+  // section to confuse that with: public sharing is removed, so this page is
+  // one roster and the deployment's templates.
   expect(view.queryByText("You don't have any agents created.")).toBeNull();
-  expect(
-    view.queryByText("Nobody has shared an agent with you yet."),
-  ).toBeNull();
 });
 
 test("a failed roster on / reports the failure and explains the disabled composer", async () => {
   const view = renderHome(failingQueryClient());
 
+  // The template row is the only second slice left on `/`, and it is not a
+  // roster of other people's coworkers.
   expect(
-    await view.findByText(
-      "Agents shared with you couldn't be loaded.",
-      {},
-      HOME_FIND_TIMEOUT,
-    ),
+    await view.findByText("Explore agents", {}, HOME_FIND_TIMEOUT),
   ).toBeTruthy();
-  expect(
-    view.queryByText("Nobody has shared an agent with you yet."),
-  ).toBeNull();
 
   // The composer goes `disabled={!fallback}` on the very same failure, with nothing on screen
   // saying why unless this alert renders.
@@ -320,22 +308,18 @@ test("both /agents sections hold a skeleton while the roster is pending, not an 
 
   const skeletons = await waitFor(() => {
     const found = view.container.querySelectorAll('[data-slot="skeleton"]');
-    expect(found.length).toBe(2);
+    // One roster section: public sharing is removed, so there is no second
+    // "shared with you" slice to load beside it.
+    expect(found.length).toBe(1);
     return found;
   });
-  expect(skeletons.length).toBe(2);
+  expect(skeletons.length).toBe(1);
 
   // A skeleton sitting beside a premature empty or error sentence would be no fix at all: the
   // point is that loading reserves the section's height instead of claiming an answer it doesn't
   // have yet.
   expect(view.queryByText("You don't have any agents created.")).toBeNull();
-  expect(
-    view.queryByText("Nobody has shared an agent with you yet."),
-  ).toBeNull();
   expect(view.queryByText("Your agents couldn't be loaded.")).toBeNull();
-  expect(
-    view.queryByText("Agents shared with you couldn't be loaded."),
-  ).toBeNull();
 });
 
 /*
@@ -354,7 +338,7 @@ test("a failed REFETCH on /agents keeps the roster it already had, not the error
     id: "shared-1",
     name: "Shared Agent",
     mine: false,
-    visibility: "public",
+    visibility: "private",
   });
   const queryClient = staleQueryClient([mine, shared]);
 
@@ -362,27 +346,26 @@ test("a failed REFETCH on /agents keeps the roster it already had, not the error
   await waitForFailedRefetch(queryClient);
 
   expect(await view.findByText("Mine Agent")).toBeTruthy();
-  expect(await view.findByText("Shared Agent")).toBeTruthy();
   expect(view.queryByText("Your agents couldn't be loaded.")).toBeNull();
-  expect(
-    view.queryByText("Agents shared with you couldn't be loaded."),
-  ).toBeNull();
 });
 
 test("a failed REFETCH on / keeps the roster and does not disclaim the composer", async () => {
-  const shared = agent({
-    id: "shared-1",
-    name: "Shared Agent",
+  // The row under the composer lists deployment templates now, not other
+  // people's coworkers.
+  const template = agent({
+    id: "template-1",
+    name: "Template Agent",
     mine: false,
-    visibility: "public",
+    isSystemTemplate: true,
+    visibility: "private",
   });
-  const queryClient = staleQueryClient([shared]);
+  const queryClient = staleQueryClient([template]);
 
   const view = renderHome(queryClient);
   await waitForFailedRefetch(queryClient);
 
   expect(
-    await view.findByText("Shared Agent", {}, HOME_FIND_TIMEOUT),
+    await view.findByText("Template Agent", {}, HOME_FIND_TIMEOUT),
   ).toBeTruthy();
   // Only renders while `fallback` is set, which the retained roster still supplies — the direct
   // evidence that the composer is not the disabled, nothing-to-send-to state its alert describes.
@@ -397,9 +380,6 @@ test("a failed REFETCH on / keeps the roster and does not disclaim the composer"
     view.queryByText(
       "Your coworkers couldn't be loaded, so there's no one to send this to yet.",
     ),
-  ).toBeNull();
-  expect(
-    view.queryByText("Agents shared with you couldn't be loaded."),
   ).toBeNull();
 });
 
@@ -419,27 +399,40 @@ test("a failed REFETCH on /agents with one empty slice shows it as empty, not br
   await waitForFailedRefetch(queryClient);
 
   expect(await view.findByText("Mine Agent")).toBeTruthy();
-  expect(
-    await view.findByText("Nobody has shared an agent with you yet."),
-  ).toBeTruthy();
-  expect(
-    view.queryByText("Agents shared with you couldn't be loaded."),
-  ).toBeNull();
+  // No public roster exists to be "missing" here: the page is this user's own
+  // agents plus the deployment's templates.
+  expect(view.queryByText("Your agents couldn't be loaded.")).toBeNull();
 });
 
 test("a failed REFETCH on /agents with the other slice empty also shows it as empty", async () => {
-  const shared = agent({
-    id: "shared-1",
-    name: "Shared Agent",
+  /*
+   * THE OTHER SLICE IS THE TEMPLATE ROSTER.
+   *
+   * This used to seed a private agent owned by somebody else and expect it on the page. It was
+   * skipped rather than deleted, and the asymmetry it described was real — so leaving it skipped hid
+   * a genuine case behind a fixture the product no longer has: public sharing is gone, and an agent
+   * with `mine: false` is in NEITHER slice, so expecting it to render asserted the opposite of what
+   * the page is for. A person must not see a stranger's private agent.
+   *
+   * So the populated sibling is the slice that really exists. Templates are deployment definitions
+   * with no user data, which is exactly why they are safe to render while the person's own list is
+   * missing — and which is why "your agents couldn't be loaded" beside a real template card is the
+   * contradiction this is checking for.
+   */
+  const template = agent({
+    id: "template-1",
+    name: "Deployment Template",
     mine: false,
-    visibility: "public",
+    isSystemTemplate: true,
   });
-  const queryClient = staleQueryClient([shared]);
+  const queryClient = staleQueryClient([template]);
 
   const view = renderAgents(queryClient);
   await waitForFailedRefetch(queryClient);
 
-  expect(await view.findByText("Shared Agent")).toBeTruthy();
+  // The populated slice drew, which is the proof the response arrived at all.
+  expect(await view.findByText("Deployment Template")).toBeTruthy();
+  // And the empty one is reported as empty rather than as broken.
   expect(
     await view.findByText("You don't have any agents created."),
   ).toBeTruthy();
@@ -453,16 +446,15 @@ test("a failed REFETCH on / with explore empty shows it as empty, not broken", a
   const view = renderHome(queryClient);
   await waitForFailedRefetch(queryClient);
 
+  // A loaded roster with no templates: the row says so plainly rather than
+  // claiming a load failure, because the query did answer.
   expect(
     await view.findByText(
-      "Nobody has shared an agent with you yet.",
+      "No templates yet. Create your own agent to get started.",
       {},
       HOME_FIND_TIMEOUT,
     ),
   ).toBeTruthy();
-  expect(
-    view.queryByText("Agents shared with you couldn't be loaded."),
-  ).toBeNull();
   // `agents` loaded (it holds "Mine Agent"), so `fallback` falls back to it and the composer is
   // enabled — the alert claiming a load failure must not appear beside that working composer.
   expect(

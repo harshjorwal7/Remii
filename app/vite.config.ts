@@ -21,13 +21,13 @@ import { listenPort } from "../shared/listen-port";
  * own middleware below.
  */
 function announceServerPort(port: number): Plugin {
-  const tag = `<script>window.__OPENBOT_WS_PORT__=${JSON.stringify(String(port))};</script>`;
+  const tag = `<script>window.__REMII_WS_PORT__=${JSON.stringify(String(port))};</script>`;
   const inject = (html: string) =>
-    html.includes("__OPENBOT_WS_PORT__")
+    html.includes("__REMII_WS_PORT__")
       ? html
       : html.replace("</head>", `    ${tag}\n  </head>`);
   return {
-    name: "openbot-announce-server-port",
+    name: "remii-announce-server-port",
     transformIndexHtml(html, ctx) {
       return ctx.server ? inject(html) : html;
     },
@@ -133,7 +133,7 @@ function routeComponentSplitPath(id: string): string | undefined {
   return filePath.slice(routesIndex + routesMarker.length);
 }
 
-export function selectOpenBotManualChunk(id: string): string | undefined {
+export function selectRemiiManualChunk(id: string): string | undefined {
   const routePath = routeComponentSplitPath(id);
   if (!routePath) {
     return undefined;
@@ -147,9 +147,6 @@ export function selectOpenBotManualChunk(id: string): string | undefined {
     routePath.startsWith("_authed/_app/channel/")
   ) {
     return "route-chat-core";
-  }
-  if (routePath.startsWith("_authed/admin/")) {
-    return "route-admin";
   }
   if (routePath.startsWith("_authed/settings/")) {
     return "route-settings";
@@ -165,7 +162,7 @@ export function selectOpenBotManualChunk(id: string): string | undefined {
 
 export const routeBuildRollupOutputOptions = {
   onlyExplicitManualChunks: true,
-  manualChunks: selectOpenBotManualChunk,
+  manualChunks: selectRemiiManualChunk,
 };
 
 export default defineConfig({

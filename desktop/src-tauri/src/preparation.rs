@@ -7,10 +7,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{deployment, engine::Address, harness::HarnessChoice, problem::Problem, quiet, stack};
 
-pub const REQUIRED: &str = "Finish installing OpenBot's local software before signing in or starting. Return to Install and try again.";
-pub const FILE: &str = ".openbot-prepared.json";
-const DEPENDENCIES: &str = ".openbot-dependencies.json";
-const LAUNCH: &str = ".openbot-launched.json";
+pub const REQUIRED: &str = "Finish installing Remii's local software before signing in or starting. Return to Install and try again.";
+pub const FILE: &str = ".remii-prepared.json";
+const DEPENDENCIES: &str = ".remii-dependencies.json";
+const LAUNCH: &str = ".remii-launched.json";
 const PACKAGES: [&str; 4] = ["", "server", "app", "worker"];
 
 #[derive(Serialize, Deserialize)]
@@ -68,13 +68,13 @@ pub fn launch(root: &Path) -> Option<Launch> {
 pub fn save_selected_root(config: &Path, root: &Path) -> Result<(), Problem> {
     let root = std::fs::canonicalize(root).map_err(|e| {
         Problem::with(
-            "OpenBot could not remember this installation for next time.",
+            "Remii could not remember this installation for next time.",
             e.to_string(),
         )
     })?;
     std::fs::create_dir_all(config).map_err(|e| {
         Problem::with(
-            "OpenBot could not remember this installation for next time.",
+            "Remii could not remember this installation for next time.",
             e.to_string(),
         )
     })?;
@@ -94,7 +94,7 @@ pub fn required(detail: impl Into<String>) -> Problem {
 
 fn hash_files(root: &Path, files: impl IntoIterator<Item = PathBuf>) -> Result<String, Problem> {
     let mut hash = Sha256::new();
-    hash.update(b"openbot-preparation-v1\0");
+    hash.update(b"remii-preparation-v1\0");
     hash.update(
         std::fs::canonicalize(root)
             .map_err(|e| required(e.to_string()))?
@@ -123,7 +123,7 @@ fn fingerprint(root: &Path) -> Result<String, Problem> {
     hash_files(
         root,
         [
-            PathBuf::from(".openbot-deployment"),
+            PathBuf::from(".remii-deployment"),
             PathBuf::from("container-images.json"),
             PathBuf::from("docker-compose.yml"),
             PathBuf::from(DEPENDENCIES),
@@ -459,10 +459,7 @@ fn main() {
     #[test]
     fn changed_bot_lockfile_or_deleted_package_requires_installation() {
         let f = Fixture::new();
-        let chosen = Some(HarnessChoice {
-            id: "langgraph".into(),
-            agent_url: None,
-        });
+        let chosen = Some(HarnessChoice { id: "langgraph".into() });
         f.prepared(chosen.as_ref());
         require_with(&f.root, Some(&chosen), |_| Ok(())).unwrap();
         assert!(require_with(&f.root, Some(&None), |_| panic!(
@@ -481,8 +478,7 @@ fn main() {
     fn successful_launch_remembers_exact_root_and_bot_without_credentials() {
         let f = Fixture::new();
         let chosen = HarnessChoice {
-            id: "byo-url".into(),
-            agent_url: Some("https://agent.example/ag-ui".into()),
+            id: "langgraph".into(),
         };
         f.prepared(Some(&chosen));
         let config = f.root.join("app-config");

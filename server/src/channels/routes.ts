@@ -12,6 +12,18 @@ import {
 } from "drizzle-orm";
 import type { Context, MiddlewareHandler } from "hono";
 import { Hono } from "hono";
+import type { MascotChoice } from "../../../shared/mascot-ids";
+import { REMII_AGENT_ID } from "../../../shared/remii";
+import {
+  ACTIVITY_SEVERITY,
+  activityKey,
+  type RunActivityStore,
+} from "../activity/store";
+import {
+  collectMascots,
+  type MascotByAgent,
+  readMascot,
+} from "../agents/mascot";
 import {
   AgentNotFoundError,
   type AgentProfileStore,
@@ -20,14 +32,16 @@ import type { AgentActor, AgentProfile } from "../agents/profile-types";
 import { type AuditStore, recordAuditEvent } from "../audit";
 import type { AppVariables } from "../auth/guards";
 import type { Database } from "../db/client";
-import { parsePageLimit } from "../paging";
+import type { RunActivityState } from "../db/schema";
 import {
   agentProfiles,
   channelAgents,
   channelMemberships,
   channels,
   intelligenceChannelMappings,
+  threads,
 } from "../db/schema";
+import { parsePageLimit } from "../paging";
 import {
   CHANNEL_ACTIVITY_TOPIC,
   type ChannelActivityEvent,
@@ -41,6 +55,16 @@ export type AgentChannel = {
   id: string;
   name: string;
   agentIds: string[];
+  /**
+   * The chosen mascot of each agent in this channel, by agent id.
+   *
+   * Carried here because a channel announces the agent itself and nothing else: `agentIds` is a list
+   * of strings, so a roster or a channel header would otherwise have to fetch every agent's profile
+   * just to draw a face, and would show a different face from the one the profile screen shows
+   * whenever the fetch had not landed yet. An agent with no chosen mascot is simply absent, and the
+   * client seeds from the id — see `collectMascots`.
+   */
+  mascots: MascotByAgent;
   threadId: string;
   active: boolean;
   /**
@@ -65,6 +89,29 @@ export type ChannelSummary = AgentChannel & {
   pinned: boolean;
   /** When the caller last had this channel open, or null for never. The caller's, only. */
   lastReadAt: Date | null;
+  /**
+   * What is happening in this channel right now, or null when nothing is.
+   *
+   * The most urgent run across the channel's Bots, not a list: a row is one place to put an
+   * indicator. See `ACTIVITY_SEVERITY` for why one of them wins and how.
+   */
+  activity: ChannelActivityBrief | null;
+};
+
+/**
+ * A run's state as the roster needs it: enough to pick a look, and nothing else.
+ *
+ * Deliberately not the run's own row. The roster draws a dot and a word; it has no use for a run id
+ * to join on or a start time to sort by, and putting the whole row on every channel in a page is a
+ * larger response to say less.
+ */
+export type ChannelActivityBrief = {
+  state: RunActivityState;
+  /** "With Research Desk" — who or what this run is waiting on, when it is waiting on something. */
+  label: string | null;
+  /** The failure, for a run that broke. */
+  detail: string | null;
+  botId: string;
 };
 
 /** What a client that ran an agent reports back about the message it just saw. */
@@ -217,6 +264,31 @@ export type ChannelStore = {
     channelId: string,
     busy: boolean,
   ): Promise<void>;
+  /**
+   * Is a run going in this channel right now, and what is it?
+   *
+   * READ PERSISTED, NOT ANNOUNCED. `signalChannelBusy` above is the browser telling the server about
+   * its own run; this is the server answering a browser that has just mounted and knows nothing. The
+   * difference is the whole reason it exists: a person who navigates away from a long task and comes
+   * back arrives with no run state at all — every counter in `channel-chat.tsx` is per-mount and
+   * starts at zero — so the composer believes the conversation is idle and offers Send, while a run
+   * this person never stopped is still going on the server.
+   *
+   * What that costs today is the Stop button disappearing for as long as the run lasts, which is the
+   * half a person notices. The half they do not notice is worse: their next message is refused by the
+   * runner, the refusal arrives as an empty 200 the client reads as success, and so the message is
+   * silently swallowed with no reply and no error. This is the read that lets the screen say "this is
+   * still working" and offer to end it.
+   *
+   * SCOPED TO THE CALLER and to the channel, so it can be polled by anyone signed in without becoming
+   * a roster of what every Bot is doing across the deployment. Throws `ChannelNotFoundError` for a
+   * channel the caller is not in, which is the same refusal `get` gives: not a channel, not a 403
+   * about a channel that exists.
+   */
+  runningIn(
+    actor: AgentActor,
+    channelId: string,
+  ): Promise<ChannelActivityBrief | null>;
 };
 
 const PRIVATE_AGENT_CHANNEL_DESCRIPTION = "Private agent channel.";
@@ -239,7 +311,47 @@ export function createChannelStore(
   database: Database,
   profileStore: AgentProfileStore,
   threadIdentity: ThreadIdentity,
+  /**
+   * What is running, for the roster's indicators. Absent in tests and wherever activity is not
+   * wanted, and then every channel reports none — the roster still renders, it just does not lie
+   * about being idle.
+   */
+  activity?: Pick<RunActivityStore, "worstForChannels">,
 ): ChannelStore {
+  // Remii is the pinned default coworker: ensure any existing Remii channel without an explicit pin is pinned.
+  //
+  // Through the query builder rather than a raw `sql` template, because a template renders
+  // `${channelMemberships.pinnedAt}` qualified in every position, and in a SET clause that is not
+  // valid SQL: `set "channel_memberships"."pinned_at" = now()` is rejected by PostgreSQL with
+  // 'column "channel_memberships" of relation "channel_memberships" does not exist'. The rejection
+  // was swallowed by the `.catch` below, so the statement never ran and the pin never appeared —
+  // a startup backfill that had never once succeeded and reported nothing.
+  void (async () => {
+    try {
+      const remiiChannels = database
+        .select({ channelId: channelAgents.channelId })
+        .from(channelAgents)
+        .where(eq(channelAgents.agentId, REMII_AGENT_ID));
+      await database
+        .update(channelMemberships)
+        .set({ pinnedAt: new Date() })
+        .where(
+          and(
+            isNull(channelMemberships.pinnedAt),
+            inArray(channelMemberships.channelId, remiiChannels),
+          ),
+        );
+    } catch (error) {
+      // Not fatal: this is a backfill of a display order, and a store that cannot reach the
+      // database is about to fail far more loudly. Say it happened, so it is not invisible.
+      console.error(
+        JSON.stringify({
+          type: "remii-pin-backfill-failed",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+  })();
   /**
    * Making a channel, on a transaction the caller already holds.
    *
@@ -285,20 +397,65 @@ export function createChannelStore(
       name,
       description: PRIVATE_AGENT_CHANNEL_DESCRIPTION,
     });
+    const isRemii = agentIds.includes(REMII_AGENT_ID);
     await transaction.insert(channelMemberships).values({
       channelId: id,
       userId: actor.id,
+      pinnedAt: isRemii ? new Date() : null,
     });
     await transaction
       .insert(channelAgents)
       .values(agentIds.map((agentId) => ({ channelId: id, agentId })));
+    await transaction
+      .insert(threads)
+      .values({
+        id: threadId,
+        userId: actor.id,
+      })
+      /*
+       * THE OWNER IS SET EVEN IF THE ROW IS ALREADY THERE, and this is the second half of a bug that
+       * needed both halves to be visible.
+       *
+       * The transcript route authorises against `threads.userId`, so a channel whose thread row
+       * already existed — created by `ensureThread` when a run touched that thread before anybody
+       * opened the conversation — ended up with a transcript nobody could read: the row was in the
+       * roster and every message in it was behind a 404-shaped empty screen. `onConflictDoNothing`
+       * here is what sealed it, because the owner could only ever be written on first insert.
+       *
+       * `coalesce` rather than an assignment, so re-opening a conversation can never move a thread
+       * away from the person who owns it.
+       */
+      .onConflictDoUpdate({
+        target: threads.id,
+        set: { userId: sql`coalesce(${threads.userId}, excluded.user_id)` },
+      });
     await transaction.insert(intelligenceChannelMappings).values({
       userId: actor.id,
       channelId: id,
       threadId,
     });
 
-    return { id, name, agentIds, threadId, active: true, lastMessageAt: null };
+    return {
+      id,
+      name,
+      agentIds,
+      // From the profiles already read above, so a new channel is never drawn with a face different
+      // from the one the profile screen shows. An agent with no chosen mascot is left out of the map
+      // rather than given a default, because absence is what tells the client to seed from the id.
+      mascots: Object.fromEntries(
+        [...profilesById]
+          .map(
+            ([agentId, profile]) => [agentId, profile.mascot ?? null] as const,
+          )
+          .filter(
+            (entry): entry is readonly [string, Partial<MascotChoice>] =>
+              entry[1] !== null,
+          ),
+      ),
+      threadId,
+      active: true,
+      lastMessageAt: null,
+    };
   };
 
   const store: ChannelStore = {
@@ -383,6 +540,8 @@ export function createChannelStore(
           threadId: intelligenceChannelMappings.threadId,
           lastMessageAt: channels.lastMessageAt,
           deletedAt: agentProfiles.deletedAt,
+          mascotShape: agentProfiles.mascotShape,
+          mascotColor: agentProfiles.mascotColor,
         })
         .from(channels)
         .innerJoin(
@@ -414,6 +573,7 @@ export function createChannelStore(
         id: first.id,
         name: first.name,
         agentIds: rows.map((row) => row.agentId),
+        mascots: collectMascots(rows),
         threadId: first.threadId,
         active: rows.every((row) => row.deletedAt === null),
         lastMessageAt: first.lastMessageAt,
@@ -489,6 +649,8 @@ export function createChannelStore(
           createdAt: channels.createdAt,
           pinnedAt: channelMemberships.pinnedAt,
           lastReadAt: channelMemberships.lastReadAt,
+          mascotShape: agentProfiles.mascotShape,
+          mascotColor: agentProfiles.mascotColor,
         })
         .from(channels)
         .innerJoin(
@@ -533,12 +695,17 @@ export function createChannelStore(
         if (summary) {
           summary.agentIds.push(row.agentId);
           summary.active &&= row.deletedAt === null;
+          const mascot = readMascot(row);
+          if (mascot) summary.mascots[row.agentId] = mascot;
           continue;
         }
         summaries.set(row.id, {
           id: row.id,
           name: row.name,
           agentIds: [row.agentId],
+          // Folded per row rather than over a separate list, so a channel and its agents stay in step
+          // and there is no second pass to keep in the same order as `agentIds`.
+          mascots: collectMascots([row]),
           threadId: row.threadId,
           active: row.deletedAt === null,
           summary: row.channelSummary,
@@ -548,9 +715,57 @@ export function createChannelStore(
           createdAt: row.createdAt,
           pinned: row.pinnedAt !== null,
           lastReadAt: row.lastReadAt,
+          /*
+           * Filled in below, once every channel is known, because deciding it per row would read
+           * the same Bot's runs again for each channel it is in.
+           */
+          activity: null,
         });
       }
-      return { channels: [...summaries.values()], nextCursor };
+      // Not named `channels`: that is the table this method has been querying all along, and a
+      // local of the same name would shadow it for the whole method body.
+      const listed = [...summaries.values()];
+      if (activity) {
+        /*
+         * One read for the whole page.
+         *
+         * The severity reduction is in the store, so this is a merge and not a decision: for each
+         * channel, the most urgent run of any Bot in it. Iterated over the page rather than over the
+         * map so a Bot in thirty channels costs one row read, not thirty.
+         */
+        const worst = await activity.worstForChannels(actor.id);
+        for (const channel of listed) {
+          let best: ChannelActivityBrief | null = null;
+          let bestSeverity = -Infinity;
+          for (const botId of channel.agentIds) {
+            /*
+             * THIS CHANNEL'S RUN, and only then a run with no channel at all.
+             *
+             * Keyed by Bot alone, one run lit every channel that Bot was in — and Remii is in all of
+             * them, so typing in one conversation put a "working" pulse on every other conversation
+             * on the screen. The fallback exists for a run with no channel (a direct conversation,
+             * which is not a roster row) and is deliberately second: a channel that has its own run
+             * says what is happening in it.
+             */
+            const run =
+              worst.get(activityKey(channel.id, botId)) ??
+              worst.get(activityKey(null, botId));
+            if (!run) continue;
+            const severity = ACTIVITY_SEVERITY[run.state as RunActivityState];
+            if (severity > bestSeverity) {
+              bestSeverity = severity;
+              best = {
+                state: run.state,
+                label: run.label,
+                detail: run.detail,
+                botId: run.botId,
+              };
+            }
+          }
+          channel.activity = best;
+        }
+      }
+      return { channels: listed, nextCursor };
     },
 
     async setPinned(actor, channelId, pinned) {
@@ -854,6 +1069,78 @@ export function createChannelStore(
         sql`select pg_notify(${CHANNEL_ACTIVITY_TOPIC}, ${JSON.stringify(event)})`,
       );
     },
+
+    async runningIn(actor, channelId) {
+      /*
+       * Membership FIRST, before anything is read about the channel.
+       *
+       * The check is the same one `signalChannelBusy` makes and for the same reason: a refusal that
+       * differs between "no such channel" and "not yours" turns this into an oracle for finding out
+       * which conversations exist. It is also the correct gate — this returns a live run's state, and
+       * a run's state is not something a non-member may learn.
+       *
+       * Absent an activity store (tests, deployments not recording runs) there is nothing to report,
+       * and `null` is the honest answer: "nothing is running here" rather than a guess.
+       */
+      if (!activity) return null;
+      const [membership] = await database
+        .select({ userId: channelMemberships.userId })
+        .from(channelMemberships)
+        .innerJoin(
+          channels,
+          and(
+            eq(channels.id, channelMemberships.channelId),
+            isNull(channels.deletedAt),
+          ),
+        )
+        .where(
+          and(
+            eq(channelMemberships.channelId, channelId),
+            eq(channelMemberships.userId, actor.id),
+          ),
+        );
+      if (!membership) throw new ChannelNotFoundError(channelId);
+
+      /*
+       * THIS CHANNEL'S RUNS, not the deployment's.
+       *
+       * `worstForChannels` reduces every open run the actor owns down to one per (channel, Bot) pair,
+       * which is the right shape for a roster row and too much for one channel: it reads every open run
+       * this person has anywhere, including thirty in other conversations, to answer a question about
+       * this one. Filtered here to this channel's Bots, then reduced by the store's own severity order,
+       * so "what decides how it looks" is decided in exactly one place and a row in the transcript and
+       * the same row in the roster cannot disagree about which run that was.
+       *
+       * The `null`-channel fallback is deliberately NOT taken, unlike in the roster. There, a run with
+       * no channel is a direct conversation and the roster row is its best available home. Here the
+       * caller named a channel, and answering about a run in some other conversation — or in no
+       * conversation at all — because a Bot is in both would put one conversation's Stop button on
+       * another conversation's screen.
+       */
+      const channel = await database
+        .select({ agentId: channelAgents.agentId })
+        .from(channelAgents)
+        .where(eq(channelAgents.channelId, channelId));
+      if (channel.length === 0) return null;
+      const worst = await activity.worstForChannels(actor.id);
+      let best: ChannelActivityBrief | null = null;
+      let bestSeverity = -Infinity;
+      for (const row of channel) {
+        const run = worst.get(activityKey(channelId, row.agentId));
+        if (!run) continue;
+        const severity = ACTIVITY_SEVERITY[run.state as RunActivityState];
+        if (severity > bestSeverity) {
+          bestSeverity = severity;
+          best = {
+            state: run.state,
+            label: run.label,
+            detail: run.detail,
+            botId: run.botId,
+          };
+        }
+      }
+      return best;
+    },
   };
   return store;
 }
@@ -1091,6 +1378,40 @@ export function createChannelRoutes(
     }
   });
 
+  /*
+   * WHAT IS RUNNING IN HERE, for a screen that has just mounted and cannot know.
+   *
+   * Distinct from the socket, and not a replacement for it. The roster socket carries activity as it
+   * happens, which is better than any poll and is what the sidebar uses. This exists for the one case
+   * the socket cannot serve: a conversation opened AFTER the run began, where the browser has no
+   * history of the event and would otherwise believe nothing is happening.
+   *
+   * `GET` and not part of the roster payload because it answers a different question. The roster says
+   * what each conversation looks like; this says whether this conversation is mid-turn, which is a
+   * fact about one thread and is polled by exactly one screen — the conversation.
+   */
+  routes.get("/:channelId/activity", requireUser, async (context) => {
+    const channelId = context.req.param("channelId");
+    if (!channelId.trim()) {
+      return context.json({ error: "A channel id is required." }, 400);
+    }
+
+    try {
+      const running = await store.runningIn(context.var.actor, channelId);
+      /*
+       * The brief, or null — never a `{ running: false }` flag beside it.
+       *
+       * Null and "not running" are the same answer here and there is only one of them, because a caller
+       * that has to tell "no run" apart from "no answer yet" will eventually get it wrong, and the
+       * wrong way round is a Stop button that stops nothing. A brief carries its own state, so a caller
+       * that genuinely needs to know whether the server could answer has the 200 itself.
+       */
+      return context.json({ activity: running });
+    } catch (error) {
+      return mapStoreError(context, error);
+    }
+  });
+
   routes.post("/:channelId/activity", requireUser, async (context) => {
     const parsed = parseActivityInput(
       await context.req.json().catch(() => null),
@@ -1204,6 +1525,7 @@ function channelDto(channel: AgentChannel): ChannelWire {
     id: channel.id,
     name: channel.name,
     agentIds: channel.agentIds,
+    mascots: channel.mascots,
     threadId: channel.threadId,
     active: channel.active,
     // ISO-8601 so the browser gets a string it can compare, like the roster's copy.
@@ -1221,6 +1543,7 @@ function channelSummaryDto(channel: ChannelSummary) {
     pinned: channel.pinned,
     // Serialised as ISO-8601 like lastMessageAt, so the browser can compare the two as strings.
     lastReadAt: channel.lastReadAt?.toISOString() ?? null,
+    activity: channel.activity,
   };
 }
 

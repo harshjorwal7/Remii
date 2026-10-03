@@ -1,7 +1,6 @@
 import { and, eq, isNotNull, isNull, or } from "drizzle-orm";
 import type { ManagedAgentConfig } from "../config";
 import { type RegisteredAgent, registeredAgentFromRow } from "../copilot";
-import type { CredentialSecretReader } from "../credentials";
 import type { Database } from "../db/client";
 import {
   agentProfiles,
@@ -10,7 +9,6 @@ import {
   channelMemberships,
   channels,
 } from "../db/schema";
-import { agentAuthHeaders, authFromConfiguration } from "./auth-header";
 import type { AgentActor } from "./profile-types";
 
 /**
@@ -22,9 +20,7 @@ import type { AgentActor } from "./profile-types";
  */
 export function createRuntimeAgentLoader(
   database: Database,
-  /** Resolves a customer agent's key at load time. Absent means no agent can carry one. */
-  vault?: { reader: CredentialSecretReader; encryptionKey: string },
-  /** Secret for the deployment-managed Bot. Never sent to customer-owned endpoints. */
+  /** Secret for the Bot this deployment runs. Sent only to endpoints it runs itself. */
   managedAgent?: ManagedAgentConfig,
 ) {
   return async (actor: AgentActor): Promise<RegisteredAgent[]> => {
@@ -39,18 +35,6 @@ export function createRuntimeAgentLoader(
     for (const row of active) {
       const agent = registeredAgentFromRow(row);
       if (!agent) continue;
-      const isRemoteAgent =
-        agent.type === "remote_ag_ui" || agent.type === "remote_mastra";
-      // The key is resolved per load, rather than being cached on the row: revoking a
-      // credential then takes effect on the next run rather than on the next restart.
-      if (isRemoteAgent && vault) {
-        const headers = await agentAuthHeaders({
-          reader: vault.reader,
-          encryptionKey: vault.encryptionKey,
-          auth: authFromConfiguration(row.configuration),
-        });
-        if (headers) agent.headers = headers;
-      }
       /*
        * Every endpoint this deployment runs gets the token, not just the first one.
        *
@@ -58,8 +42,14 @@ export function createRuntimeAgentLoader(
        * addressable, routed to, and answering `401 unauthorised` to everything. Its container is
        * this deployment's own, started on a port this deployment chose with this token in its
        * environment, so it is the same relationship the Bot in the box has.
+       *
+       * It is also the only credential any run carries. Nobody can register an endpoint or a key of
+       * their own, so there is no other header on this call and no vault to read one from.
        */
-      if (isRemoteAgent && managedAgent) {
+      if (
+        (agent.type === "remote_ag_ui" || agent.type === "remote_mastra") &&
+        managedAgent
+      ) {
         // Config parses URLs, while package rows retain their original spelling. Compare both
         // in canonical form so scheme/host case cannot silently drop the deployment token.
         const endpoint = managedEndpointIdentity(agent.endpoint);
@@ -71,7 +61,7 @@ export function createRuntimeAgentLoader(
         if (ours) {
           agent.headers = {
             ...agent.headers,
-            "x-openbot-agent-token": managedAgent.token,
+            "x-remii-agent-token": managedAgent.token,
           };
         }
       }
@@ -110,6 +100,9 @@ function selectActiveAgents(database: Database, actor: AgentActor) {
       name: agents.name,
       type: agents.type,
       configuration: agents.configuration,
+      // Read so a supervisor's tool list and its prompt are decided from one
+      // place. See `registeredAgentFromRow`.
+      override: agents.override,
       title: agentProfiles.title,
       roleDescription: agentProfiles.roleDescription,
     })
@@ -118,12 +111,13 @@ function selectActiveAgents(database: Database, actor: AgentActor) {
     .where(
       and(
         isNull(agentProfiles.deletedAt),
-        actor.role === "admin"
-          ? undefined
-          : or(
-              eq(agentProfiles.visibility, "public"),
-              eq(agentProfiles.ownerUserId, actor.id),
-            ),
+        // Strict per-user SaaS: no public sharing and no administrator
+        // override. System templates (owner null) are definitions; user bots
+        // are owner-only. Computers, workspaces and connections stay per-user.
+        or(
+          isNull(agentProfiles.ownerUserId),
+          eq(agentProfiles.ownerUserId, actor.id),
+        ),
       ),
     );
 }

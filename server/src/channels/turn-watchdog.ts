@@ -19,7 +19,7 @@
  * WHAT THE STREAM ACTUALLY DOES IN THIS PRODUCT, measured before any of this was designed, because
  * the answer decides whether a long tool call would be reported as a stall.
  *
- * OpenBot runs in Intelligence mode and has no other mode, so `POST /api/copilotkit/agent/:id/run`
+ * Remii runs in Intelligence mode and has no other mode, so `POST /api/copilotkit/agent/:id/run`
  * does not stream at all. It answers `Content-Type: application/json` with a fixed Content-Length in
  * about a second, carrying a join token, and the AG-UI events reach the browser over a WebSocket to
  * the Intelligence gateway. Wrapping that response body would watch a JSON envelope go past. The
@@ -68,6 +68,8 @@ export type StalledStream = WatchedStream & {
   silentForMs: number;
   /** Chunks that arrived before the silence. Zero means the Bot never said anything at all. */
   chunks: number;
+  /** Whether the turn was terminated because continuous channel run exceeded max duration (15 min). */
+  exceededMaxDuration?: boolean;
 };
 
 export type TurnWatchdogOptions = {
@@ -82,9 +84,15 @@ export type TurnWatchdogOptions = {
   /** Called once per stalled stream, after the stream has been taken off the watch. */
   onStall: (stream: StalledStream) => void;
   now?: Clock;
+  /**
+   * Maximum continuous channel run duration in milliseconds. Hard cap to 15 minutes (900,000 ms).
+   * If zero or undefined, max duration is not enforced.
+   */
+  maxDurationMs?: number;
 };
 
 type OpenStream = WatchedStream & {
+  openedAt: number;
   lastChunkAt: number;
   chunks: number;
   /** While true the clock is not running, because the wait is not on the Bot. See `pause`. */
@@ -93,19 +101,21 @@ type OpenStream = WatchedStream & {
 
 export class TurnWatchdog {
   private readonly stallMs: number;
+  private readonly maxDurationMs: number;
   private readonly onStall: (stream: StalledStream) => void;
   private readonly now: Clock;
   private readonly streams = new Map<string, OpenStream>();
 
   constructor(options: TurnWatchdogOptions) {
     this.stallMs = options.stallMs;
+    this.maxDurationMs = options.maxDurationMs ?? 0;
     this.onStall = options.onStall;
     this.now = options.now ?? (() => Date.now());
   }
 
-  /** Whether this deployment asked for a watchdog at all. */
+  /** Whether this deployment asked for a watchdog or run duration cap at all. */
   get enabled(): boolean {
-    return this.stallMs > 0;
+    return this.stallMs > 0 || this.maxDurationMs > 0;
   }
 
   /**
@@ -131,6 +141,7 @@ export class TurnWatchdog {
     if (!this.enabled) return;
     this.streams.set(stream.id, {
       ...stream,
+      openedAt: this.now(),
       lastChunkAt: this.now(),
       chunks: 0,
       paused: false,
@@ -206,32 +217,59 @@ export class TurnWatchdog {
     let stalled = 0;
 
     for (const [id, stream] of this.streams) {
-      if (stream.paused) continue;
-      const silentForMs = now - stream.lastChunkAt;
-      if (silentForMs < this.stallMs) continue;
+      const runDurationMs = now - stream.openedAt;
+      if (this.maxDurationMs > 0 && runDurationMs >= this.maxDurationMs) {
+        this.streams.delete(id);
+        stalled += 1;
+        try {
+          this.onStall({
+            id,
+            botId: stream.botId,
+            silentForMs: now - stream.lastChunkAt,
+            chunks: stream.chunks,
+            exceededMaxDuration: true,
+          });
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              type: "turn-watchdog-callback-error",
+              stream: id,
+              bot: stream.botId,
+              error: String(error),
+            }),
+          );
+        }
+        continue;
+      }
 
-      this.streams.delete(id);
-      stalled += 1;
-      try {
-        this.onStall({
-          id,
-          botId: stream.botId,
-          silentForMs,
-          chunks: stream.chunks,
-        });
-      } catch (error) {
-        // One Bot's failure must not stop the others being closed. This is the same blast-radius
-        // argument the process-level rejection handler in index.ts makes: a wedged Bot is somebody
-        // else's infrastructure, and the sweep it happens to be in is holding every other person's
-        // stuck turn. Logged loudly, because a watchdog that fails silently is worse than none.
-        console.error(
-          JSON.stringify({
-            type: "turn-watchdog-callback-error",
-            stream: id,
-            bot: stream.botId,
-            error: String(error),
-          }),
-        );
+      if (stream.paused) continue;
+      if (this.stallMs > 0) {
+        const silentForMs = now - stream.lastChunkAt;
+        if (silentForMs < this.stallMs) continue;
+
+        this.streams.delete(id);
+        stalled += 1;
+        try {
+          this.onStall({
+            id,
+            botId: stream.botId,
+            silentForMs,
+            chunks: stream.chunks,
+          });
+        } catch (error) {
+          // One Bot's failure must not stop the others being closed. This is the same blast-radius
+          // argument the process-level rejection handler in index.ts makes: a wedged Bot is somebody
+          // else's infrastructure, and the sweep it happens to be in is holding every other person's
+          // stuck turn. Logged loudly, because a watchdog that fails silently is worse than none.
+          console.error(
+            JSON.stringify({
+              type: "turn-watchdog-callback-error",
+              stream: id,
+              bot: stream.botId,
+              error: String(error),
+            }),
+          );
+        }
       }
     }
 

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { mintRunAssertion } from "../src/agents/callback-token";
-import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import { createHostAccessBroker } from "../src/host-access/broker";
 import { hostAccessTools } from "../src/host-access/tools";
+import { createTestApp } from "./support/app";
 import { testEnvironment } from "./support/environment";
 
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -11,50 +11,53 @@ const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 function appWithHostDispatcher(
   broker: ReturnType<typeof createHostAccessBroker>,
 ) {
-  return createApp(
-    loadConfig(
+  return createTestApp({
+    config: loadConfig(
       testEnvironment({
         AGENT_TOOL_TOKEN: "legacy-agent-tool-token",
         KEY_ENCRYPTION_KEY: KEY,
       }),
     ),
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    broker,
-    "desktop-token",
-    async ({ name, args, botId, actorId, initiator }) => {
-      if (!name.startsWith("host_")) return null;
-      const tool = hostAccessTools({ broker, botId, actorId, initiator }).find(
-        (candidate) => candidate.name === name,
-      );
-      if (!tool) return { text: "not available", isError: true };
-      const text = await tool.execute(args);
-      return { text, isError: false };
+    parts: {
+      hostAccessBroker: broker,
+      desktopHostToken: "desktop-token",
+      /*
+       * The dispatcher these routes call into, wired to the same broker.
+       *
+       * WAS a hand-written list of twenty-five `undefined`s and then `broker`, `"desktop-token"` and
+       * the dispatcher. The three landed on `deploymentToolCaller`, `composio` and `cronTick` — the
+       * broker sits at position 25 and the list put it at 26 — so the callback route had no broker,
+       * queued nothing, and the poll loop below spun out with `lease` still null. Every position is
+       * optional, so nothing here was a type error.
+       *
+       * Named now, and `app-helper.test.ts` is what notices if the signature moves again.
+       */
+      deploymentToolCaller: async ({
+        name,
+        args,
+        botId,
+        actorId,
+        initiator,
+      }: {
+        name: string;
+        args: unknown;
+        botId: string;
+        actorId: string;
+        initiator: unknown;
+      }) => {
+        if (!name.startsWith("host_")) return null;
+        const tool = hostAccessTools({
+          broker,
+          botId,
+          actorId,
+          initiator,
+        }).find((candidate) => candidate.name === name);
+        if (!tool) return { text: "not available", isError: true };
+        const text = await tool.execute(args);
+        return { text, isError: false };
+      },
     },
-  );
+  });
 }
 
 describe("host access tools on the signed agent callback route", () => {
@@ -74,7 +77,7 @@ describe("host access tools on the signed agent callback route", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-openbot-agent-token": "legacy-agent-tool-token",
+        "x-remii-agent-token": "legacy-agent-tool-token",
       },
       body: JSON.stringify({
         name: "host_read_file",

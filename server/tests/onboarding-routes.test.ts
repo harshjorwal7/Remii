@@ -1,12 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { createApp } from "../src/app";
-import { loadConfig } from "../src/config";
 import type { OnboardingStore } from "../src/people/onboarding";
-import { testEnvironment } from "./support/environment";
+import { createTestApp } from "./support/app";
 
 const MEMBER = {
   id: "member-1",
-  email: "member@openbot.test",
+  email: "member@remii.test",
   name: "A Member",
   image: null,
 };
@@ -18,21 +16,12 @@ const MEMBER = {
  * and a body the route does not understand has to be refused rather than written.
  */
 function appWith(store?: OnboardingStore) {
-  return createApp(
-    loadConfig(testEnvironment()),
-    {
-      handler: () => new Response(null, { status: 204 }),
-      api: { getSession: async () => ({ user: MEMBER }) },
-    } as never,
-    { rolesForUser: async () => ["user"] },
-    /*
-     * Positions 4-23 are the other stores; `store` is 24, onboardingStore, the signature's last.
-     * Every parameter from 4 on is optional, so a wrong count is a silent type-check pass — see
-     * people-routes.test.ts, which learned this the hard way.
-     */
-    ...(Array.from({ length: 20 }) as never[]),
-    store as never,
-  );
+  /*
+   * Named, not counted. `createApp`'s parameters are positional and every one from the third is
+   * optional, so a hole counted by hand passes `tsc` at any count and 503s at runtime without saying
+   * why. See `support/app.ts`.
+   */
+  return createTestApp({ parts: { onboardingStore: store } });
 }
 
 /** A store holding one person's status in memory, with the same coalesce rule the real one has. */
@@ -55,7 +44,7 @@ describe("onboarding routes", () => {
     const { store } = memoryStore({ step: 1, completedAt: null });
     const app = appWith(store);
 
-    const response = await app.request("http://openbot.local/api/me");
+    const response = await app.request("http://remii.local/api/me");
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
@@ -67,7 +56,7 @@ describe("onboarding routes", () => {
   test("/api/me reports null onboarding when the deployment has no store", async () => {
     const app = appWith(undefined);
 
-    const response = await app.request("http://openbot.local/api/me");
+    const response = await app.request("http://remii.local/api/me");
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { user: { onboarding: null } };
@@ -79,7 +68,7 @@ describe("onboarding routes", () => {
     const app = appWith(store);
 
     const response = await app.request(
-      "http://openbot.local/api/me/onboarding",
+      "http://remii.local/api/me/onboarding",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -99,7 +88,7 @@ describe("onboarding routes", () => {
     const app = appWith(store);
 
     const response = await app.request(
-      "http://openbot.local/api/me/onboarding",
+      "http://remii.local/api/me/onboarding",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -128,7 +117,7 @@ describe("onboarding routes", () => {
     const app = appWith(store);
 
     const response = await app.request(
-      "http://openbot.local/api/me/onboarding",
+      "http://remii.local/api/me/onboarding",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -144,7 +133,7 @@ describe("onboarding routes", () => {
     const app = appWith(undefined);
 
     const response = await app.request(
-      "http://openbot.local/api/me/onboarding",
+      "http://remii.local/api/me/onboarding",
       {
         method: "POST",
         headers: { "content-type": "application/json" },

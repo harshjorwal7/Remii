@@ -26,11 +26,8 @@ function agent(
 ): AgentProfile {
   return {
     avatarSeed: "seed",
-    builtIn: true,
+    mascot: null,
     canManage: true,
-    endpoint: null,
-    hasAuth: false,
-    hasCallbackToken: false,
     hidden: false,
     mine: true,
     name: "Agent",

@@ -965,7 +965,7 @@ describe("listing an app's actions", () => {
       // is only that they are root keywords `ParametersSchema` does not name.
       else: { required: [] },
       examples: [{ query: "is:unread" }],
-      "x-openbot-probe": "kept",
+      "x-remii-probe": "kept",
     };
     /*
      * SNAPSHOTTED BEFORE THE CALL, because comparing the answer to `schema` compares it to the very
@@ -1117,7 +1117,7 @@ describe("listing an app's actions", () => {
 
   test("a listing that failed with nothing said still names the app it was about", async () => {
     // The other arm of `listingSentence`'s fallback, which nothing reached. `refreshTools` puts
-    // this string in the row's `lastError` and an administrator reads it off the Plugins page, so
+    // this string in the row's `lastError` and an administrator reads it off the App connections, so
     // a blank one is a refresh that reports having failed and declines to say about what.
     for (const thrown of [{ status: 502 }, new Error(""), new Error("   ")]) {
       useComposioClient(
@@ -1142,7 +1142,7 @@ describe("listing an app's actions", () => {
     /*
      * `callTool` already refuses to pass "Error executing the tool X" on, and the listing path did
      * not. Same string, same reader: `refreshTools` writes this sentence into the row's
-     * `lastError` and an administrator reads it off the Plugins page, where the name of the thing
+     * `lastError` and an administrator reads it off the App connections, where the name of the thing
      * they asked to refresh is the one fact they already have.
      */
     useComposioClient(
@@ -1177,7 +1177,7 @@ describe("listing an app's actions", () => {
      * whatever sits there — below, two words naming nothing, in place of a remedy.
      */
     const authored =
-      'Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so gmail\'s action list was not refreshed and the tools already held are untouched. A dated version is recorded when an app\'s actions are listed, so refreshing gmail\'s tools on its Plugins page replaces "latest" with a version Composio will accept.';
+      'Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so gmail\'s action list was not refreshed and the tools already held are untouched. A dated version is recorded when an app\'s actions are listed, so refreshing gmail\'s tools on App connections replaces "latest" with a version Composio will accept.';
 
     useComposioClient(
       recording({
@@ -1204,7 +1204,7 @@ describe("listing an app's actions", () => {
     /*
      * `./composio-adapter`'s listing calls `client.tools.list` directly, with no try around it, so
      * what lands here is `@composio/client`'s own error — see {@link unwrapped}. `refreshTools` writes this string into the row's
-     * `lastError` for an administrator to read off the Plugins page, and what it used to write was
+     * `lastError` for an administrator to read off the App connections, and what it used to write was
      * a status code followed by the entire response body.
      */
     useComposioClient(
@@ -1343,7 +1343,7 @@ describe("listing an app's actions", () => {
      * A client that answers `null` — a 204, an SDK path that returns before assigning, a mock in
      * somebody's staging deployment — used to reach `actions.length` and `actions.filter` outside
      * the try that wraps the vendor's call, so what propagated was `null is not an object`. That
-     * lands verbatim in `lastError` on the Plugins page and tells an administrator nothing about
+     * lands verbatim in `lastError` on the App connections and tells an administrator nothing about
      * which app or what to do, which is the whole reason this path throws sentences.
      */
     // `[null]` is the same failure one level down: it clears `Array.isArray` and then reaches
@@ -1795,7 +1795,7 @@ describe("listing an app's actions", () => {
       expect(message).toBe(thrown.message);
       // And it names the row the operator is looking at, which is what every sibling refusal on
       // this path asserts and this one did not: `refreshTools` writes this string into `lastError`
-      // and an administrator reads it off the Plugins page beside a list of apps.
+      // and an administrator reads it off the App connections beside a list of apps.
       expect(message).toContain("gmail");
       expect(message).not.toMatch(/upgrad/i);
     }
@@ -2045,7 +2045,7 @@ describe("calling one action", () => {
     // refresh writes the same nothing back and the reader presses the button again. The sentence
     // has to make the remedy conditional on the vendor, which is the part nobody here controls.
     expect(result.text).not.toContain(
-      "Refresh this app's tools on its Plugins page and try again.",
+      "Refresh this app's tools on App connections and try again.",
     );
     expect(result.text).toMatch(/only if Composio publishes/i);
   });
@@ -2224,7 +2224,7 @@ describe("calling one action", () => {
      *
      * THE RULE THE MODULE FOLLOWS IS THAT THE WORDS THAT WERE SAID BEAT THE WORDS WE WOULD INVENT,
      * and it is the same rule `listingSentence` follows on the other path. `unexplained` — which
-     * names the action and sends the reader to the Plugins page — is what the two sibling tests
+     * names the action and sends the reader to the App connections — is what the two sibling tests
      * below assert, and it is reached only where the vendor said NOTHING usable: an empty message,
      * or the placeholder. A transport fault that came with a diagnosis is not that case, and
      * replacing "composio unreachable" with "check that this app is still connected" would be
@@ -2314,7 +2314,7 @@ describe("calling one action", () => {
     expect(result.text).not.toContain("must-not-appear");
     expect(result.text).not.toContain("unrecognised");
     expect(result.text).not.toContain("{");
-    expect(result.text).toMatch(/Plugins page/);
+    expect(result.text).toMatch(/App connections/);
     expect(result.text).toContain("GMAIL_FETCH_EMAILS");
   });
 
@@ -2519,7 +2519,7 @@ describe("calling one action", () => {
 
     expect(result.isError).toBe(true);
     expect(result.text).toContain("GMAIL_FETCH_EMAILS");
-    expect(result.text).toMatch(/Plugins page/);
+    expect(result.text).toMatch(/App connections/);
   });
 
   test("a failure carrying only the vendor's placeholder says something actionable", async () => {
@@ -2545,7 +2545,7 @@ describe("calling one action", () => {
     // sentence — "GMAIL_FETCH_EMAILS failed: Error executing the tool GMAIL_FETCH_EMAILS" — is the
     // same useless words in a model's context and in the audit row, and passed.
     expect(result.text).not.toMatch(/error executing the tool/i);
-    expect(result.text).toMatch(/Plugins page/);
+    expect(result.text).toMatch(/App connections/);
   });
 
   test("a failure that carries no message at all still says something actionable", async () => {
@@ -2577,7 +2577,7 @@ describe("calling one action", () => {
       expect(result.isError).toBe(true);
       expect(result.text.trim()).not.toBe("");
       expect(result.text).toContain("GMAIL_FETCH_EMAILS");
-      expect(result.text).toMatch(/Plugins page/);
+      expect(result.text).toMatch(/App connections/);
     }
   });
 
@@ -2911,7 +2911,7 @@ describe("calling one action", () => {
     );
 
     expect(reported.isError).toBe(true);
-    expect(reported.text).toContain("Plugins page");
+    expect(reported.text).toContain("App connections");
   });
 
   test("a reported error that is a response dump is refused like the placeholder", async () => {
@@ -2955,7 +2955,7 @@ describe("calling one action", () => {
       // And what is said instead names the action and the one thing the reader can do about it,
       // which is what every sibling on this path answers an unreadable report with.
       expect(result.text).toContain("GMAIL_FETCH_EMAILS");
-      expect(result.text).toMatch(/Plugins page/);
+      expect(result.text).toMatch(/App connections/);
       // The data must not be handed over as content beside a reported failure either.
       expect(result.text).not.toContain("m1");
     }
@@ -3174,7 +3174,7 @@ describe("calling one action", () => {
     // refusal CARRIES it. A start-anchored question of the answer lets it through anywhere but the
     // first character.
     expect(result.text).not.toMatch(/error executing the tool/i);
-    expect(result.text).toMatch(/Plugins page/);
+    expect(result.text).toMatch(/App connections/);
   });
 
   test("a refusal this deployment authored beats whatever the vendor said", async () => {
@@ -3197,7 +3197,7 @@ describe("calling one action", () => {
      * that clears it, replaced by three words naming nothing.
      */
     const authored =
-      'Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so GMAIL_FETCH_EMAILS was not run. A dated version is recorded when an app\'s actions are listed, so refreshing gmail\'s tools on its Plugins page replaces "latest" with a version Composio will accept.';
+      'Composio refuses a call whose toolkit version is "latest", and that is the version travelling with this one, so GMAIL_FETCH_EMAILS was not run. A dated version is recorded when an app\'s actions are listed, so refreshing gmail\'s tools on App connections replaces "latest" with a version Composio will accept.';
 
     useComposioClient(
       recording({

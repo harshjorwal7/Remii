@@ -25,6 +25,7 @@ import { createDatabase, type Database } from "../src/db/client";
 import {
   agents,
   auditEvents,
+  composioAccountGrants,
   composioConnections,
   credentials as credentialRows,
   credentials,
@@ -508,7 +509,7 @@ afterAll(async () => {
 
 describe("a grant is the permission", () => {
   test("a Bot that was never granted a tool is refused, and the refusal is recorded", async () => {
-    const actorId = `audit-call-${randomUUID()}@openbot.local`;
+    const actorId = `audit-call-${randomUUID()}@remii.local`;
     await expect(
       store.callTool({
         ref,
@@ -531,7 +532,7 @@ describe("a grant is the permission", () => {
   });
 
   test("a refusal names the routine that asked, not only the person it ran as", async () => {
-    const actorId = `audit-call-${randomUUID()}@openbot.local`;
+    const actorId = `audit-call-${randomUUID()}@remii.local`;
     await expect(
       store.callTool({
         ref,
@@ -554,7 +555,7 @@ describe("a grant is the permission", () => {
   });
 
   test("a call nobody said anything about is still filed as a person's", async () => {
-    const actorId = `audit-call-${randomUUID()}@openbot.local`;
+    const actorId = `audit-call-${randomUUID()}@remii.local`;
     await expect(
       store.callTool({
         ref,
@@ -576,20 +577,20 @@ describe("a grant is the permission", () => {
   });
 
   test("granting lets the same Bot past the grant check", async () => {
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
     const decision = await store.decide("mcp", ref, holderId);
     expect(decision.allowed).toBe(true);
   });
 
   test("revoking takes it away again", async () => {
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
-    await store.revoke("mcp", ref, holderId, "admin@openbot.local");
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
+    await store.revoke("mcp", ref, holderId, "admin@remii.local");
     const decision = await store.decide("mcp", ref, holderId);
     expect(decision.allowed).toBe(false);
   });
 
   test("a Bot is offered exactly what it holds", async () => {
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
     const held = await store.listForAgent(holderId);
     expect(held.tools.map((tool) => tool.ref)).toEqual([ref]);
     // The name the model is offered, which may not contain a slash.
@@ -607,7 +608,7 @@ describe("a grant is the permission", () => {
      * would pass every other test in this file: the Bot would still be offered what it holds, and the
      * stranger would still be offered nothing.
      */
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
     const held = await store.listForAgent(holderId);
 
     expect(held.tools.map((tool) => tool.ref)).toEqual([ref]);
@@ -619,8 +620,8 @@ describe("a grant is the permission", () => {
 
 describe("the policy is asked as well as the grant", () => {
   test("credential material is refused and never copied into the audit trail", async () => {
-    const actorId = `audit-call-${randomUUID()}@openbot.local`;
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
+    const actorId = `audit-call-${randomUUID()}@remii.local`;
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
     const secret = `sk-${"z".repeat(32)}`;
 
     await expect(
@@ -653,8 +654,8 @@ describe("the policy is asked as well as the grant", () => {
   });
 
   test("a granted tool is still refused by a deny rule, and the rule is named", async () => {
-    const actorId = `audit-call-${randomUUID()}@openbot.local`;
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
+    const actorId = `audit-call-${randomUUID()}@remii.local`;
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
     policy = {
       mode: "enforce",
       deny: ['mcp.server == "google-drive"'],
@@ -692,7 +693,7 @@ describe("the policy is asked as well as the grant", () => {
   });
 
   test("a rule can speak about effect rather than about tool names", async () => {
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
     // `search_files` is advertised and is not in the vendor's write list, so it is a read and
     // this deny rule must NOT catch it. The assertion is that the call gets past the policy, which
     // it proves by failing at the network instead of as a refusal.
@@ -708,7 +709,7 @@ describe("the policy is asked as well as the grant", () => {
         ref,
         args: {},
         botId: holderId,
-        actorId: "someone@openbot.local",
+        actorId: "someone@remii.local",
       });
     } catch (error) {
       thrown = error;
@@ -728,8 +729,8 @@ describe("the policy is asked as well as the grant", () => {
   });
 
   test("a dry-run refusal is recorded, even though the call is let through", async () => {
-    const actorId = `audit-call-${randomUUID()}@openbot.local`;
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
+    const actorId = `audit-call-${randomUUID()}@remii.local`;
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
     /*
      * The mode an operator switches on to size a rule before enforcing it, and the only mode in
      * which the policy refuses and the call still goes out. Its whole value is the row: without one
@@ -794,8 +795,8 @@ describe("the trail says what happened, not what was permitted", () => {
    * call is permitted and then cannot be made — which is the shape of failure the row must show.
    */
   test("a call that is permitted and then fails is recorded as failed, not as succeeded", async () => {
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
-    const actorId = `audit-call-${randomUUID()}@openbot.local`;
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
+    const actorId = `audit-call-${randomUUID()}@remii.local`;
 
     await expect(
       store.callTool({ ref, args: {}, botId: holderId, actorId }),
@@ -820,7 +821,7 @@ describe("the trail says what happened, not what was permitted", () => {
 
 describe("a boundary written about the browser does not refuse tool calls", () => {
   test("an unguarded rule about a page element does not refuse a tool call", async () => {
-    await store.grant("mcp", ref, holderId, "admin@openbot.local");
+    await store.grant("mcp", ref, holderId, "admin@remii.local");
     /**
      * This engine treats an expression it cannot evaluate as a MATCH, which is right for a browser
      * action on an element the server could not resolve and catastrophic for a tool call: with
@@ -844,7 +845,7 @@ describe("a boundary written about the browser does not refuse tool calls", () =
         ref,
         args: {},
         botId: holderId,
-        actorId: "someone@openbot.local",
+        actorId: "someone@remii.local",
       });
     } catch (error) {
       thrown = error;
@@ -890,7 +891,7 @@ describe("removing an MCP server", () => {
       provenance: "custom",
     });
 
-    await store.removeServer(removalServerId, "admin@openbot.local");
+    await store.removeServer(removalServerId, "admin@remii.local");
 
     expect(revokedCredentialIds).toEqual([credentialId]);
     const [row] = await database
@@ -938,7 +939,7 @@ describe("removing an MCP server", () => {
       .insert(users)
       .values({
         id: connectedUserId,
-        email: `${connectedUserId}@openbot.test`,
+        email: `${connectedUserId}@remii.test`,
         name: connectedUserId,
         emailVerified: false,
       })
@@ -973,7 +974,7 @@ describe("removing an MCP server", () => {
     });
 
     try {
-      await store.removeServer(removalServerId, "admin@openbot.local");
+      await store.removeServer(removalServerId, "admin@remii.local");
 
       expect(revokedCredentialIds).toEqual([grantId]);
       const [row] = await database
@@ -1052,7 +1053,7 @@ describe("removing an MCP server", () => {
       provenance: "custom",
     });
 
-    await store.removeServer(removalServerId, "admin@openbot.local");
+    await store.removeServer(removalServerId, "admin@remii.local");
 
     // Not asked, because the row already says it is retired.
     expect(revokedCredentialIds).toEqual([]);
@@ -1091,7 +1092,7 @@ describe("removing an MCP server", () => {
       provenance: "custom",
     });
 
-    await store.removeServer(removalServerId, "admin@openbot.local");
+    await store.removeServer(removalServerId, "admin@remii.local");
 
     expect(revokedCredentialIds).toEqual([]);
   });
@@ -1099,7 +1100,7 @@ describe("removing an MCP server", () => {
 
 describe("the trail can be read by a second reader", () => {
   test("a refusal names the bot, the server and the tool in queryable JSON", async () => {
-    const actorId = `audit-payload-${randomUUID()}@openbot.local`;
+    const actorId = `audit-payload-${randomUUID()}@remii.local`;
     await expect(
       store.callTool({
         ref,
@@ -1178,7 +1179,7 @@ describe("a grant on a tool the vendor no longer lists", () => {
         description: "Listed by the vendor when the grant was made.",
       })
       .onConflictDoNothing();
-    await store.grant("mcp", withdrawnRef, holderId, "admin@openbot.local");
+    await store.grant("mcp", withdrawnRef, holderId, "admin@remii.local");
 
     // Then withdrawn. A refresh replaces the tool list wholesale, so this is what one does to a name
     // the vendor has stopped offering.
@@ -1510,7 +1511,7 @@ describe("refresh token rotation", () => {
       .insert(users)
       .values({
         id: rotationUserId,
-        email: `${rotationUserId}@openbot.test`,
+        email: `${rotationUserId}@remii.test`,
         name: rotationUserId,
         emailVerified: false,
       })
@@ -1547,7 +1548,7 @@ describe("refresh token rotation", () => {
       "mcp",
       rotationRef,
       rotationBotId,
-      "admin@openbot.local",
+      "admin@remii.local",
     );
     await registerClient();
   });
@@ -1844,7 +1845,7 @@ describe("refresh token rotation", () => {
    * `audit_events` or `mcp_servers.last_error`. REASON: that plaintext IS the deployment's OAuth
    * client secret, and `JSON.parse` reports failure by quoting the input it choked on — so an
    * unguarded parse writes a fragment of the secret into two durable stores, both of which the
-   * Plugins page draws for an administrator.
+   * App connections draws for an administrator.
    *
    * A corrupted row is not hypothetical: a partially written value, a row encrypted under a key
    * this deployment no longer holds, or a hand-edited vault all produce bytes that decrypt and are
@@ -2312,7 +2313,7 @@ describe("a dynamic client the vendor has evicted", () => {
   /** What registering again gets. No secret: a DCR client proves itself with PKCE. */
   const FRESH: OAuthClient = { clientId: "dyn-2", clientSecret: "" };
   /** Built the way the callback route builds it, so the vendor is offered the real thing. */
-  const REDIRECT_URI = redirectUriFor("https://openbot.test");
+  const REDIRECT_URI = redirectUriFor("https://remii.test");
   /** The pinned endpoint, read from the entry rather than copied, so the two cannot drift. */
   const REGISTRATION_URL = (() => {
     const entry = catalogueEntry(dynamicServerId);
@@ -2570,7 +2571,7 @@ describe("a dynamic client the vendor has evicted", () => {
       .insert(users)
       .values({
         id: dynamicUserId,
-        email: `${dynamicUserId}@openbot.test`,
+        email: `${dynamicUserId}@remii.test`,
         name: dynamicUserId,
         emailVerified: false,
       })
@@ -2605,7 +2606,7 @@ describe("a dynamic client the vendor has evicted", () => {
       "mcp",
       dynamicRef,
       dynamicBotId,
-      "admin@openbot.local",
+      "admin@remii.local",
     );
   });
 
@@ -2837,7 +2838,7 @@ describe("a dynamic client the vendor has evicted", () => {
     expect(
       await dynamicStore.ensureOAuthClient(
         dynamicServerId,
-        "someone@openbot.test",
+        "someone@remii.test",
       ),
     ).toEqual(EVICTED);
     // Nothing was asked of the vendor: this is the path every connect takes once, and it must not
@@ -2854,7 +2855,7 @@ describe("a dynamic client the vendor has evicted", () => {
     expect(
       await dynamicStore.ensureOAuthClient(
         dynamicServerId,
-        "someone@openbot.test",
+        "someone@remii.test",
       ),
     ).toEqual(FRESH);
     expect(registrations).toEqual([
@@ -2866,9 +2867,9 @@ describe("a dynamic client the vendor has evicted", () => {
     expect(registered.length).toBe(registeredBefore.length + 1);
     // Whoever pressed Connect, because for a first registration that IS the act that caused it.
     expect(
-      registeredBy(registered, "someone@openbot.test", FRESH.clientId),
+      registeredBy(registered, "someone@remii.test", FRESH.clientId),
     ).toBe(
-      registeredBy(registeredBefore, "someone@openbot.test", FRESH.clientId) +
+      registeredBy(registeredBefore, "someone@remii.test", FRESH.clientId) +
         1,
     );
   });
@@ -2913,7 +2914,7 @@ describe("a dynamic client the vendor has evicted", () => {
       expect(
         await storeWithRealRegistration.ensureOAuthClient(
           dynamicServerId,
-          "someone@openbot.test",
+          "someone@remii.test",
         ),
       ).toBeNull();
     } finally {
@@ -2934,7 +2935,7 @@ describe("a dynamic client the vendor has evicted", () => {
     ).toBeDefined();
   });
 
-  test("an entry an administrator registers by hand is left alone", async () => {
+  test("an entry registered by hand is left alone", async () => {
     /*
      * Drive, whose client is pasted in from Google's console. Registering one for it would be
      * inventing a client at a vendor that never offered to issue one — the honest answer is none,
@@ -2949,7 +2950,7 @@ describe("a dynamic client the vendor has evicted", () => {
 
     try {
       expect(
-        await dynamicStore.ensureOAuthClient(serverId, "someone@openbot.test"),
+        await dynamicStore.ensureOAuthClient(serverId, "someone@remii.test"),
       ).toBeNull();
       expect(registrations).toEqual([]);
     } finally {
@@ -2967,7 +2968,7 @@ describe("a dynamic client the vendor has evicted", () => {
     expect(
       await storeWithNoRedirect.ensureOAuthClient(
         dynamicServerId,
-        "someone@openbot.test",
+        "someone@remii.test",
       ),
     ).toBeNull();
     expect(registrations).toEqual([]);
@@ -3002,8 +3003,8 @@ describe("a dynamic client the vendor has evicted", () => {
     };
 
     const [first, second] = await Promise.all([
-      dynamicStore.ensureOAuthClient(dynamicServerId, "one@openbot.test"),
-      dynamicStore.ensureOAuthClient(dynamicServerId, "two@openbot.test"),
+      dynamicStore.ensureOAuthClient(dynamicServerId, "one@remii.test"),
+      dynamicStore.ensureOAuthClient(dynamicServerId, "two@remii.test"),
     ]);
 
     // Neither raised, and neither got null: both people can be sent to consent.
@@ -3125,7 +3126,7 @@ describe("a dynamic client the vendor has evicted", () => {
    * cover falls through to the column, where PRESENCE rather than truthiness decides, so an effect
    * recorded for Notion would silently reclassify every one of its reads as a write, on a connector
    * nobody touched. Only `null` and `undefined` are silence. Asserted on the rows AND on what the
-   * Plugins page derives from them, because it is the second one that an administrator reads.
+   * App connections derives from them, because it is the second one that an administrator reads.
    *
    * It lives in this suite because this is the only place a `user-oauth` listing can actually be
    * made to happen: the refresh runs on the grant of whoever pressed the button, so a Notion row with
@@ -3286,7 +3287,7 @@ describe("a dynamic client the vendor has evicted", () => {
           (server) => server.id === dynamicServerId,
         );
 
-        // What the Plugins page derives, which is what an administrator actually reads: the
+        // What the App connections derives, which is what an administrator actually reads: the
         // reviewed name is a write because review says so, the declared one is a write because the
         // vendor narrowed it, and the third is the read it was already classified as.
         expect(
@@ -3497,7 +3498,7 @@ describe("a dynamic client the vendor has evicted", () => {
       expect(
         await dynamicStore.ensureOAuthClient(
           dynamicServerId,
-          "admin@openbot.test",
+          "admin@remii.test",
         ),
       ).toEqual(FRESH);
     });
@@ -3597,12 +3598,37 @@ describe("a custom server may only be pointed at its own kind of credential", ()
   const customServerId = `custom-cred-${suffix}`;
   const attemptedServerIds = new Set<string>();
 
+  /*
+   * NO ACTING USER, BECAUSE THIS BLOCK NEVER ASKS WHO HOLDS THE CREDENTIAL.
+   *
+   * `requireCredentialOfKind` takes the actor so it can also refuse a credential belonging to somebody
+   * else, and it does that by matching `userId is null OR userId = actorUserId`. With no actor a
+   * personal credential matches nobody, which is exactly what the `mcp_user_token` refusal wants, and
+   * every fixture row here has `userId` null so the passing cases are unaffected.
+   *
+   * Three notes on the mechanics, because the shape does three jobs. The omission is spelled HERE
+   * rather than at each of the dozen call sites: a fabricated user id at every one would read as though
+   * each test had arranged an acting user, and not one of them does. The
+   * `Omit<…, "actorUserId"> & { actorUserId?: string }` parameter keeps those call sites unchanged
+   * while still checking the field's name — deleting it outright would lose that, and requiring it
+   * everywhere would mean editing a dozen sites to say nothing. And the cast is what carries the
+   * absence: `addCustomServer` declares `actorUserId` as a required `string`, so this hands it
+   * `undefined` and says so in the type rather than passing `""`, which matches nothing either, but by
+   * accident and with a lie in the shape.
+   *
+   * `attemptedServerIds` is populated BEFORE the call because several cases here expect a refusal: a
+   * refusal that arrived as a successful write would otherwise leave its row behind.
+   */
   function addCustomFixture(
-    input: Parameters<typeof store.addCustomServer>[0],
+    input: Omit<Parameters<typeof store.addCustomServer>[0], "actorUserId"> & {
+      actorUserId?: string;
+    },
   ) {
-    // Refusal tests may fail because the write succeeded. Track the attempt before calling it.
     attemptedServerIds.add(input.id);
-    return store.addCustomServer(input);
+    return store.addCustomServer({
+      ...input,
+      actorUserId: input.actorUserId ?? (undefined as unknown as string),
+    });
   }
 
   beforeAll(async () => {
@@ -3761,25 +3787,48 @@ describe("a custom server may only be pointed at its own kind of credential", ()
     }
   });
 
-  test("an empty credential id reads as no credential", async () => {
-    // Not the same as a wrong one. An empty string used to reach the insert and break the foreign
-    // key; the honest reading is that the administrator named nothing.
-    const id = `${customServerId}-empty`;
-    const added = await addCustomFixture({
-      id,
-      title: "Collector",
-      url: "https://collector.example/mcp",
-      credentialId: "",
-      by: "admin@example.com",
-    });
-    expect(added.id).toBe(id);
+  /*
+   * THE TWO CASES USING THIS TIMEOUT ARE THE ONLY ONES IN THIS BLOCK THAT DO REAL NETWORK I/O.
+   *
+   * `addCustomServer` refreshes before it returns, and with no credential named there is nothing to
+   * fail on before the HTTP request goes out. `collector.example` is a reserved TLD, so the request
+   * is answered by a resolver that either refuses it or, on a network with a wildcard resolver,
+   * simply never answers — and this suite's own 5s default is shorter than that wait.
+   *
+   * Every refusal case is fast precisely BECAUSE it never reaches the refresh. That is the shape to
+   * keep in mind when adding one: in this block a test that SUCCEEDS is the one that pays the wait,
+   * which is the opposite of the usual intuition.
+   */
+  const REACHES_THE_NETWORK = 30_000;
 
-    const [row] = await database
-      .select({ credentialId: mcpServers.credentialId })
-      .from(mcpServers)
-      .where(eq(mcpServers.id, id));
-    expect(row?.credentialId).toBeNull();
-  });
+  /*
+   * AN EMPTY CREDENTIAL ID IS THE ADMINISTRATOR NAMING NOTHING, which is a different request from
+   * naming the wrong thing, and it used to reach the insert and break the foreign key.
+   *
+   * The row is read back rather than trusting the return value: the claim under test is what landed in
+   * the COLUMN, and an add that succeeds says nothing about that.
+   */
+  test(
+    "an empty credential id reads as no credential",
+    async () => {
+      const id = `${customServerId}-empty`;
+      const added = await addCustomFixture({
+        id,
+        title: "Collector",
+        url: "https://collector.example/mcp",
+        credentialId: "",
+        by: "admin@example.com",
+      });
+      expect(added.id).toBe(id);
+
+      const [row] = await database
+        .select({ credentialId: mcpServers.credentialId })
+        .from(mcpServers)
+        .where(eq(mcpServers.id, id));
+      expect(row?.credentialId).toBeNull();
+    },
+    REACHES_THE_NETWORK,
+  );
 
   test("re-adding an existing server cannot repoint it at a refused credential", async () => {
     // The add is an upsert, so the dangerous shape is not only a new server: an existing one that
@@ -3811,16 +3860,24 @@ describe("a custom server may only be pointed at its own kind of credential", ()
     expect(row?.credentialId).toBe(upsertCredentialId);
   });
 
-  test("a custom server with no credential at all still works", async () => {
-    const id = `${customServerId}-none`;
-    const added = await addCustomFixture({
-      id,
-      title: "Collector",
-      url: "https://collector.example/mcp",
-      by: "admin@example.com",
-    });
-    expect(added.id).toBe(id);
-  });
+  /*
+   * A server needs no credential to EXIST, and this is the case every refusal above must not
+   * swallow: a guard that refuses everything is a rule nobody would notice was a wall.
+   */
+  test(
+    "a custom server with no credential at all still works",
+    async () => {
+      const id = `${customServerId}-none`;
+      const added = await addCustomFixture({
+        id,
+        title: "Collector",
+        url: "https://collector.example/mcp",
+        by: "admin@example.com",
+      });
+      expect(added.id).toBe(id);
+    },
+    REACHES_THE_NETWORK,
+  );
 });
 
 /**
@@ -4118,9 +4175,30 @@ async function seedComposioGmail(
     configuration: {},
   });
   if (options.connect !== false) {
-    await database
+    /*
+     * An account id AND a per-Bot account grant, because a call now names WHICH account it runs as.
+     *
+     * Multi-account support added `composio_connections.account_id` and `composio_account_grants`:
+     * a person may hold several accounts at one app, so a Bot has to be granted one of them rather
+     * than reaching whichever happened to be first. The row above was seeded with a null `account_id`
+     * and no account grant, which left `connectionTokenFor` with nothing to select and refused every
+     * call with "This Bot has not been granted one of your Gmail accounts" — which reads as a product
+     * refusal rather than as a fixture that stopped matching the shape of a connection.
+     */
+    const [connection] = await database
       .insert(composioConnections)
-      .values({ toolkit: "gmail", userId: "user_asker" });
+      .values({
+        toolkit: "gmail",
+        userId: "user_asker",
+        accountId: `ca_gmail_${suite}`,
+        label: "asker@example.test",
+      })
+      .returning({ id: composioConnections.id });
+    await database.insert(composioAccountGrants).values({
+      connectionId: connection!.id,
+      agentId: "bot_helper",
+      userId: "user_asker",
+    });
   }
   await store.grant(
     "mcp",
@@ -4705,7 +4783,7 @@ test("a version a model supplied cannot stand in for an action with none recorde
   // one-click fix that cannot work sends an operator round a loop.
   expect(result.isError).toBe(true);
   expect(result.text).toMatch(
-    /Refreshing this app's tools on its Plugins page recovers it only if/,
+    /Refreshing this app's tools on App connections recovers it only if/,
   );
   expect(result.text).toMatch(
     /Where Composio publishes none, no refresh will make it callable/,
@@ -5070,7 +5148,7 @@ test("a brokered call is judged by the effect the vendor recorded, not by the ab
   );
 });
 
-test("the Plugins page shows a brokered action with the effect the vendor recorded", async () => {
+test("App connections shows a brokered action with the effect the vendor recorded", async () => {
   const { store, database } = await freshStore();
   await seedComposioGmail(database, store);
 
@@ -5981,7 +6059,7 @@ describe("a listing this database would not have taken", () => {
      * `storableTools` reads `(tool.description ?? "").replaceAll(NUL, "")`, and `??` answers for
      * absence and not for type. A number, an object or a list in the vendor's `description` reached
      * that line and threw the engine's own `replaceAll is not a function`, which the `try` around
-     * `storableTools` catches — so what an administrator read on the Plugins page was "an action
+     * `storableTools` catches — so what an administrator read on the App connections was "an action
      * whose schema could not be stored as it arrived" followed by that. BOTH HALVES WERE WRONG. It
      * was not the schema, nothing named the action, nothing named the field, and the whole app's
      * refresh failed on one malformed row out of sixty.
@@ -6243,7 +6321,7 @@ describe("a query of this deployment's own that failed", () => {
        * Nothing in the column, asserted FIRST because it is the half that was actually broken and
        * because its failure prints what leaked.
        *
-       * `lastError` is drawn on the Plugins page beside a refresh that looks merely to have
+       * `lastError` is drawn on the App connections beside a refresh that looks merely to have
        * failed, and the narrowing meant to keep our own faults out of it tested for a class that
        * cannot arrive inside that `try` at all — so it could be deleted with every test green
        * while the statement and every value bound to it went into a column an operator reads and
@@ -7623,9 +7701,9 @@ describe("a vault read that fails on a query of this deployment's own", () => {
   const faultToolName = "do_something";
   const faultRef = `${faultServerId}/${faultToolName}`;
   const faultBotId = `agent_vault_fault_${suite}`;
-  const faultActorId = "someone@openbot.local";
+  const faultActorId = "someone@remii.local";
   /** The sentence a withdrawn credential earns, and the one a query fault must never be given. */
-  const WITHDRAWN = "An administrator has to add it again.";
+  const WITHDRAWN = "Add it again on the app's connection page.";
 
   let faultCredentialId: string | null = null;
 
@@ -7714,7 +7792,7 @@ describe("a vault read that fails on a query of this deployment's own", () => {
       name: faultToolName,
       description: "Do something.",
     });
-    await faultStore.grant("mcp", faultRef, faultBotId, "admin@openbot.local");
+    await faultStore.grant("mcp", faultRef, faultBotId, "admin@remii.local");
   });
 
   afterAll(async () => {

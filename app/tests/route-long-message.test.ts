@@ -4,6 +4,7 @@ import type { AuditStore } from "../../server/src/audit";
 import type { IntentRouter } from "../../server/src/routing/classify";
 import { createRoutingRoutes } from "../../server/src/routing/routes";
 import { routeMessage } from "../src/lib/channels/route";
+import { REMII_AGENT_ID } from "@/lib/agents/default-agent";
 
 /**
  * A long message still finds its coworker, and the trail still says how.
@@ -24,7 +25,7 @@ afterEach(() => {
 
 const ROSTER = [
   {
-    id: "general-assistant",
+    id: REMII_AGENT_ID,
     name: "General Assistant",
     roleDescription: "everyday work",
     visibility: "public",
@@ -48,7 +49,7 @@ function serve() {
   ) => {
     context.set("actor", {
       id: "u1",
-      email: "person@openbot.test",
+      email: "person@remii.test",
       role: "user",
     });
     await next();
@@ -82,7 +83,7 @@ function serve() {
       init?: Parameters<typeof fetch>[1],
     ) => {
       if (path !== "/api/route") throw new Error(`unexpected ${String(path)}`);
-      return routes.request("http://openbot.test/", init);
+      return routes.request("http://remii.test/", init);
     },
     { preconnect: originalFetch.preconnect },
   );

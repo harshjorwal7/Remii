@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { tryClient } from "@/lib/client";
+import { readStoredPreference } from "@/lib/stored-preference";
 import { newId } from "../new-id";
 
 /**
@@ -21,25 +22,36 @@ import { newId } from "../new-id";
  * pretending the history is there when the answer says it is.
  */
 
-const KEY = "openbot.bot-thread";
+const KEY = "remii.bot-thread";
+const LEGACY_KEY = "openbot.bot-thread";
 
 /** The one place the storage key is built, so the getter and the setter can never drift apart. */
-export function botThreadKey(agentId: string): string {
-  return `${KEY}.${agentId}`;
+export function botThreadKey(agentId: string, userId?: string): string {
+  return userId ? `${KEY}.${userId}.${agentId}` : `${KEY}.${agentId}`;
 }
 
-function remembered(agentId: string): string | null {
+/** The same key under the pre-rebrand prefix, which is what an existing browser has stored. */
+function legacyBotThreadKey(agentId: string, userId?: string): string {
+  return userId
+    ? `${LEGACY_KEY}.${userId}.${agentId}`
+    : `${LEGACY_KEY}.${agentId}`;
+}
+
+function remembered(agentId: string, userId?: string): string | null {
   try {
-    return window.localStorage.getItem(botThreadKey(agentId));
+    return readStoredPreference(
+      botThreadKey(agentId, userId),
+      legacyBotThreadKey(agentId, userId),
+    );
   } catch {
     // Storage can be unavailable or full. A thread for this visit is better than no chat at all.
     return null;
   }
 }
 
-function remember(agentId: string, threadId: string): void {
+function remember(agentId: string, threadId: string, userId?: string): void {
   try {
-    window.localStorage.setItem(botThreadKey(agentId), threadId);
+    window.localStorage.setItem(botThreadKey(agentId, userId), threadId);
   } catch {
     // As above: the conversation still works, it just will not be here next time.
   }
@@ -134,7 +146,7 @@ export type BotThread = {
  * The thread the direct Bot chat talks in, resolved once per `agentId` and re-verified on every
  * mount rather than trusted forever — see the module doc for why a remembered id can go stale.
  */
-export function useBotThread(agentId: string): BotThread {
+export function useBotThread(agentId: string, userId?: string): BotThread {
   const [threadId, setThreadId] = useState<string | undefined>(undefined);
   const [history, setHistory] = useState<"ready" | "unavailable">("ready");
   // Mirrors the effect's own `current` flag so `startNew` — which runs from an event handler, not
@@ -165,13 +177,13 @@ export function useBotThread(agentId: string): BotThread {
         // Falling back to one made here keeps the chat working when the deployment cannot be
         // asked; it is simply a thread nothing can later attribute.
         const next = minted ?? newId();
-        if (minted) remember(agentId, minted);
+        if (minted) remember(agentId, minted, userId);
         setThreadId(next);
         setHistory("ready");
       });
     };
 
-    const existing = remembered(agentId);
+    const existing = remembered(agentId, userId);
     if (!existing) {
       // Nothing remembered means nothing the check could protect — minting straight away is both
       // faster and exactly as safe as asking Intelligence about an id that was never assigned.
@@ -199,7 +211,7 @@ export function useBotThread(agentId: string): BotThread {
       current = false;
       mountedRef.current = false;
     };
-  }, [agentId]);
+  }, [agentId, userId]);
 
   const startNew = useCallback(() => {
     if (mintingRef.current) return;
@@ -225,11 +237,11 @@ export function useBotThread(agentId: string): BotThread {
        * asked for.
        */
       startedNewRef.current = true;
-      remember(agentId, minted);
+      remember(agentId, minted, userId);
       setThreadId(minted);
       setHistory("ready");
     });
-  }, [agentId]);
+  }, [agentId, userId]);
 
   return { threadId, history, startNew };
 }

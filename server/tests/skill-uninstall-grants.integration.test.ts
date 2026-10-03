@@ -75,11 +75,7 @@ afterAll(async () => {
   await database.delete(users).where(inArray(users.id, [alice, bob]));
 });
 
-function routesAs(actor: {
-  id: string;
-  email: string;
-  role: "admin" | "user";
-}) {
+function routesAs(actor: { id: string; email: string; role: "user" }) {
   return createPluginRoutes(
     store as never,
     async (context, next) => {
@@ -94,11 +90,19 @@ const asAlice = () =>
   routesAs({ id: alice, email: `${alice}@example.test`, role: "user" });
 const asBob = () =>
   routesAs({ id: bob, email: `${bob}@example.test`, role: "user" });
-const asAdmin = () =>
+/*
+ * A second ordinary person, standing in for "somebody who is not the owner".
+ *
+ * This used to be an administrator fixture with `role: "admin"`. There is no administrator: the role
+ * is the literal `"user"`, so an admin actor cannot be constructed at all, and the guarantee this
+ * file exists to check is stronger for it — a deployment skill is refused to EVERYONE, owner and
+ * stranger alike, because there is no actor that could ever be handed it.
+ */
+const asStranger = () =>
   routesAs({
-    id: `user_admin_${suite}`,
-    email: "admin@example.test",
-    role: "admin",
+    id: `user_stranger_${suite}`,
+    email: "stranger@example.test",
+    role: "user",
   });
 
 type Routes = ReturnType<typeof routesAs>;
@@ -156,23 +160,40 @@ describe("a skill name written again after the skill was uninstalled", () => {
   });
 
   test("a Bot the deployment shares does not take on a person's instructions", async () => {
-    expect(
-      (await writeSkill(asAdmin(), deploymentSlug, "Triage by severity.", true))
-        .status,
-    ).toBe(200);
-    expect((await grant(asAdmin(), deploymentSlug, sharedBot)).status).toBe(
-      200,
-    );
+    /*
+     * A deployment skill is read-only for everyone, so the slug cannot be reused at all.
+     *
+     * There is no administrator in individual-user SaaS — `skillActor` carries an id and nothing
+     * else, so no caller is ever privileged, which is why the seed below goes through the store
+     * rather than `POST /skills`. That decision is what makes this test's guarantee total: nobody can uninstall
+     * the package skill, nobody can rewrite it under the slug, and so the shared Bot keeps the
+     * instructions the tenant package shipped no matter how many people try.
+     *
+     * Both refusals are asserted rather than assumed, because each one used to be permitted for
+     * somebody and is exactly the way a shared Bot ends up answering with the last writer's words.
+     */
+    await store.installSkill({
+      slug: deploymentSlug,
+      title: "Triage",
+      summary: "For a test.",
+      instructions: "Triage by severity.",
+      ownerUserId: null,
+      by: "admin@example.test",
+    });
 
-    expect((await uninstall(asAdmin(), deploymentSlug)).status).toBe(200);
-    expect(
-      (await writeSkill(asAlice(), deploymentSlug, "Alice's words.")).status,
-    ).toBe(200);
-    expect((await grant(asAlice(), deploymentSlug, sharedBot)).status).toBe(
+    // Nobody may grant it: a deployment skill is not the asker's to hand out, owner included.
+    expect((await grant(asStranger(), deploymentSlug, sharedBot)).status).toBe(
       403,
     );
+    // Nobody may uninstall it, so there is no window in which the slug becomes writable.
+    expect((await uninstall(asStranger(), deploymentSlug)).status).toBe(403);
+    // And nobody may take the name for a personal skill.
+    expect(
+      (await writeSkill(asAlice(), deploymentSlug, "Alice's words.")).status,
+    ).toBe(403);
 
-    expect(await offered(asAdmin(), sharedBot)).toEqual([]);
+    expect(await offered(asStranger(), sharedBot)).toEqual([]);
+    expect(await offered(asAlice(), sharedBot)).toEqual([]);
   });
 
   test("uninstalling removes that skill's grants and no other", async () => {

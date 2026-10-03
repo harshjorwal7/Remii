@@ -33,7 +33,10 @@ export type DataFunction = {
   description: string;
   /** What it reads, in a few words, for the Admin page and for the audit row. */
   reads: string;
-  run: (database: Database, args: Record<string, unknown>) => Promise<unknown>;
+  run: (
+    database: Database,
+    args: Record<string, unknown> & { actorUserId?: string },
+  ) => Promise<unknown>;
 };
 
 /** A whole number from an untrusted body, clamped into a range it is safe to run. */
@@ -64,8 +67,13 @@ export const DATA_FUNCTIONS: DataFunction[] = [
         sql`select payload->>'bot' as bot, count(*)::int as actions
             from audit_events
             where payload->>'bot' is not null
-              and created_at > now() - make_interval(days => ${days})
-            group by 1
+             and created_at > now() - make_interval(days => ${days})
+             and exists (
+               select 1 from agent_profiles
+               where agent_profiles.agent_id = audit_events.payload->>'bot'
+                 and (agent_profiles.owner_user_id = ${args.actorUserId ?? null} or agent_profiles.owner_user_id is null)
+             )
+             group by 1
             order by actions desc
             limit 12`,
       );
@@ -94,9 +102,14 @@ export const DATA_FUNCTIONS: DataFunction[] = [
               'computer.action_refused',
               'component.refused',
               'component.function_refused',
-              'bot.declined'
-            )
-            order by created_at desc
+               'bot.declined'
+             )
+             and exists (
+               select 1 from agent_profiles
+               where agent_profiles.agent_id = audit_events.payload->>'bot'
+                 and (agent_profiles.owner_user_id = ${args.actorUserId ?? null} or agent_profiles.owner_user_id is null)
+             )
+             order by created_at desc
             limit ${limit}`,
       );
       return { rows: [...rows] };

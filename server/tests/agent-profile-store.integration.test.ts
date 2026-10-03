@@ -1,7 +1,7 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { authFromConfiguration } from "../src/agents/auth-header";
+
 import {
   AgentNotFoundError,
   AgentNotManageableError,
@@ -323,14 +323,16 @@ describe("agent profile store integration", () => {
   });
 
   /**
-   * The other half of the same rule: a remote coworker must not acquire a prompt it never had.
+   * The other half of the same rule: a coworker reached over AG-UI must not acquire a prompt it never
+   * had.
    *
    * Its instruction travels as the standing role message built from the profile, so a `systemPrompt`
    * appearing in its configuration would be a second source for the same thing — and the one the
    * runtime prefers for a `built_in` row, which is what this coworker would look like if its type
-   * ever changed.
+   * ever changed. The deployment's own Bot is reached this way too, which is why the branch keys on
+   * the stored type rather than on whether the endpoint happens to be ours.
    */
-  test("an edit never gives a coworker at its own address a system prompt", async () => {
+  test("an edit never gives a coworker reached over AG-UI a system prompt", async () => {
     const owner = await createUser();
     const source = await createProfileFixture({
       owner,
@@ -343,7 +345,6 @@ describe("agent profile store integration", () => {
       title: "Elsewhere",
       roleDescription: "Edited, and it still runs at its own address.",
       visibility: "private",
-      endpoint: "https://remote.example.test/ag-ui",
     });
 
     const row = await agentRow(source.agentId);
@@ -351,34 +352,102 @@ describe("agent profile store integration", () => {
     expect(row.configuration.systemPrompt).toBeUndefined();
   });
 
-  test("lets an owner and admin get and list a private profile but hides it from another user", async () => {
+  test("a create on a deployment with no Bot of its own runs the coworker here, on its role", async () => {
+    /*
+     * The fallback that keeps the recommended one-container image usable. With nothing to bind to, the
+     * create used to be refused outright, so a person could not make a coworker at all on the image
+     * the README tells them to deploy. The role description is what such a coworker runs on — the
+     * same shape a `built_in` Bot in the tenant package carries, for the same purpose.
+     */
+    const withoutEngine = createAgentProfileStore(database, undefined);
+    const owner = await createUser();
+
+    const created = await withoutEngine.create(owner, {
+      name: `Created ${randomUUID()}`,
+      title: "Created Title",
+      roleDescription: "Runs on these instructions.",
+      visibility: "private",
+      systemPrompt: "Runs on these instructions.",
+    });
+    createdAgentIds.push(created.id);
+
+    expect(created.endpoint).toBeNull();
+    const row = await agentRow(created.id);
+    expect(row.type).toBe("built_in");
+    expect(row.configuration.systemPrompt).toBe("Runs on these instructions.");
+  });
+
+  test("refuses a create with neither an engine nor an instruction to run on", async () => {
+    // Nothing to create: a `built_in` row with an empty prompt is a coworker
+    // `registeredAgentFromRow` drops on the floor, and the Bot would exist on every screen while
+    // answering nobody.
+    const withoutEngine = createAgentProfileStore(database, undefined);
+    const owner = await createUser();
+
+    await expect(
+      withoutEngine.create(owner, {
+        name: `Created ${randomUUID()}`,
+        title: "Created Title",
+        roleDescription: "",
+        visibility: "private",
+      } as CreateAgentInput),
+    ).rejects.toBeInstanceOf(ManagedAgentUnavailableError);
+  });
+
+  test("lets an owner get and list a private profile but hides it from another user", async () => {
+    /*
+     * WAS "lets an owner and admin ...", asserting the admin could read somebody else's private
+     * profile. There is no administrator override in this deployment — `accessFilter` admits a row
+     * when it is the caller's own or has no owner at all — so the admin was refused like anybody
+     * else and the assertion failed.
+     *
+     * The admin is kept in the fixture rather than deleted, because the interesting part is now
+     * exactly that the ROLE grants nothing: a caller whose actor says `admin` and a caller that does
+     * not get the same answer, which is the property that replaced the override.
+     */
     const owner = await createUser();
     const other = await createUser();
     const admin = await createUser("admin");
     const source = await createProfileFixture({ owner, visibility: "private" });
 
     expect((await profileById(owner, source.agentId)).id).toBe(source.agentId);
-    expect((await profileById(admin, source.agentId)).id).toBe(source.agentId);
+    // An actor carrying `role: "admin"` sees exactly what any other non-owner sees.
+    expect(await store.get(admin, source.agentId)).toBeNull();
     expect(await store.get(other, source.agentId)).toBeNull();
     expectListed(await store.list(owner), source.agentId, true);
-    expectListed(await store.list(admin), source.agentId, true);
+    expectListed(await store.list(admin), source.agentId, false);
     expectListed(await store.list(other), source.agentId, false);
   });
 
   test("stores hiding per user and moves the caller between default and hidden lists", async () => {
     const owner = await createUser();
     const other = await createUser();
-    const source = await createProfileFixture({ owner, visibility: "public" });
+    /*
+     * Private, and owned, rather than public.
+     *
+     * Public sharing was removed, so a row marked public is now nobody else's business — but that is
+     * not what this case is about. It is about hiding being PER BOT and PER CALLER, and with sharing
+     * gone the only caller who can see this row is its owner. So the caller hides one Bot and not the
+     * other, which is the assertion that actually needs making: one preference row cannot move the
+     * rest of the list.
+     *
+     * A caller who cannot see a Bot cannot hide it either — `setHidden` goes through the same
+     * accessibility filter as a read and throws rather than writing a preference nothing will consult.
+     * That is a separate case, and asserting it here would only obscure which half failed.
+     */
+    const source = await createProfileFixture({ owner, visibility: "private" });
+    const second = await createProfileFixture({ owner, visibility: "private" });
 
     expectListed(await store.list(owner), source.agentId, true);
     expectListed(await store.list(owner, true), source.agentId, false);
-    expectListed(await store.list(other), source.agentId, true);
 
+    // Hiding one Bot leaves the other in the default list — the preference is keyed on the Bot, not
+    // on the caller, so one row cannot hide the rest.
     await store.setHidden(owner, source.agentId, true);
     expectListed(await store.list(owner), source.agentId, false);
     expectListed(await store.list(owner, true), source.agentId, true);
-    expectListed(await store.list(other), source.agentId, true);
-    expectListed(await store.list(other, true), source.agentId, false);
+    expectListed(await store.list(owner), second.agentId, true);
+    expectListed(await store.list(owner, true), second.agentId, false);
 
     await store.setHidden(owner, source.agentId, false);
     expectListed(await store.list(owner), source.agentId, true);
@@ -395,7 +464,7 @@ describe("agent profile store integration", () => {
     expect(preference?.hiddenAt).toBeNull();
   });
 
-  test("takes the endpoint and ignores every field a caller must not set", async () => {
+  test("ignores every field a caller must not set, the address among them", async () => {
     const owner = await createUser();
     const deploymentPackage = await createPackage();
     const source = await createProfileFixture({
@@ -417,12 +486,19 @@ describe("agent profile store integration", () => {
       name: "Renamed Assistant",
       title: "Updated Title",
       roleDescription: "Updated role description.",
+      // `public` in a hostile payload, and it does not become one: public sharing was removed, so
+      // every read above coerces the column to `private` rather than returning what is stored. The
+      // field is left in this payload on purpose — it is one more thing a caller must not be able to
+      // set, and the assertions below are that nothing else in this payload lands either.
       visibility: "public",
       id: "forged-id",
-      // The endpoint IS editable, and is the one field in this hostile payload that lands. A service
-      // moves host, and the alternative is deleting the coworker and losing its conversations. It
-      // reaches here already validated by the same check that guards creation.
+      // The address and the key are NOT editable, and are what this assertion is really about. A
+      // coworker runs where this deployment runs it and authenticates with the deployment's own token,
+      // so a saved form that could repoint one or attach a credential would let anybody move a Bot to
+      // an address of their choosing. Both are left in this hostile payload on purpose: the route
+      // refuses them before the store is reached, and the store ignores them if it ever is.
       endpoint: "https://moved.example.test/ag-ui",
+      auth: { header: "Authorization", value: "Bearer sk-do-not-log" },
       ownerUserId: "forged-owner",
       avatarSeed: "forged-avatar",
       packageId: deploymentPackage.id,
@@ -434,7 +510,7 @@ describe("agent profile store integration", () => {
       name: "Renamed Assistant",
       title: "Updated Title",
       roleDescription: "Updated role description.",
-      visibility: "public",
+      visibility: "private",
       ownerUserId: owner.id,
       avatarSeed: source.avatarSeed,
       systemOwned: false,
@@ -452,7 +528,9 @@ describe("agent profile store integration", () => {
       id: source.agentId,
       name: "Renamed Assistant",
       type: "remote_ag_ui",
-      configuration: { endpoint: "https://moved.example.test/ag-ui" },
+      // Untouched: the coworker still runs where this deployment runs it, and no key of the caller's
+      // was stored beside it.
+      configuration: { endpoint: "https://preserved.example.test/ag-ui" },
       packageId: null,
     });
     expect(profile).toMatchObject({
@@ -460,6 +538,15 @@ describe("agent profile store integration", () => {
       title: "Updated Title",
       roleDescription: "Updated role description.",
       avatarSeed: source.avatarSeed,
+      /*
+       * `public` IN THE COLUMN, which is the assertion to keep here — this is a raw read of
+       * `agent_profiles`, and the store wrote what it was given.
+       *
+       * The coercion is on the way OUT, in `mapProfile`, which returns `visibility: "private"`
+       * whatever the column says, so a public value can sit on old rows without ever leaving the
+       * server as one. The returned profile above asserts that half; this one asserts the column is
+       * not what was supposed to protect anybody, and that `deletedAt` did not move.
+       */
       visibility: "public",
       deletedAt: null,
     });
@@ -471,7 +558,18 @@ describe("agent profile store integration", () => {
     );
   });
 
-  test("rejects public non-owner mutation as unmanageable and inaccessible private mutation as absent", async () => {
+  /*
+   * WAS "rejects public non-owner mutation as unmanageable and inaccessible private mutation as
+   * absent": two fixtures whose ONLY difference was `visibility`, giving a non-owner two different
+   * refusals — "you could manage this but may not" against "this does not exist".
+   *
+   * That distinction was the oracle `accessFilter` exists to close, and public sharing is gone, so
+   * the two columns now differ in nothing a caller can reach. There is one answer for a row that is
+   * somebody else's: absent. The row marked `public` is still created here, because that a row can
+   * CARRY the value while nothing reads it as one is the property that matters, and it is what makes
+   * the single refusal below safe.
+   */
+  test("refuses a non-owner's mutation of any visibility as absent", async () => {
     const owner = await createUser();
     const other = await createUser();
     const publicSource = await createProfileFixture({
@@ -489,18 +587,17 @@ describe("agent profile store integration", () => {
       visibility: "public",
     };
 
-    await expect(
-      store.update(other, publicSource.agentId, input),
-    ).rejects.toBeInstanceOf(AgentNotManageableError);
-    await store.setHidden(other, publicSource.agentId, true);
-    expectListed(await store.list(other), publicSource.agentId, false);
-    expectListed(await store.list(other, true), publicSource.agentId, true);
-    await expect(
-      store.update(other, privateSource.agentId, input),
-    ).rejects.toBeInstanceOf(AgentNotFoundError);
-    await expect(
-      store.setHidden(other, privateSource.agentId, true),
-    ).rejects.toBeInstanceOf(AgentNotFoundError);
+    for (const source of [publicSource, privateSource]) {
+      await expect(
+        store.update(other, source.agentId, input),
+      ).rejects.toBeInstanceOf(AgentNotFoundError);
+      await expect(
+        store.setHidden(other, source.agentId, true),
+      ).rejects.toBeInstanceOf(AgentNotFoundError);
+      // And it is absent from the non-owner's lists too, however the row was written.
+      expectListed(await store.list(other), source.agentId, false);
+      expectListed(await store.list(other, true), source.agentId, false);
+    }
   });
 
   test("rejects update and soft delete for a package-backed profile", async () => {
@@ -600,25 +697,37 @@ describe("agent profile store integration", () => {
     expect(profile?.deletedAt).toBeNull();
   });
 
-  test("allows an admin to update and soft delete a user-owned profile", async () => {
+  /*
+   * WAS "allows an admin to update and soft delete a user-owned profile". There is no administrator
+   * override in this deployment, so an actor carrying `role: "admin"` reaches a user-owned Bot
+   * exactly as any other non-owner does — the call threw rather than returning the renamed profile.
+   *
+   * The admin is kept in the fixture rather than dropped, because the property that replaced the
+   * override is precisely that the ROLE confers nothing: same caller shape, same refusal. A test that
+   * simply removed the admin would not notice a future `role === "admin"` special case coming back.
+   */
+  test("refuses an admin an update and a soft delete of a user-owned profile", async () => {
     const owner = await createUser();
     const admin = await createUser("admin");
     const source = await createProfileFixture({ owner });
 
-    const updated = await store.update(admin, source.agentId, {
-      name: "Admin Rename",
-      title: "Admin Title",
-      roleDescription: "Admin role update.",
-      visibility: "private",
-    });
-    expect(updated).toMatchObject({
-      name: "Admin Rename",
-      ownerUserId: owner.id,
-      title: "Admin Title",
-    });
+    await expect(
+      store.update(admin, source.agentId, {
+        name: "Admin Rename",
+        title: "Admin Title",
+        roleDescription: "Admin role update.",
+        visibility: "private",
+      }),
+    ).rejects.toBeInstanceOf(AgentNotFoundError);
 
-    await store.softDelete(admin, source.agentId);
-    expect(await store.get(admin, source.agentId)).toBeNull();
+    await expect(
+      store.softDelete(admin, source.agentId),
+    ).rejects.toBeInstanceOf(AgentNotFoundError);
+
+    // Still standing and still owned by the person who made it.
+    expect((await profileById(owner, source.agentId)).ownerUserId).toBe(
+      owner.id,
+    );
   });
 
   test("duplicates a profile as a caller-owned private agent with copied presentation fields", async () => {
@@ -660,7 +769,9 @@ describe("agent profile store integration", () => {
 
   test("duplicates no channel membership or Intelligence mapping from the source", async () => {
     const owner = await createUser();
-    const source = await createProfileFixture({ owner, visibility: "public" });
+    // Private, not public: public sharing was removed, so a row marked public is visible to no one
+    // but its owner and the assertion below would be reading an unreachable row.
+    const source = await createProfileFixture({ owner, visibility: "private" });
     const channelId = id("channel");
     await database.insert(channels).values({
       id: channelId,
@@ -706,7 +817,36 @@ describe("agent profile store integration", () => {
     expect(duplicateMappings).toHaveLength(0);
   });
 
-  test("copies the source's own endpoint rather than repointing the copy at the managed Bot", async () => {
+  test("a copy carries the source's address and no key of its own", async () => {
+    /*
+     * The address half is load-bearing: a package row registered against the Bot this deployment ships
+     * in the box, or a harness chosen at setup, is copied to run where its source ran rather than
+     * being repointed at whatever this deployment happens to run now.
+     *
+     * The key half is the floor that is left. Two coworkers sharing one credential would mean rotating
+     * either one's key silently changed the other's, and nobody can supply one any more, so this is
+     * now only reachable by writing the configuration directly.
+     */
+    const owner = await createUser();
+    const source = await createProfileFixture({
+      owner,
+      configuration: {
+        endpoint: "https://hosted.example.test/ag-ui",
+        auth: { header: "Authorization", credentialId: "credential-1" },
+      },
+    });
+
+    const duplicate = await store.duplicate(owner, source.agentId);
+    createdAgentIds.push(duplicate.id);
+
+    expect(duplicate.endpoint).toBe("https://hosted.example.test/ag-ui");
+    const row = await agentRow(duplicate.id);
+    expect(row.configuration.auth).toBeUndefined();
+  });
+
+  test("copies the source's own address rather than repointing the copy at the deployment's Bot", async () => {
+    // Package-supplied rows keep their addresses: the Bot this deployment ships in the box and a
+    // harness chosen at setup are both registered that way, from configuration.
     const owner = await createUser();
     const source = await createProfileFixture({
       owner,
@@ -720,7 +860,27 @@ describe("agent profile store integration", () => {
     expect(duplicate.endpoint).not.toBe(managedAgentAgUiUrl.toString());
   });
 
-  test("gives a copy of an endpoint-less source the managed Bot, as its source had", async () => {
+  test("a create writes the deployment's address, never one the caller supplied", async () => {
+    const owner = await createUser();
+
+    const created = await store.create(owner, {
+      name: `Created ${randomUUID()}`,
+      title: "Created Title",
+      roleDescription: "Created role description.",
+      visibility: "private",
+      // A hostile payload that reaches the store directly, past the route that refuses it.
+      endpoint: "https://attacker.example.test/ag-ui",
+      auth: { header: "Authorization", value: "Bearer sk-do-not-log" },
+    } as unknown as CreateAgentInput);
+    createdAgentIds.push(created.id);
+
+    expect(created.endpoint).toBe(managedAgentAgUiUrl.toString());
+    // And no key of the caller's is stored beside it, however the payload was built.
+    const row = await agentRow(created.id);
+    expect(row.configuration.auth).toBeUndefined();
+  });
+
+  test("gives a copy of a prompt-running source the deployment's Bot when it has none of its own", async () => {
     const owner = await createUser();
     const created = await store.create(owner, {
       name: `Created ${randomUUID()}`,
@@ -736,44 +896,30 @@ describe("agent profile store integration", () => {
     expect(duplicate.endpoint).toBe(managedAgentAgUiUrl.toString());
   });
 
-  test("does not carry the source's stored key onto the copy", async () => {
-    const owner = await createUser();
-    const source = await createProfileFixture({
-      owner,
-      configuration: {
-        endpoint: "https://hosted.example.test/ag-ui",
-        auth: { header: "Authorization", credentialId: "credential-1" },
-      },
-    });
-    expect((await profileById(owner, source.agentId)).hasAuth).toBe(true);
+  /*
+   * WAS "does not carry the source's stored key onto the copy", and it went with the feature rather
+   * than with a rename: a coworker could be pointed at an address a person supplied and sit behind a
+   * bearer key of theirs, and two coworkers sharing one credential would have meant rotating either
+   * one's key silently changing the other's. Nobody can supply either now, so a copy has nothing to
+   * carry and there is nothing here left to guard.
+   */
 
-    const duplicate = await store.duplicate(owner, source.agentId);
-    createdAgentIds.push(duplicate.id);
-
-    expect(duplicate.hasAuth).toBe(false);
-    const [row] = await database
-      .select({ configuration: agents.configuration })
-      .from(agents)
-      .where(eq(agents.id, duplicate.id));
-    expect(authFromConfiguration(row?.configuration)).toBeNull();
-  });
-
-  test("duplicates a coworker with its own endpoint on a deployment with no managed Bot", async () => {
-    const unmanagedStore = createAgentProfileStore(database, undefined);
+  test("duplicates a coworker at its own address on a deployment with no Bot of its own", async () => {
+    const withoutEngine = createAgentProfileStore(database, undefined);
     const owner = await createUser();
     const source = await createProfileFixture({
       owner,
       configuration: { endpoint: "https://hosted.example.test/ag-ui" },
     });
 
-    const duplicate = await unmanagedStore.duplicate(owner, source.agentId);
+    const duplicate = await withoutEngine.duplicate(owner, source.agentId);
     createdAgentIds.push(duplicate.id);
 
     expect(duplicate.endpoint).toBe("https://hosted.example.test/ag-ui");
   });
 
-  test("refuses to duplicate an endpoint-less coworker with no managed Bot to fall back to", async () => {
-    const unmanagedStore = createAgentProfileStore(database, undefined);
+  test("refuses to duplicate a coworker with neither an address nor a prompt to fall back to", async () => {
+    const withoutEngine = createAgentProfileStore(database, undefined);
     const owner = await createUser();
     const source = await createProfileFixture({
       owner,
@@ -781,13 +927,15 @@ describe("agent profile store integration", () => {
     });
 
     await expect(
-      unmanagedStore.duplicate(owner, source.agentId),
+      withoutEngine.duplicate(owner, source.agentId),
     ).rejects.toBeInstanceOf(ManagedAgentUnavailableError);
   });
 
   test("soft deletes a profile from reads and lists while retaining its raw rows", async () => {
     const owner = await createUser();
-    const source = await createProfileFixture({ owner, visibility: "public" });
+    // Private, not public: public sharing was removed, so a row marked public is visible to no one
+    // but its owner and the assertion below would be reading an unreachable row.
+    const source = await createProfileFixture({ owner, visibility: "private" });
 
     await store.softDelete(owner, source.agentId);
 
@@ -857,7 +1005,13 @@ describe("agent profile store integration", () => {
     }
   });
 
-  test("creates a caller-owned remote AG-UI profile with the requested visibility", async () => {
+  /*
+   * Private whatever was asked for. Public sharing was removed, so `mapProfile` returns
+   * `visibility: "private"` for every row — and this asks for `public` on purpose, because that the
+   * requested value is IGNORED rather than merely that private is stored is the property: a caller
+   * that asks to share a Bot broadly must not be able to.
+   */
+  test("creates a caller-owned remote AG-UI profile that is private whatever was requested", async () => {
     const owner = await createUser();
     const input: CreateAgentInput = {
       name: `Created ${randomUUID()}`,
@@ -874,7 +1028,7 @@ describe("agent profile store integration", () => {
       title: input.title,
       roleDescription: input.roleDescription,
       avatarSeed: created.id,
-      visibility: "public",
+      visibility: "private",
       ownerUserId: owner.id,
       systemOwned: false,
       hidden: false,

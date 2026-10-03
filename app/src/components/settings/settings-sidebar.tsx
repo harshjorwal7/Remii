@@ -1,8 +1,17 @@
 import {
   IconArrowLeft,
+  IconBrain,
+  IconClock,
+  IconCreditCard,
+  IconDeviceDesktop,
+  IconFiles,
   IconLayoutGrid,
+  IconListCheck,
+  IconLock,
   IconPlug,
+  IconSend,
   IconSettings,
+  IconShieldCheck,
 } from "@tabler/icons-react";
 import { Link, type LinkOptions } from "@tanstack/react-router";
 import type * as React from "react";
@@ -39,16 +48,70 @@ const ITEMS: {
     linkOptions: { to: "/settings" },
   },
   {
+    title: "Billing & Credits",
+    icon: IconCreditCard,
+    linkOptions: { to: "/settings/billing" },
+  },
+  {
+    title: "Action Boundaries",
+    icon: IconShieldCheck,
+    linkOptions: { to: "/settings/boundaries" },
+  },
+  {
     /*
-     * The same subject as Admin's Plugins, from the other side: there an administrator decides what
-     * this deployment may reach at all, here you decide what it may reach as you.
+     * What this deployment may reach as you. Connect new apps here,
+     * or directly in chat.
      */
-    title: "Connected accounts",
+    title: "App connections",
     icon: IconPlug,
     linkOptions: { to: "/settings/connected-accounts" },
   },
   {
-    /* The same mark Admin gives UI Components. It is the same subject seen from the other side. */
+    title: "Telegram",
+    icon: IconSend,
+    linkOptions: { to: "/settings/telegram" },
+  },
+  {
+    title: "Memory",
+    icon: IconBrain,
+    linkOptions: { to: "/settings/memory" },
+  },
+  {
+    title: "Files",
+    icon: IconFiles,
+    linkOptions: { to: "/settings/files" },
+  },
+  {
+    /*
+     * What a Bot may log in with, pay with, and be told about you. Placed after Files because it is
+     * the other half of what a coworker knows about its person: Files holds what it was given, this
+     * holds what it is allowed to reach for.
+     */
+    title: "Vault",
+    icon: IconLock,
+    linkOptions: { to: "/settings/vault" },
+  },
+  {
+    /*
+     * Where the computer is, rather than a panel inside one conversation. Watching a Bot
+     * you happen to be chatting with is not the same as having a computer you can go to.
+     */
+    title: "Computer",
+    icon: IconDeviceDesktop,
+    linkOptions: { to: "/settings/computer" },
+  },
+  {
+    title: "Tasks",
+    icon: IconListCheck,
+    linkOptions: { to: "/settings/tasks" },
+  },
+  {
+    title: "Schedules",
+    icon: IconClock,
+    linkOptions: { to: "/settings/schedules" },
+  },
+  {
+    /* The same mark the Components gallery uses. It is the same subject seen from the other side. */
     title: "Components gallery",
     icon: IconLayoutGrid,
     linkOptions: { to: "/settings/components-gallery" },
@@ -60,7 +123,7 @@ export function SettingsSidebar({
 }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar {...props}>
-      {/* Matched to the app sidebar's header, as Admin's is. See admin-sidebar.tsx. */}
+      {/* Matched to the app sidebar's header height. */}
       <SidebarHeader className="h-12 p-2">
         <SidebarMenu>
           <SidebarMenuItem>

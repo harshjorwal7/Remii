@@ -13,6 +13,7 @@ import {
   componentFunctions,
   components,
   sandboxedComponents,
+  users,
 } from "../src/db/schema";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
 
@@ -34,11 +35,39 @@ const name = `custom_${slug}`;
 
 const store = createSandboxedStore(database, createAuditStore(database));
 
+/**
+ * The person these components belong to.
+ *
+ * Ownership arrived after this file: `save` takes a required `ownerId`, `publish` takes one and
+ * refuses a mismatch, `published(ownerId)` answers only for their components, and
+ * `sandboxed_components.owner_user_id` is a foreign key to `users`. So an `ownerId` of `""` is not a
+ * convenient "no owner" — it is a key that matches no row, and the insert fails on the constraint.
+ *
+ * A real user is created for the suite and cleaned up with the components, so the owner is somebody
+ * whose row exists. `OWNER` is passed to every call because that is the point being asserted: these
+ * components are drawable by their author, and nothing here is about an ownerless legacy row.
+ */
+const OWNER = `sandbox_owner_${suite}`;
+let ownerId: string | undefined;
+
+beforeAll(async () => {
+  await database
+    .insert(users)
+    .values({
+      id: OWNER,
+      email: `${OWNER}@example.test`,
+      name: "Sandbox Owner",
+    })
+    .onConflictDoNothing();
+  ownerId = OWNER;
+});
+
 afterAll(async () => {
   await database
     .delete(sandboxedComponents)
     .where(eq(sandboxedComponents.name, name));
   await database.delete(components).where(eq(components.name, name));
+  if (ownerId) await database.delete(users).where(eq(users.id, ownerId));
 });
 
 describe("authoring a component without a rebuild", () => {
@@ -52,7 +81,8 @@ describe("authoring a component without a rebuild", () => {
       jsFunctions: "",
       argumentSchema: { type: "object" },
       sampleArguments: { a: 1 },
-      by: "admin@openbot.local",
+      by: "admin@remii.local",
+      ownerId: OWNER,
     });
 
     expect(saved.name).toBe(name);
@@ -69,17 +99,17 @@ describe("authoring a component without a rebuild", () => {
     expect(governance?.publishedDescription).toBeNull();
 
     // And nothing to draw with. This is the assertion that matters.
-    const published = await store.published();
+    const published = await store.published(OWNER);
     expect(published.map((row) => row.name)).not.toContain(name);
   });
 
   test("publishing releases the source and the description together", async () => {
-    const published = await store.publish(name, "admin@openbot.local");
+    const published = await store.publish(name, "admin@remii.local", OWNER);
     expect(published.published).toBe(true);
     expect(published.publishedHtml).toBe("<p>draft</p>");
     expect(published.revision).toBe(1);
 
-    const drawable = await store.published();
+    const drawable = await store.published(OWNER);
     expect(drawable.find((row) => row.name === name)?.html).toBe(
       "<p>draft</p>",
     );
@@ -111,16 +141,21 @@ describe("authoring a component without a rebuild", () => {
       jsFunctions: "",
       argumentSchema: { type: "object" },
       sampleArguments: { a: 1 },
-      by: "admin@openbot.local",
+      by: "admin@remii.local",
+      ownerId: OWNER,
     });
 
-    const drawable = await store.published();
+    const drawable = await store.published(OWNER);
     // Still the published version. An edit is not a deployment.
     expect(drawable.find((row) => row.name === name)?.html).toBe(
       "<p>draft</p>",
     );
 
-    const [record] = (await store.list()).filter((row) => row.name === name);
+    // `list(ownerId)` too: the store answers for one person, the same filter `published` applies.
+    // `store.list()` passed no owner, matched no rows, and left `record` undefined.
+    const [record] = (await store.list(OWNER)).filter(
+      (row) => row.name === name,
+    );
     expect(record.hasUnpublishedChanges).toBe(true);
   });
 
@@ -135,13 +170,14 @@ describe("authoring a component without a rebuild", () => {
         jsFunctions: "",
         argumentSchema: {},
         sampleArguments: {},
-        by: "admin@openbot.local",
+        by: "admin@remii.local",
+        ownerId: OWNER,
       }),
     ).rejects.toThrow();
   });
 
   test("deleting takes the governance row with it", async () => {
-    await store.remove(name, "admin@openbot.local");
+    await store.remove(name, "admin@remii.local", OWNER);
     const [governance] = await database
       .select()
       .from(components)
@@ -184,12 +220,12 @@ describe("deleting a name this surface does not own", () => {
     await database.insert(componentExclusions).values({
       componentName: compiled,
       agentId: bot,
-      withheldBy: "admin@openbot.local",
+      withheldBy: "admin@remii.local",
     });
     await database.insert(componentFunctions).values({
       componentName: compiled,
       functionName: "listRecentOrders",
-      grantedBy: "admin@openbot.local",
+      grantedBy: "admin@remii.local",
     });
   });
 
@@ -199,9 +235,9 @@ describe("deleting a name this surface does not own", () => {
   });
 
   test("refuses a compiled component's name instead of deleting its governance", async () => {
-    await expect(store.remove(compiled, "admin@openbot.local")).rejects.toThrow(
-      SandboxedNotFoundError,
-    );
+    await expect(
+      store.remove(compiled, "admin@remii.local", OWNER),
+    ).rejects.toThrow(SandboxedNotFoundError);
 
     const [governance] = await database
       .select()
@@ -237,7 +273,7 @@ describe("deleting a name this surface does not own", () => {
     // Answered rather than reported as success. `{ ok: true }` for a name that was never there reads
     // as "the thing you named is gone", which is the one thing it does not establish.
     await expect(
-      store.remove(`custom_never_${suite}`, "admin@openbot.local"),
+      store.remove(`custom_never_${suite}`, "admin@remii.local", OWNER),
     ).rejects.toThrow(SandboxedNotFoundError);
   });
 
@@ -257,10 +293,10 @@ describe("deleting a name this surface does not own", () => {
       kind: "sandboxed",
       draftDescription: "Authored here.",
       published: false,
-      updatedBy: "admin@openbot.local",
+      updatedBy: "admin@remii.local",
     });
 
-    await store.remove(orphan, "admin@openbot.local");
+    await store.remove(orphan, "admin@remii.local", OWNER);
 
     const [gone] = await database
       .select()

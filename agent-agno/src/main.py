@@ -15,18 +15,18 @@ from agno.os.interfaces.agui import AGUI
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-TOKEN_HEADER = "x-openbot-agent-token"
+TOKEN_HEADER = "x-remii-agent-token"
 
 
 def _model_id() -> str:
-    """`provider/model`, which is how litellm addresses one and how OpenBot stores the choice."""
+    """`provider/model`, which is how litellm addresses one and how Remii stores the choice."""
     provider = (os.environ.get("BOT_PROVIDER") or "openai").strip()
     model = (os.environ.get("BOT_MODEL") or "gpt-5.5").strip()
     return model if "/" in model else f"{provider}/{model}"
 
 
 agent = Agent(
-    # In memory, because a Bot's history lives in OpenBot's database and not in the harness. Two
+    # In memory, because a Bot's history lives in Remii's database and not in the harness. Two
     # places remembering the same conversation is how they come to disagree.
     db=InMemoryDb(),
     # `drop_params`, because Agno sends a temperature and a `top_p` on every request and LiteLLM
@@ -35,7 +35,7 @@ agent = Agent(
     # for this one client, as the LlamaIndex Bot does.
     model=LiteLLM(id=_model_id(), request_params={"drop_params": True}),
     # No role, goal or backstory invented on somebody's behalf. A Bot answers the question it is
-    # asked, and anybody who wants a persona sets one in OpenBot where the rest of them live.
+    # asked, and anybody who wants a persona sets one in Remii where the rest of them live.
     instructions="Answer the question you are asked, briefly and correctly.",
 )
 

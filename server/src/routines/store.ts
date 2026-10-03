@@ -25,6 +25,7 @@ import {
   asc,
   desc,
   eq,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -212,7 +213,10 @@ export type RoutineStore = {
     runId: string,
     status: RoutineRunOutcome,
     error?: string,
+    creditsConsumed?: number,
   ): Promise<void>;
+  /** Total credits consumed by this routine within the past 24 hours. */
+  dailyCreditsConsumed(routineId: string): Promise<number>;
   /**
    * Close every run row that has sat open (`status is null`) longer than `olderThanMs` as
    * "skipped", with the same reason on all of them. Returns how many rows it closed.
@@ -296,8 +300,8 @@ function nextRunFor(cron: string, timezone: string, after: Date): Date {
  * "A", "A, B", or five names and "and others" — a sentence, not a list a client renders.
  *
  * A name alone is not always enough to ask by: a real account turned up six channels all named
- * "General Assistant" with the same Bot, and a refusal built from names alone read "General
- * Assistant, General Assistant, … and others" — circular, because the person cannot answer it and
+ * "Remii" with the same Bot, and a refusal built from names alone read "General
+ * Assistant, Remii, … and others" — circular, because the person cannot answer it and
  * the model cannot map an answer back to a channelId. So every candidate whose name is shared by
  * another candidate gets its full id appended in parentheses; the id is the one thing the model can
  * pass back as `channelId` when names cannot tell two channels apart, and a person pasting it back
@@ -770,13 +774,14 @@ export function createRoutineStore(database: Database): RoutineStore {
       return row ?? null;
     },
 
-    async finishRun(runId, status, error) {
+    async finishRun(runId, status, error, creditsConsumed) {
       await database
         .update(routineRuns)
         .set({
           status,
           // The database's clock closes the row, the same as it opened it.
           finishedAt: sql`now()`,
+          ...(creditsConsumed !== undefined ? { creditsConsumed } : {}),
           // Left alone rather than nulled when there was no error, so finishing a run twice cannot
           // erase what the first finish recorded — and the `status is null` guard below is what
           // makes that true.
@@ -792,6 +797,22 @@ export function createRoutineStore(database: Database): RoutineStore {
         // calls finishRun("failed") — matches no row here and is a silent no-op, rather than
         // relabeling what the first finish already recorded.
         .where(and(eq(routineRuns.id, runId), isNull(routineRuns.status)));
+    },
+
+    async dailyCreditsConsumed(routineId) {
+      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const [result] = await database
+        .select({
+          total: sql<number>`coalesce(sum(${routineRuns.creditsConsumed}), 0)::int`,
+        })
+        .from(routineRuns)
+        .where(
+          and(
+            eq(routineRuns.routineId, routineId),
+            gte(routineRuns.startedAt, oneDayAgo),
+          ),
+        );
+      return Number(result?.total ?? 0);
     },
 
     async recordSweep(owner) {

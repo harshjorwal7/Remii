@@ -23,10 +23,10 @@ import { TEST_POOL, testDatabaseUrl } from "./support/database";
  *
  * Pointing a server at a credential is the one place this deployment accepts a *reference* to a
  * secret rather than the secret itself. Everywhere else that a stored value is spent, the value was
- * typed into the same request that stores it: `storeAgentAuth` mints its own row from the key an
- * administrator pasted and hands back an id nobody chose. So this is the field where "which secret"
- * and "which address" can be made to disagree, and the add is what settles the disagreement, because
- * the refresh runs before it returns and sends what it decrypts to the URL from that same request.
+ * typed into the same request that stores it, so the row mints itself from what was pasted and hands
+ * back an id nobody chose. So this is the field where "which secret" and "which address" can be made
+ * to disagree, and the add is what settles the disagreement, because the refresh runs before it
+ * returns and sends what it decrypts to the URL from that same request.
  *
  * Two rules, and the second is the one that matters. Naming another server's token was accepted, so
  * a credential could be spent by a server it was never given to. And re-adding a server with a

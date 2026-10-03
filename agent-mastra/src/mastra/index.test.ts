@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildOpenBotInstructions, openbotBaseInstructions } from "./index";
+import { buildRemiiInstructions, remiiBaseInstructions } from "./index";
 
 type ModelCase = {
   name: string;
@@ -22,14 +22,78 @@ function requestContextWith(context: unknown) {
   };
 }
 
+/**
+ * The base environment every probe child gets.
+ *
+ * `Bun.spawn({ env })` MERGES with `process.env` rather than replacing it, and Bun has already read
+ * the repository's `.env` into this process before any test runs. A child spawned with a handful of
+ * keys therefore still inherits whatever the developer happens to have configured locally — which made
+ * every "absent" case in this file assert against `BOT_MODEL=deepseek-flash`, `PORT=3001` and a real
+ * `OPENAI_API_KEY` from a local `.env` rather than against the defaults it claims to be testing. CI,
+ * with no `.env`, would have run the same cases against different inputs.
+ *
+ * So "absent" has to be spelled, and it takes two different forms because the two consumers disagree.
+ *
+ * MODEL and PORT use `""`, which this module trims and then falls back from — so `""` really is "not
+ * set" for them. The API KEYS have to be REMOVED, because the AI SDK treats `""` as a key that is
+ * present and blank and will build and send a request with it, which is the opposite of what the
+ * "no key" cases assert.
+ *
+ * Removing is not something `Bun.spawn`'s own `env` can express: a key set to `undefined` there is
+ * IGNORED, so the merged-in real value survives. Hence {@link probeEnv}, which deletes from a copy of
+ * `process.env` instead of relying on the merge at all.
+ */
+const probeEnvironment = {
+  PATH: process.env.PATH ?? "/opt/homebrew/bin:/usr/bin:/bin",
+  MASTRA_TELEMETRY_DISABLED: "true",
+  DO_NOT_TRACK: "1",
+  NODE_ENV: "test",
+  BOT_PROVIDER: "",
+  BOT_MODEL: "",
+  PORT: "",
+  ANTHROPIC_BASE_URL: "",
+  OPENAI_BASE_URL: "",
+};
+
+/**
+ * A child's environment.
+ *
+ * `probeEnvironment` is applied AFTER the inherited values on purpose: it has to beat them, or a
+ * developer's `BOT_MODEL=deepseek-flash` and `PORT=3001` from a local `.env` would be what the
+ * "absent" cases assert against. Spreading it first instead let its own `PORT: ""` clobber a case
+ * that had just set `PORT: " 54213 "`, which is how "PORT is padded integer" came to read as empty.
+ *
+ * The API credentials are NOT handled here. `Bun.spawn` merges `env` with `process.env`, so a key
+ * this omits is inherited rather than removed, and a key set to `undefined` is ignored outright —
+ * both verified, not assumed. The provider probe therefore deletes them in the child itself; see
+ * `credentialEnv` below.
+ */
+function probeEnv(overrides: Record<string, string> = {}) {
+  const env: Record<string, string> = { ...process.env };
+  Object.assign(env, probeEnvironment, overrides);
+  return env;
+}
+
+/**
+ * The credential a provider case names, as an object safe to inject into the child's script.
+ *
+ * A case with NO key produces an empty object, which is how "no key" is spelled: the child deletes
+ * both credentials and restores only what this names. `""` would not do — the AI SDK's `loadApiKey`
+ * rejects only `null` and `undefined`, so an empty string is a key that is present and blank, and it
+ * builds and sends a request with it.
+ */
+function credentialEnv(choice: {
+  provider: string;
+  apiKey?: string;
+}): Record<string, string> {
+  if (choice.apiKey === undefined) return {};
+  return choice.provider === "anthropic"
+    ? { ANTHROPIC_API_KEY: choice.apiKey }
+    : { OPENAI_API_KEY: choice.apiKey };
+}
+
 async function configuredModelId(botModel: string | undefined) {
-  const env: Record<string, string> = {
-    PATH: process.env.PATH ?? "/opt/homebrew/bin:/usr/bin:/bin",
-    MASTRA_TELEMETRY_DISABLED: "true",
-    DO_NOT_TRACK: "1",
-    NODE_ENV: "test",
-  };
-  if (botModel !== undefined) env.BOT_MODEL = botModel;
+  const env = probeEnv(botModel === undefined ? {} : { BOT_MODEL: botModel });
 
   const child = Bun.spawn(
     [
@@ -37,7 +101,7 @@ async function configuredModelId(botModel: string | undefined) {
       "-e",
       [
         'const { mastra } = await import("./agent-mastra/src/mastra/index.ts");',
-        'const model = mastra.getAgent("openbot").model;',
+        'const model = mastra.getAgent("remii").model;',
         "console.log(JSON.stringify({ modelId: model.modelId }));",
       ].join("\n"),
     ],
@@ -65,13 +129,7 @@ async function configuredModelId(botModel: string | undefined) {
 }
 
 async function configuredPort(port: string | undefined) {
-  const env: Record<string, string> = {
-    PATH: process.env.PATH ?? "/opt/homebrew/bin:/usr/bin:/bin",
-    MASTRA_TELEMETRY_DISABLED: "true",
-    DO_NOT_TRACK: "1",
-    NODE_ENV: "test",
-  };
-  if (port !== undefined) env.PORT = port;
+  const env = probeEnv(port === undefined ? {} : { PORT: port });
 
   const child = Bun.spawn(
     [
@@ -104,20 +162,20 @@ async function configuredPort(port: string | undefined) {
   };
 }
 
-describe("OpenBot Mastra receiver instructions", () => {
-  test("adds model-visible OpenBot role context in receiver order", () => {
-    const instructions = buildOpenBotInstructions({
+describe("Remii Mastra receiver instructions", () => {
+  test("adds model-visible Remii role context in receiver order", () => {
+    const instructions = buildRemiiInstructions({
       requestContext: requestContextWith([
         {
-          description: "OpenBot granted tools guidance",
+          description: "Remii granted tools guidance",
           value: "Use only the granted Slack tool.",
         },
         {
-          description: "OpenBot standing role",
+          description: "Remii standing role",
           value: "Use MODEL_BOUNDARY_MANAGED_ROLE in the answer.",
         },
         {
-          description: "OpenBot Bot id",
+          description: "Remii Bot id",
           value: "packaged-mastra-managed",
         },
       ]),
@@ -125,7 +183,7 @@ describe("OpenBot Mastra receiver instructions", () => {
 
     expect(instructions).toBe(
       [
-        openbotBaseInstructions,
+        remiiBaseInstructions,
         "Use MODEL_BOUNDARY_MANAGED_ROLE in the answer.",
         "Use only the granted Slack tool.",
       ].join("\n\n"),
@@ -133,16 +191,16 @@ describe("OpenBot Mastra receiver instructions", () => {
   });
 
   test("keeps ordinary Mastra calls on the base receiver instruction", () => {
-    expect(buildOpenBotInstructions()).toBe(openbotBaseInstructions);
+    expect(buildRemiiInstructions()).toBe(remiiBaseInstructions);
     expect(
-      buildOpenBotInstructions({
+      buildRemiiInstructions({
         requestContext: requestContextWith("not ag-ui context entries"),
       }),
-    ).toBe(openbotBaseInstructions);
+    ).toBe(remiiBaseInstructions);
   });
 });
 
-describe("OpenBot Mastra model configuration", () => {
+describe("Remii Mastra model configuration", () => {
   const modelCases: ModelCase[] = [
     { name: "absent", expected: "gpt-4o-mini" },
     { name: "empty", value: "", expected: "gpt-4o-mini" },
@@ -161,7 +219,7 @@ describe("OpenBot Mastra model configuration", () => {
   }
 });
 
-describe("OpenBot Mastra listen port configuration", () => {
+describe("Remii Mastra listen port configuration", () => {
   const validPortCases: PortCase[] = [
     { name: "absent", expected: 4213 },
     { name: "empty", value: "", expected: 4213 },
@@ -206,7 +264,7 @@ describe("OpenBot Mastra listen port configuration", () => {
   }
 });
 
-describe("OpenBot Mastra provider requests", () => {
+describe("Remii Mastra provider requests", () => {
   const choices: {
     provider: string;
     base: string;
@@ -370,27 +428,33 @@ describe("OpenBot Mastra provider requests", () => {
             '  request.headers.set("x-test-original-url", request.url);',
             `  return networkFetch(new Request(${JSON.stringify(provider.url.toString())} + url.pathname.slice(1) + url.search, request));`,
             "};",
+            /*
+             * THE CREDENTIALS ARE SET HERE, IN THE CHILD, rather than through `env`.
+             *
+             * `Bun.spawn` merges `env` with `process.env`, so a credential this does not name is
+             * inherited from the developer's `.env` — and one named as `undefined` is ignored, which
+             * is the trap that made the "no key" cases run with a real key. Deleting both and
+             * restoring only what this case names is the only spelling that means "absent", because
+             * the AI SDK reads `""` as a present-but-blank key and sends a request with it.
+             */
+            "const KEYS = " + JSON.stringify(credentialEnv(choice)) + ";",
+            'for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]) {',
+            "  if (name in KEYS) process.env[name] = KEYS[name];",
+            "  else delete process.env[name];",
+            "}",
             'const { mastra } = await import("./agent-mastra/src/mastra/index.ts");',
-            'const result = await mastra.getAgent("openbot").generate("Say hello");',
+            'const result = await mastra.getAgent("remii").generate("Say hello");',
             "console.log(JSON.stringify({ text: result.text }));",
           ].join("\n"),
         ],
         {
-          env: {
-            PATH: process.env.PATH ?? "/opt/homebrew/bin:/usr/bin:/bin",
-            MASTRA_TELEMETRY_DISABLED: "true",
-            DO_NOT_TRACK: "1",
-            NODE_ENV: "test",
+          env: probeEnv({
             BOT_PROVIDER: choice.provider,
             BOT_MODEL: choice.model,
-            ANTHROPIC_API_KEY:
-              choice.provider === "anthropic" ? choice.apiKey : "",
-            OPENAI_API_KEY:
-              choice.provider === "anthropic" ? "" : choice.apiKey,
             ANTHROPIC_BASE_URL:
               choice.provider === "anthropic" ? choice.base : "",
             OPENAI_BASE_URL: choice.provider === "anthropic" ? "" : choice.base,
-          },
+          }),
           stdout: "pipe",
           stderr: "pipe",
         },
@@ -403,11 +467,24 @@ describe("OpenBot Mastra provider requests", () => {
           child.exited,
         ]);
         if (choice.error) {
+          /*
+           * THE REFUSAL MUST ARRIVE BEFORE A REQUEST EXISTS, and `seen` is what proves "before".
+           *
+           * A substring check on stderr cannot: an error raised after a round trip still contains the
+           * message, so that assertion passes either way. What is actually being protected is a
+           * deployment that never sends a credentialless request to a vendor, and that is only true
+           * if the stand-in server was never called.
+           *
+           * `exitCode` goes first on purpose. While the developer's real `OPENAI_API_KEY` was leaking
+           * in from `.env` the child SUCCEEDED, and a failing substring check would have reported a
+           * missing message and sent the reader looking for a wording problem instead.
+           */
           expect(exitCode).not.toBe(0);
-          expect(stderr).toContain(choice.error);
           expect(seen).toEqual([]);
+          expect(stderr).toContain(choice.error);
           return;
         }
+
         if (exitCode !== 0)
           throw new Error(
             `provider probe exited ${exitCode}\n${stdout}\n${stderr}`,

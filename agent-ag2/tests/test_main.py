@@ -176,7 +176,7 @@ def test_a_run_reaches_the_model_the_setup_screen_chose(monkeypatch, provider, c
 
     main = importlib.reload(main)
     response = TestClient(main.app).post(
-        "/", json=RUN, headers={"x-openbot-agent-token": TOKEN}
+        "/", json=RUN, headers={"x-remii-agent-token": TOKEN}
     )
 
     assert response.status_code == 200
@@ -221,7 +221,7 @@ def test_an_anthropic_key_uses_the_official_endpoint_when_compose_sets_a_blank_u
 
     main = importlib.reload(main)
     response = TestClient(main.app).post(
-        "/", json=RUN, headers={"x-openbot-agent-token": TOKEN}
+        "/", json=RUN, headers={"x-remii-agent-token": TOKEN}
     )
 
     assert seen == [("https://api.anthropic.com/v1/messages", "test-key", "claude-sonnet-4-5")]

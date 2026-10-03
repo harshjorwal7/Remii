@@ -11,6 +11,13 @@ import {
 } from "drizzle-orm";
 import type { Context, MiddlewareHandler } from "hono";
 import { Hono } from "hono";
+import {
+  classifyAttachment,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_FILE_BYTES,
+  MAX_IMAGE_BYTES,
+  namesNoFormat,
+} from "../../../shared/attachments";
 import type { AppVariables } from "../auth/guards";
 import type { Database } from "../db/client";
 import {
@@ -19,15 +26,8 @@ import {
   channels,
   intelligenceChannelMappings,
 } from "../db/schema";
-import {
-  classifyAttachment,
-  MAX_ATTACHMENTS_PER_MESSAGE,
-  MAX_FILE_BYTES,
-  MAX_IMAGE_BYTES,
-  namesNoFormat,
-} from "../../../shared/attachments";
-import type { StoredAttachment } from "./attachment-parts";
 import { sniffMimeType } from "./attachment-mime";
+import type { StoredAttachment } from "./attachment-parts";
 
 function megabytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(0)}MB`;
@@ -1096,7 +1096,7 @@ export function createChannelAttachmentRoutes(
      * has to say what becomes of those. It used to say they are "cleared within a day", which this
      * server is in no position to promise: `attachments.culler.olderThanHours` is the operator's to
      * set, and `attachments.culler.enabled: false` is a documented way to keep every staged row for
-     * ever (charts/openbot/README.md). A deployment that has done either is one where this sentence
+     * ever (charts/remii/README.md). A deployment that has done either is one where this sentence
      * was simply a lie, told to the one person who could not act on it. What is true whatever the
      * chart says is that those rows are the deployment's to clear and not this person's, and that is
      * what it says now.
@@ -1262,6 +1262,73 @@ function ifNoneMatchHolds(header: string | undefined, etag: string): boolean {
 }
 
 /**
+ * What a `Range` header asks for, in the three answers a caller has to be ready for.
+ *
+ * `null` is "no range, or one this route will not honour" and `unsatisfiable` is a 416. The two are
+ * kept apart because they are different answers, and collapsing them means a client that asked for
+ * bytes past the end of a file gets the whole file instead of being told the file is shorter.
+ */
+type ByteRange = { start: number; endExclusive: number } | "unsatisfiable";
+
+/**
+ * One `Range` header, against a file of a known size.
+ *
+ * BYTE RANGES ONLY, AND THE OTHER FORMS ARE IGNORED RATHER THAN REFUSED. RFC 9110 also defines
+ * `Range: bytes=-500` (the last 500 bytes) and multi-range requests with several ranges in one
+ * header. A suffix range is handled, because a browser sends one when a user drags a scrub bar to
+ * the end. A MULTI-RANGE REQUEST IS NOT, and is answered with the whole file: assembling a
+ * `multipart/byteranges` body is a great deal of code for a case no browser sends unprompted, and
+ * answering it with one part rather than a multipart body is legal — the specification allows a
+ * server to send less than was asked for. A suffix range is handled, because a browser sends one.
+ *
+ * A range that is syntactically nonsense is `null` rather than 416: the client is not asking for
+ * something impossible, it is asking something this route does not implement, and the whole file is
+ * a correct answer to a request whose range was never valid.
+ */
+function parseByteRange(
+  header: string | undefined,
+  size: number,
+): ByteRange | null {
+  if (!header) return null;
+  const match = /^bytes=(.*)$/i.exec(header.trim());
+  if (!match) return null;
+  const spec = (match[1] ?? "").trim();
+  // One range only. A comma here is a multi-range request, answered with the whole file.
+  if (spec.includes(",")) return null;
+
+  const suffix = /^-(\d+)$/.exec(spec);
+  if (suffix) {
+    const wanted = Number.parseInt(suffix[1] ?? "0", 10);
+    if (wanted === 0) return "unsatisfiable";
+    // A suffix longer than the file is the whole file, and saying so is what the spec asks for.
+    return { start: Math.max(0, size - wanted), endExclusive: size };
+  }
+
+  const explicit = /^(\d+)-(\d*)$/.exec(spec);
+  if (!explicit) return null;
+  const start = Number.parseInt(explicit[1] ?? "0", 10);
+  const endText = explicit[2] ?? "";
+  // `bytes=500-` means "from 500 to the end", which is the common case for a media element.
+  const endExclusive = endText === "" ? size : Number.parseInt(endText, 10) + 1;
+
+  if (start >= size) return "unsatisfiable";
+  if (endExclusive <= start) return "unsatisfiable";
+  // A range that runs past the end is truncated to the end rather than refused: `bytes=0-99999` on
+  // a 500-byte file is a client that does not know the size yet, which is most of them.
+  return { start, endExclusive: Math.min(endExclusive, size) };
+}
+
+/**
+ * The kinds a browser renders as themselves, and which are therefore served inline.
+ *
+ * Exactly the four whose media type this server earned from the bytes AND that no browser executes.
+ * Everything else downloads: a `binary` because there is nothing to render, a `document` because a
+ * PDF gets its own origin, and everything refused because it never got this far.
+ */
+const INLINE_KINDS: ReadonlySet<ReturnType<typeof classifyAttachment>> =
+  new Set(["image", "text", "audio", "video"]);
+
+/**
  * The headers a stored attachment is served under — by `GET` and by `HEAD` alike, from one place,
  * because a probe that disagreed with the fetch about the type or the disposition would be worse
  * than no probe at all.
@@ -1280,14 +1347,43 @@ function attachmentHeaders(
     // the bytes itself, which is how a "text" file with HTML in it becomes a page rendered on
     // this app's own origin instead of the download or plain text it was declared to be.
     "X-Content-Type-Options": "nosniff",
-    // Only an image opens inline. Everything else — including a stray file whose sniffed type
-    // is not one of the accepted image formats — downloads instead, because inline is exactly
-    // what would let script-carrying content (the SVG case refused at upload) run if it ever
-    // reached this endpoint another way.
-    "Content-Disposition":
-      kind === "image"
-        ? "inline"
-        : `attachment; ${contentDispositionFilename(row.name)}`,
+    /*
+     * WHAT OPENS INLINE, WHICH IS A SHORTER LIST THAN IT WAS AND A DIFFERENT ONE.
+     *
+     * Images, text, audio and video are the kinds a browser renders as themselves, and each of them
+     * is rendered from a type this server sniffed out of the bytes. That is the condition, and it is
+     * doing the work: `nosniff` above means the browser uses this header rather than deciding for
+     * itself, so an inline response is only ever as safe as the type behind it.
+     *
+     * `document` and `binary` download, and the two are separated for different reasons. A
+     * `binary` is arbitrary bytes the app cannot read, so there is nothing to render and a download
+     * is the honest answer. A `document` DOES have a viewer — the Files page draws one, and a PDF
+     * this app can read is text on a page — but it is not served inline from this origin: see
+     * {@link attachmentPreviewOrigin} for why a PDF is the one type that gets a different hostname.
+     *
+     * Script-carrying content (the SVG case refused at upload) is therefore never inline, and the
+     * types in `INLINE_UNSAFE_MIME` never reach this route at all.
+     */
+    /*
+     * THE FILENAME IS SENT EITHER WAY, AND THAT IS THE PART THAT IS EASY TO GET WRONG.
+     *
+     * An `inline` disposition with no `filename` is legal and is a small trap: the response renders
+     * in the page as intended, and the moment a browser decides it wants to save the file — which is
+     * exactly what somebody does with a text file they were sent — it has no name to save it under
+     * and invents one. The name is the one the uploader chose, and it is already escaped for a
+     * header by `contentDispositionFilename`, so it costs nothing to include.
+     */
+    "Content-Disposition": INLINE_KINDS.has(kind)
+      ? `inline; ${contentDispositionFilename(row.name)}`
+      : `attachment; ${contentDispositionFilename(row.name)}`,
+    /*
+     * The whole length, on every response including a range.
+     *
+     * A media element's seek bar needs to know how far it can go, and it gets that from here rather
+     * than from downloading the file to find out. `Accept-Ranges` says this route will answer a
+     * range request at all, which is what turns a scrubbable video into a seekable one.
+     */
+    "Accept-Ranges": "bytes",
     // What may be reused, and on what terms: see {@link ATTACHMENT_CACHE_CONTROL}. The short of
     // it is that a stored copy may be kept but not used without asking here again, so a deletion
     // or a removal from the channel is seen on the next fetch rather than up to an hour later.
@@ -1629,7 +1725,53 @@ export function createAttachmentRoutes(
       row.bytes.byteLength,
     );
 
-    return context.body(bytes, 200, attachmentHeaders(row, etag));
+    /*
+     * A RANGE, IF ONE WAS ASKED FOR AND IT CAN BE HONOURED.
+     *
+     * WHY IT IS HERE RATHER THAN EARLIER. The whole file is already in memory by this point —
+     * `attachments.bytes` is a `bytea` read in one piece, and slicing it is free where re-reading
+     * it would not be. So this is a view over bytes that were fetched anyway, and the honest
+     * description of what a range request costs on this route is "nothing extra". On the S3 driver
+     * it is a genuine `Range` header and this block is where that starts being true.
+     *
+     * WHY A MEDIA ELEMENT NEEDS IT. A `<video>` does not download before playing; it asks for the
+     * bytes it needs and, crucially, for `Content-Length` and `Accept-Ranges` so it can draw a seek
+     * bar and let somebody jump to the end. Without a 206 the file either plays linearly or not at
+     * all, and a 500 MB video that plays from the beginning every time is not a preview.
+     */
+    // From the bytes rather than from a stored column, because the two can disagree: `size_bytes`
+    // is written at upload and the buffer is what is actually there. A range computed from the
+    // column and applied to the buffer is a 206 with the wrong length on it.
+    const range = parseByteRange(context.req.header("Range"), bytes.byteLength);
+    if (range === "unsatisfiable") {
+      /*
+       * 416, and the length with it.
+       *
+       * RFC 9110 requires a `Content-Range` of the form "bytes, then a slash, then the total
+       * length" on a 416, and a client that is told
+       * "no" without being told how big the file is has no way to ask again correctly. A 200 with
+       * the whole file would be worse: it is a successful answer to a question about a range, and
+       * a browser that asked for the tail of a video would be handed all of it.
+       */
+      return context.body(null, 416, {
+        ...attachmentHeaders(row, etag),
+        "Content-Range": `bytes */${bytes.byteLength}`,
+      });
+    }
+
+    if (range) {
+      const slice = bytes.subarray(range.start, range.endExclusive);
+      return context.body(slice, 206, {
+        ...attachmentHeaders(row, etag),
+        "Content-Range": `bytes ${range.start}-${range.endExclusive - 1}/${bytes.byteLength}`,
+        "Content-Length": String(slice.byteLength),
+      });
+    }
+
+    return context.body(bytes, 200, {
+      ...attachmentHeaders(row, etag),
+      "Content-Length": String(bytes.byteLength),
+    });
   });
 
   routes.delete("/:id", requireUser, async (context) => {

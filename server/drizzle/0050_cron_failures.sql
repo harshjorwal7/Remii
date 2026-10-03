@@ -1,0 +1,1 @@
+ALTER TABLE "cron_jobs" ADD COLUMN "failures" integer DEFAULT 0 NOT NULL;

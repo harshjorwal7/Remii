@@ -14,15 +14,20 @@ import {
   confirmBrokeredConnectionMutationOptions,
   connectAccountMutationOptions,
   connectBrokeredWithFieldsMutationOptions,
+  disconnectBrokeredAccountMutationOptions,
   disconnectBrokeredMutationOptions,
   enableComposioAppMutationOptions,
   recheckBrokeredConnectionMutationOptions,
   refreshPluginServerMutationOptions,
+  refreshSkillRepoMutationOptions,
   registerOAuthClientMutationOptions,
   removePluginServerMutationOptions,
   removeSkillMutationOptions,
   saveSkillMutationOptions,
+  setAccountGrantMutationOptions,
   setPluginGrantMutationOptions,
+  setServerAppGrantMutationOptions,
+  updateAccountLabelMutationOptions,
 } from "../src/lib/plugins/mutations";
 import { pluginKeys } from "../src/lib/plugins/queries";
 
@@ -143,6 +148,8 @@ const REFUSALS: {
    */
   factory: (queryClient: QueryClient) => unknown;
   variables: unknown;
+  /** What a refusal refetches. Defaults to the plugin screens alone. */
+  expected?: unknown[];
 }[] = [
   {
     name: "granting a plugin to a Bot",
@@ -195,7 +202,7 @@ const REFUSALS: {
     route: "POST /api/plugins/composio/apps",
     status: 409,
     message:
-      "The app was added, but its tools could not be read just now. Press Refresh on the Plugins page.",
+      "The app was added, but its tools could not be read just now. Press Refresh in App connections.",
     factory: enableComposioAppMutationOptions,
     variables: { slug: "linear" },
   },
@@ -206,6 +213,21 @@ const REFUSALS: {
     message: "That server's tools could not be recorded.",
     factory: refreshPluginServerMutationOptions,
     variables: "linear",
+  },
+  {
+    /*
+     * Reading a skill's repository again, which is the newest member of this family and the same shape
+     * as every other entry: the index is written and committed, and the audit row that records what was
+     * read can fail on its own. A refusal is therefore no evidence that the reading did not happen —
+     * and this is the case where that matters most, because the screen draws a timestamp it would
+     * otherwise leave showing the previous one.
+     */
+    name: "reading a skill's repository again",
+    route: "POST /api/plugins/skills/:slug/repo/refresh",
+    status: 502,
+    message: "GitHub answered 503.",
+    factory: refreshSkillRepoMutationOptions,
+    variables: "triage",
   },
   {
     name: "removing a server",
@@ -269,7 +291,7 @@ const REFUSALS: {
     route: "POST /api/plugins/servers/:id/connect",
     status: 400,
     message:
-      "What you entered for gmail did not work, and Composio would not take the account back either. Disconnect it on the Plugins page and try again.",
+      "What you entered for gmail did not work, and Composio would not take the account back either. Disconnect it in App connections and try again.",
     factory: connectBrokeredWithFieldsMutationOptions,
     variables: {
       serverId: "gmail",
@@ -284,6 +306,56 @@ const REFUSALS: {
     factory: recheckBrokeredConnectionMutationOptions,
     variables: "gmail",
   },
+  {
+    name: "granting an app to a Bot",
+    route: "POST /api/plugins/servers/:id/grant",
+    status: 403,
+    message: "That Agent could not be changed.",
+    factory: setServerAppGrantMutationOptions,
+    variables: { serverId: "gmail", agentId: "bot-1", granted: true },
+  },
+  {
+    name: "disconnecting one connected account",
+    route: "DELETE /api/plugins/servers/:id/accounts/:connectionId",
+    status: 502,
+    message: "Composio would not end this account. Try again in a few moments.",
+    factory: disconnectBrokeredAccountMutationOptions,
+    variables: { serverId: "gmail", connectionId: "conn-1" },
+    expected: [
+      ...EVERY_PLUGIN_QUERY,
+      { queryKey: ["plugins", "servers", "gmail", "accounts"] },
+    ],
+  },
+  {
+    name: "granting one connected account to a Bot",
+    route: "POST /api/plugins/servers/:id/accounts/:connectionId/grant",
+    status: 502,
+    message: "Could not update account grant.",
+    factory: setAccountGrantMutationOptions,
+    variables: {
+      serverId: "gmail",
+      connectionId: "conn-1",
+      agentId: "bot-1",
+      granted: true,
+    },
+    expected: [
+      ...EVERY_PLUGIN_QUERY,
+      { queryKey: ["plugins", "servers", "gmail", "accounts"] },
+      { queryKey: ["plugins", "account-grants", "bot-1"] },
+    ],
+  },
+  {
+    name: "tagging one connected account",
+    route: "PATCH /api/plugins/servers/:id/accounts/:connectionId",
+    status: 502,
+    message: "Could not update account tag.",
+    factory: updateAccountLabelMutationOptions,
+    variables: { serverId: "gmail", connectionId: "conn-1", label: "Work" },
+    expected: [
+      ...EVERY_PLUGIN_QUERY,
+      { queryKey: ["plugins", "servers", "gmail", "accounts"] },
+    ],
+  },
 ];
 
 for (const refusal of REFUSALS) {
@@ -291,7 +363,7 @@ for (const refusal of REFUSALS) {
     refusing(refusal.status, refusal.message);
     expect(
       await refetchedOnRefusal(refusal.factory, refusal.variables),
-    ).toEqual(EVERY_PLUGIN_QUERY);
+    ).toEqual(refusal.expected ?? EVERY_PLUGIN_QUERY);
   });
 }
 
@@ -342,6 +414,8 @@ const NOT_A_REFUSABLE_WRITE: Record<string, string> = {
     "Asks an app what it wants typed in. `POST /connect` with no body writes nothing on either outcome, and the factory takes no QueryClient. Its own test is above.",
   connectAccountMutationOptions:
     "Starts a consent connection and hands back the vendor's URL for the browser to leave for. Nothing on this screen survives that navigation to be refetched, and this factory takes no QueryClient either — it takes which screen to come back to.",
+  previewRepoMutationOptions:
+    "Asks GitHub whether a repository address is real, public and holds the folder inside it. `POST /repos/preview` with a URL and no slug: there is nothing on the server to write, so there is nothing to invalidate, and the factory takes no QueryClient. Its answer is drawn beside the field it was typed into.",
 };
 
 test("every mutation factory `mutations.ts` exports is answered for by this file", () => {
@@ -531,6 +605,47 @@ const ENCODED_REQUESTS: {
     url: `/api/plugins/skills/${ENCODED_ID}`,
     build: removeSkillMutationOptions,
     variables: HOSTILE_ID,
+  },
+  {
+    /*
+     * A skill slug in a path, which is this deployment's own text rather than an administrator's — but
+     * a slug is typed into a composer by a person and a person's `/` key command can be anything, so it
+     * gets the same treatment as a server id. Encoding it is what keeps a slug from becoming a path
+     * segment of somebody else's choosing.
+     */
+    name: "reading a skill's repository again",
+    url: `/api/plugins/skills/${ENCODED_ID}/repo/refresh`,
+    build: refreshSkillRepoMutationOptions,
+    variables: HOSTILE_ID,
+  },
+  {
+    name: "granting an app to a Bot",
+    url: `/api/plugins/servers/${ENCODED_ID}/grant`,
+    build: setServerAppGrantMutationOptions,
+    variables: { serverId: HOSTILE_ID, agentId: "bot-1", granted: true },
+  },
+  {
+    name: "disconnecting one connected account",
+    url: `/api/plugins/servers/${ENCODED_ID}/accounts/${ENCODED_ID}`,
+    build: disconnectBrokeredAccountMutationOptions,
+    variables: { serverId: HOSTILE_ID, connectionId: HOSTILE_ID },
+  },
+  {
+    name: "granting one connected account to a Bot",
+    url: `/api/plugins/servers/${ENCODED_ID}/accounts/${ENCODED_ID}/grant`,
+    build: setAccountGrantMutationOptions,
+    variables: {
+      serverId: HOSTILE_ID,
+      connectionId: HOSTILE_ID,
+      agentId: "bot-1",
+      granted: true,
+    },
+  },
+  {
+    name: "tagging one connected account",
+    url: `/api/plugins/servers/${ENCODED_ID}/accounts/${ENCODED_ID}`,
+    build: updateAccountLabelMutationOptions,
+    variables: { serverId: HOSTILE_ID, connectionId: HOSTILE_ID, label: "x" },
   },
   {
     /*

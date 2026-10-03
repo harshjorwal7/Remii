@@ -27,33 +27,55 @@ function profile(overrides: Partial<AgentProfile> = {}): AgentProfile {
 }
 
 describe("agent profile permissions", () => {
-  test("allows every actor to access and run an active public profile", () => {
+  /*
+   * WAS "allows every actor to access and run an active public profile", expecting three actors to
+   * reach a row marked `visibility: "public"`.
+   *
+   * Public sharing was removed: `canAccessAgent` decides on `systemOwned` or `ownerUserId === actor.id`
+   * and never reads `visibility`, so a public row is nobody else's business. The visibility value is
+   * kept in the fixture deliberately — the column may still hold `public` on old rows — and the point
+   * is that carrying it grants nothing.
+   */
+  test("grants nothing to a non-owner on the strength of a public row", () => {
     const agent = profile({ visibility: "public", hidden: true });
 
-    for (const actor of [creator, otherUser, admin]) {
-      expect(canAccessAgent(actor, agent)).toBe(true);
-      expect(canRunAgent(actor, agent)).toBe(true);
+    expect(canAccessAgent(creator, agent)).toBe(true);
+    expect(canRunAgent(creator, agent)).toBe(true);
+    for (const actor of [otherUser, admin]) {
+      expect(canAccessAgent(actor, agent)).toBe(false);
+      expect(canRunAgent(actor, agent)).toBe(false);
     }
   });
 
-  test("limits active private profile access and runs to its creator and admins", () => {
+  /*
+   * WAS "...to its creator and admins". There is no administrator override left to grant: an actor
+   * carrying `role: "admin"` is refused exactly as any other non-owner is, which is the property that
+   * replaced the override. The admin is kept in the fixture so a future `role === "admin"` branch
+   * shows up here as a disagreement rather than as an absence.
+   */
+  test("limits active private profile access and runs to its creator alone", () => {
     const agent = profile({ visibility: "private" });
 
     expect(canAccessAgent(creator, agent)).toBe(true);
-    expect(canAccessAgent(otherUser, agent)).toBe(false);
-    expect(canAccessAgent(admin, agent)).toBe(true);
     expect(canRunAgent(creator, agent)).toBe(true);
-    expect(canRunAgent(otherUser, agent)).toBe(false);
-    expect(canRunAgent(admin, agent)).toBe(true);
+    for (const actor of [otherUser, admin]) {
+      expect(canAccessAgent(actor, agent)).toBe(false);
+      expect(canRunAgent(actor, agent)).toBe(false);
+    }
   });
 
-  test("allows only the creator and admins to manage active user profiles", () => {
+  /*
+   * WAS "...and admins". Management is the caller's own Bot and nothing else, whatever visibility the
+   * row carries — which is why both values are in the loop and neither changes the answer.
+   */
+  test("allows only the creator to manage an active user profile", () => {
     for (const visibility of ["public", "private"] as const) {
       const agent = profile({ visibility });
 
       expect(canManageAgent(creator, agent)).toBe(true);
-      expect(canManageAgent(otherUser, agent)).toBe(false);
-      expect(canManageAgent(admin, agent)).toBe(true);
+      for (const actor of [otherUser, admin]) {
+        expect(canManageAgent(actor, agent)).toBe(false);
+      }
     }
   });
 

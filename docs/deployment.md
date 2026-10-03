@@ -1,30 +1,33 @@
 # Deployment
 
-OpenBot ships as one container. It carries the app, the API that serves it, and the browser the Bots
+Remii ships as one container. It carries the app, the API that serves it, and the browser the Bots
 drive, and it can carry its own PostgreSQL as well. It does what it does on a laptop.
 
 ```sh
 # Every release publishes this image, so a deployment needs no clone and no build.
 # `latest` is the most recent; a version tag such as `:v0.0.9` pins one.
-image=ghcr.io/copilotkit/openbot:latest
+image=ghcr.io/copilotkit/remii:latest
 
 # A database you already run.
 docker run -p 3001:3001 --env-file .env "$image"
 
 # Or one inside the container. Nothing else to provision.
 docker run -p 3001:3001 --env-file .env \
-  -e EMBEDDED_POSTGRES=on -v openbot-data:/var/lib/postgresql "$image"
+  -e EMBEDDED_POSTGRES=on -v remii-data:/var/lib/postgresql "$image"
 ```
 
-`docker build -t openbot .` from a clone produces the same thing, for anyone deploying a tree of
+`docker build -t remii .` from a clone produces the same thing, for anyone deploying a tree of
 their own. What a release publishes is digest-pinned in its `container-images.json`, and deploying
 those digests rather than a moving tag is what [releasing.md](releasing.md) recommends.
 
 ## What is in the image, and what is not
 
-**In it:** the built app, the API, and Chromium. One port, 3001. The browser listens on 4100 inside
-the container and is deliberately not published: it holds real logins and its only caller is the
-process beside it.
+**In it:** the built app and the API. One port, 3001.
+
+**Not in it: a browser.** The computer is an E2B sandbox, one per person, reached over E2B's
+API — not a Chromium inside this container on an unpublished port. The `E2B_API_KEY` is
+server-side and never reaches the browser, so there is nothing here to publish and no port an
+attacker could reach by guessing one.
 
 **PostgreSQL, if you ask for it.** `EMBEDDED_POSTGRES=on` starts one inside the container, creates
 the database and the `vector` extension the first time, and runs the migrations on every start. It
@@ -46,11 +49,16 @@ enable it for you.
 
 **Not in it:**
 
-**The supervisor.** It gives each Bot its own container, which needs a Docker socket, which no
-serverless container platform permits. Without it, every Bot shares the one browser, exactly as they
-do on a laptop with no supervisor configured. A shared browser means shared logins, shared files and
-shared session between Bots, which is fine for a deployment where one team trusts its own Bots and
-is not fine as a boundary between tenants.
+**Per-user isolation, but from E2B rather than from here.** A computer used to be a container per
+(user, Bot) pair, created by a supervisor that needed a Docker socket — which no serverless platform
+permits, which is the whole reason the supervisor was hard to deploy. E2B supplies that isolation
+instead and needs nothing from this container, so replicas can scale freely and every person still
+gets their own machine, logins and files. There is no shared browser to fall back to and no
+supervisor to configure: the server answers computer requests with an error rather than running one
+person's tasks in another person's browser.
+
+**This means two replicas is now trivially safe** in a way it was not before. Computer state lives in
+Postgres and the machines live in E2B, so there is no per-replica browser holding a session.
 
 **The routines schedule.** Nothing in this image is scheduled to fire a routine — there is no
 worker service beside the API, and `worker/` (the looping local variant) is not in the image. The
@@ -62,7 +70,7 @@ second container of this image started with `--entrypoint sh` (without it the co
 [Migrations](#migrations)) — with `SERVER_INTERNAL_URL` and
 `WORKER_SHARED_SECRET` set **on top of this server's whole environment**, not instead of it. That
 sweep builds the same configuration the API server does before it looks for a due routine, so it
-refuses to start without the encryption key, the Intelligence values and an identity provider,
+refuses to start without the encryption key and an identity provider,
 exactly as the server does: give it the same env file and add those two. Until something does, a
 routine is stored, its next run time is computed, the Routines page shows it, and it never fires.
 See [routines.md](routines.md).
@@ -106,21 +114,21 @@ concurrent page is roughly another 100 to 200 MB, and Playwright's own guidance 
 1 GB per concurrent browser. 2 GB is the floor at which one person using it does not meet the OOM
 killer; 4 GB is where a handful of Bots working at once stays comfortable.
 
-**Do not configure shared memory.** Chromium is launched with `--disable-dev-shm-usage`, so it writes
-to `/tmp` rather than `/dev/shm` and the 64 MB default is irrelevant. This matters because **AWS
-Fargate does not support `sharedMemorySize` at all**; without that flag Chromium would crash there
-and the fix would not be available.
+**Do not configure shared memory.** Chromium used to run inside this container, launched with
+`--disable-dev-shm-usage` so that `/tmp` carried the load and the 64 MB `/dev/shm` default was
+irrelevant. Chromium now runs inside the E2B sandbox and this image's own `/dev/shm` is nobody's
+problem — but the setting is still worth leaving off deliberately rather than by omission, because a
+platform that supports it and a replica that assumes it are the two things that differ between Fargate
+and everything else here.
 
 ## Required configuration
 
 | Variable | |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL with the `vector` extension. Not needed with `EMBEDDED_POSTGRES=on` |
-| an identity provider | `GOOGLE_OAUTH_*`, `MICROSOFT_OAUTH_*` or `OKTA_OAUTH_*`, with `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET` and `INITIAL_ADMIN_EMAILS`. See the README |
+| an identity provider | `GOOGLE_OAUTH_*`, `MICROSOFT_OAUTH_*` or `OKTA_OAUTH_*`, with `BETTER_AUTH_URL` and `BETTER_AUTH_SECRET`. See the README |
 | `EMBEDDED_POSTGRES` | `on` to run the database inside the container. Off by default |
 | `KEY_ENCRYPTION_KEY` | base64 32 bytes. `openssl rand -base64 32`. The example key is refused in production |
-| `INTELLIGENCE_API_URL`, `INTELLIGENCE_GATEWAY_WS_URL`, `INTELLIGENCE_API_KEY` | CopilotKit Intelligence. A free plan is available and it can be self-hosted |
-| `COPILOTKIT_LICENSE_TOKEN` | optional. Managed Intelligence issues none; set it only for a self-hosted Intelligence that has one |
 | a model key | `OPENAI_API_KEY`, or the provider you configured |
 
 `COMPUTER_TOKEN` is generated at start if you do not set one. Both processes that need it are inside
@@ -133,9 +141,9 @@ reachable from this container. Unset it if your `.env` still has the laptop defa
 `http://localhost:4201/ag-ui`.
 
 **Authentication is required.** With no identity provider configured, the deployment refuses to start,
-because a public URL where every visitor is an administrator fails silently: it looks like it works.
-Configure Google, Microsoft or Okta, or set `OPENBOT_SINGLE_USER=true` to say you meant an open
-deployment. `NODE_ENV` does not affect this.
+because a public URL where every visitor gets an account of their own fails silently: it looks like
+it works. Configure Google, Microsoft or Okta, or set `REMII_SINGLE_USER=true` to say you meant an
+open deployment. `NODE_ENV` does not affect this.
 
 **Put TLS in front of it.** Not only for the cookies. A page served from `http://<address>` is not a
 secure context, which removes a set of browser APIs that are present on `http://localhost` and so
@@ -152,14 +160,14 @@ would race, and a failed migration should stop a deploy rather than leave a half
 serving traffic.
 
 ```sh
-docker run --rm --env-file .env --entrypoint sh openbot \
+docker run --rm --env-file .env --entrypoint sh remii \
   -c "cd /app/server && bun scripts/migrate.ts"
 ```
 
 **`--entrypoint sh`, and it is the load-bearing part of that command.** This image's entrypoint is
 `/init`, which is s6's, and anything after the image name is a `CMD` — which s6 runs *after* it has
-started everything in the image. Without the override, `docker run … openbot sh -c "… migrate.ts"`
-brings up the API and Chromium against the database you have not migrated yet, and only then
+started everything in the image. Without the override, `docker run … remii sh -c "… migrate.ts"`
+brings up the API against the database you have not migrated yet, and only then
 migrates it: a second server on an unmigrated schema, which is the race this whole section exists to
 avoid, in the one command meant to avoid it. Replacing the entrypoint runs the migration and nothing
 else. The Helm chart's migration Job is the same thing said in Kubernetes' terms — it sets
@@ -176,15 +184,18 @@ this image's own start-up path and the Helm chart's migration Job both run.
 ## Replicas
 
 The page snapshot a Bot resolves element references against lives in Postgres, so a second replica
-can answer a click the first one snapshotted. Run more than one if the platform wants it. The
-supervisor is still not in this image, so every replica shares the one browser inside it.
+can answer a click the first one snapshotted. Run more than one if the platform wants it.
+
+That used to be true with a catch: every replica shared one browser inside it, so two replicas could
+both be holding one person's session. A computer is an E2B sandbox now, so there is no catch. Two
+replicas do not conflict over a desktop, and a Bot's logins do not stay on whichever replica happened
+to serve the turn.
 
 ## Platform notes
 
-**Google Cloud Run.** Set memory to at least 2 GB. More than one instance is fine (see Replicas
-above); each instance has its own browser, so a Bot's logins stay on whichever instance served them.
-Cloud Run runs every
-container under gVisor, which Chromium is sensitive to; test a navigation before trusting it.
+**Google Cloud Run.** Set memory to at least 2 GB; more than one instance is fine, and see Replicas
+above for why that is now simpler than it was. Chromium no longer runs inside this container, so
+Cloud Run's gVisor sandbox is no longer something a navigation has to be tested against.
 `gcloud run compose up` will also deploy the whole compose file if you want a throwaway database
 alongside.
 
@@ -196,7 +207,7 @@ No shared-memory configuration is needed or possible.
 **Kubernetes.** Everything above describes one container run by hand. A cluster is the other shape,
 and it is the only one that gives a Bot a computer of its own, runs the routines schedule without
 something outside the container, and scales the API past a single replica. That is the Helm chart:
-[charts/openbot/README.md](../charts/openbot/README.md), which covers EKS, GKE, AKS and a plain
+[charts/remii/README.md](../charts/remii/README.md), which covers EKS, GKE, AKS and a plain
 self-hosted cluster from the same templates.
 
 **Azure Container Apps.** Managed ingress with TLS and custom domains. Note the **240-second request
@@ -208,15 +219,14 @@ which makes them the shortest path from nothing to a running deployment.
 
 ## Known costs
 
-**The browser images carry only the Chromium browser family.** The all-in-one Dockerfile and the
-published `agent-computer` Dockerfile both build from Ubuntu and run Playwright's pinned
-`install --with-deps chromium` path, so Firefox and WebKit are never introduced into the final image
-layers. Keep that Playwright version matched to `agent-computer/package.json`; changing one without
-the other can make the browser protocol and executable revision diverge. The images keep the
-baseline Node command-line tools (`node`, `npm`, and `npx`) from the official Node 24.18.1 image.
-Measured as local zstd OCI layer descriptors against the previous Playwright-base `agent-computer`
-image, the compressed image fell from 884.2 MiB to 535.0 MiB on arm64 and from 894.6 MiB to
-518.1 MiB on amd64.
+**No browser in any image.** The all-in-one Dockerfile no longer runs Playwright's installer, and
+`agent-computer` and `supervisor` are no longer published at all — the computer moved into a E2B
+sandbox, which brings its own Chromium from `E2B_IMAGE`. Nothing here needs a Playwright version
+kept matched against anything, and there is no browser-protocol-versus-executable-revision pairing to
+get wrong.
+
+The images keep the baseline Node command-line tools (`node`, `npm`, `npx`) from the official Node
+24.18.1 image.
 
 **A strict content-security-policy needs a hash or a nonce.** `app/index.html` runs a small inline
 script that decides the theme before the first paint. Nothing in this repo sends a CSP header, so it

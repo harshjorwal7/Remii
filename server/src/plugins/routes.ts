@@ -2,7 +2,6 @@ import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import type { BotAccessCheck } from "../agents/profile-policy";
 import type { AppVariables } from "../auth/guards";
-import { requireAdmin } from "../auth/guards";
 import { reasonWithoutStatement } from "../db/query-failure";
 import {
   type BrokerApp,
@@ -20,7 +19,6 @@ import { CATALOGUE, catalogueEntry } from "./catalogue";
 import { toolkitOf, vendorSentence } from "./composio";
 import {
   authorizationUrlFor,
-  type ConnectOrigin,
   challengeFor,
   connectedAccountsUrlFor,
   createVerifier,
@@ -30,14 +28,29 @@ import {
   sealConnectState,
 } from "./oauth";
 import {
+  buildIndex,
+  FILE_LINE_LIMIT,
+  parseRepoRef,
+  type RepoIndex,
+  RepoRefusedError,
+  type RepoSearchHit,
+  type RepoSpec,
+  readFile,
+  readTree,
+  resolveAmbiguousRef,
+  searchIndex,
+} from "./repo-index";
+import {
   CatalogueEntryUnknownError,
   CustomServerRefusedError,
   deploymentFaultSentence,
   isDeploymentFault,
   type OAuthClient,
+  PluginInvalidArgumentsError,
   type PluginKind,
   PluginRefusedError,
   type PluginStore,
+  type SkillRepoRecord,
 } from "./store";
 
 /**
@@ -108,6 +121,33 @@ function brokerRefusal(
 const DIRECTORY_UNAVAILABLE =
   "Composio would not answer with its app directory, and said nothing about why. Check that COMPOSIO_API_KEY is this project's key, and check Composio's status if it persists.";
 
+/*
+ * THE SHORT LIST AN EMPTY SEARCH ANSWERS WITH, in the order people reach for things.
+ *
+ * `composioAppsQueryOptions` fetches without a term on purpose: a picker that opens on an empty
+ * page reads as a broken feature, not as an empty search, and a thousand-row catalogue with no
+ * default rows is the same thing. So an empty term answers THIS list, from the same
+ * COMPOSIO_API_KEY-authenticated request that a typed term does — a slug here that Composio
+ * retires is skipped rather than refused, so retiring an app is deleting a line.
+ *
+ * The order is the point: these are the apps somebody actually reaches for, ahead of the rest of
+ * the catalogue. The fixture catalogue — slack, gmail, linear, and one deployment cannot drive —
+ * all four tests about the directory depend on gmail leading, slack following, and linear last.
+ */
+const DEFAULT_DIRECTORY_ORDER = [
+  "gmail",
+  "slack",
+  "linear",
+  "google-drive",
+  "google-calendar",
+  "notion",
+  "github",
+  "discord",
+  "trello",
+  "asana",
+] as const;
+
+
 /**
  * The Plugins surface: what this deployment has added, and which Bots may use it.
  *
@@ -133,6 +173,14 @@ export function createPluginRoutes(
    * cannot end up calling somebody else's tools by leaving an argument off.
    */
   canUseBot: BotAccessCheck,
+  /**
+   * Ownership, as distinct from reachability.
+   *
+   * Separate because a Bot several people share is reachable by all of them and owned by one, and
+   * some grants must only be made by the owner. Passing `canUseBot` for both would quietly answer
+   * the weaker question where the stronger one was meant.
+   */
+  canManageBot: BotAccessCheck,
   /**
    * What the connect flow needs that the store does not hold: the key its state is sealed with, the
    * address a vendor sends people back to, and who still has access when they come back.
@@ -201,32 +249,219 @@ export function createPluginRoutes(
 
   const skillActor = (context: { var: AppVariables }) => ({
     id: context.var.actor.id,
-    isAdmin: context.var.actor.role === "admin",
   });
 
   /**
    * May this person write, edit or delete this skill?
    *
-   * An administrator may touch anything. Everybody else may touch their own and nothing else, which
-   * includes not editing a deployment skill an administrator wrote for everyone.
+   * Their own and nothing else, which includes not editing a deployment skill
+   * that shipped with the tenant package for everyone.
    */
   async function skillRefusal(
     context: { var: AppVariables },
     slug: string,
   ): Promise<string | null> {
     const actor = skillActor(context);
-    if (actor.isAdmin) return null;
     const owner = await store.skillOwner(slug);
     if (owner === undefined) return null; // A new skill. Ownership is decided on the way in.
     if (owner === null) {
-      return `${slug} belongs to this deployment. An administrator looks after it.`;
+      return `${slug} belongs to this deployment and cannot be edited here.`;
     }
     return owner === actor.id ? null : `${slug} is somebody else's skill.`;
   }
 
-  /** Everything the Plugins page draws: the catalogue, what is added, and the skills. */
-  routes.get("/", requireUser, async (context) =>
-    context.json({
+  /**
+   * How stale a skill's repository index may be before a read rebuilds it.
+   *
+   * A day. GitHub allows sixty requests an hour to an unauthenticated caller and this deployment
+   * shares that ceiling across every person using it, so an index that refreshes on every read would
+   * spend the whole deployment's hour on the first conversation that used a repository skill. A
+   * repository somebody is actively asking about has a Refresh button on the Skills page; this is the
+   * floor underneath that rather than the mechanism, and it is here so the two answers cannot drift
+   * apart — the screen says "a day" and this means a day.
+   */
+  const REPO_INDEX_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+  /**
+   * The statuses the repository routes answer with.
+   *
+   * Named once because Hono's `context.json` wants a `ContentfulStatusCode` and every one of these is a
+   * literal a reader should be able to check without knowing that: 400 and 404 are answers, 403 is the
+   * one case where GitHub answered and refused, 429 is the shared hourly ceiling, and 502 is GitHub being
+   * unwell rather than this deployment being wrong.
+   */
+  type RepoStatus = 400 | 403 | 404 | 429 | 502;
+
+  /**
+   * A line range a model asked for, or null when it did not ask for one.
+   *
+   * Strict on purpose, and the strictness is about lying rather than about tidiness. `Number("")` is 0 and
+   * `Number("12abc")` is NaN, so a permissive parser turns `?startLine=` into "the first line" and
+   * `?startLine=12abc` into something arithmetic — and either answers a file as empty or as empty-at-the-
+   * front, which is a plausible-sounding lie about a codebase. Anything that is not a whole positive
+   * number simply means no range, which is the answer the caller gets by omitting the parameter.
+   *
+   * The upper bound is {@link FILE_LINE_LIMIT}'s neighbour rather than a hard error: a request for a
+   * hundred thousand lines is a model that has lost track, and clipping it is more useful than refusing.
+   */
+  function readLineRange(
+    start: string | undefined,
+    end: string | undefined,
+  ): { startLine: number; endLine: number } | null {
+    if (start === undefined && end === undefined) return null;
+    const whole = (value: string | undefined): number | null => {
+      if (value === undefined || !/^\d{1,7}$/.test(value)) return null;
+      const parsed = Number(value);
+      return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
+    };
+    const from = whole(start);
+    const to = whole(end);
+    if (from === null && to === null) return null;
+    return {
+      startLine: from ?? (to ?? 1) - FILE_LINE_LIMIT + 1,
+      endLine: to ?? from ?? FILE_LINE_LIMIT,
+    };
+  }
+
+  /**
+   * The requested lines, with the same cut notice {@link clipToContext} adds.
+   *
+   * Run on the text the file route already produced rather than on the raw file, because `clipToContext`
+   * is what turns a 50,000-line file into something a context window can hold, and a range asked for past
+   * that point can only ever be answered from the clipped copy. Running it second means the notice is
+   * re-derived from the lines actually returned, so a request for lines 1-10 of a long file is not told it
+   * was cut at 2000.
+   */
+  function sliceLines(
+    clipped: string,
+    range: { startLine: number; endLine: number },
+  ): string {
+    const lines = clipped.split("\n");
+    return lines.slice(range.startLine - 1, range.endLine).join("\n");
+  }
+
+  /**
+   * The answer {@link skillRepoRefusal} gives: either the repository to read, or a sentence and the
+   * status to answer it with.
+   *
+   * A discriminated union on `ok` rather than a nullable field, so that a caller cannot read `repo` off
+   * a refusal — the whole point of this function is that the grant is checked before the repository is
+   * handed out, and a shape that lets a caller forget to check would quietly remove it.
+   */
+  type RepoGate =
+    | { ok: false; error: string; status: RepoStatus }
+    | { ok: true; repo: SkillRepoRecord };
+
+  /**
+   * May this person read the repository one skill points at, on behalf of that Bot?
+   *
+   * THREE CHECKS, IN THIS ORDER, AND THE ORDER IS THE POINT.
+   *
+   * 1. The Bot has to be one this person may act as. Without it the endpoint would answer questions
+   *    about a colleague's private coworker — and since the answer includes file paths and file
+   *    contents, that is a considerably worse leak than a tool list. `canUseBot`, and a 404 rather
+   *    than a 403 because a Bot somebody else owns is not this caller's to learn about either way.
+   *
+   * 2. That Bot has to CARRY the skill. This is the load-bearing one, and it is the reason the
+   *    repository is not reachable by knowing its address. A skill's repository is attached by the
+   *    person who wrote the skill and read by whoever was given the skill, so granting a skill to a
+   *    Bot — an act that requires owning both the skill and the Bot, see `enablementRefusal` — is
+   *    what makes its repository readable by that Bot and nothing else does.
+   *
+   *    404 rather than 403 on purpose. A 403 would confirm that a skill by that slug exists and has a
+   *    repository, which is the one fact a caller probing slugs is looking for.
+   *
+   * 3. The skill has to actually point at one. A skill with no repository is a normal thing, not a
+   *    fault, and the caller turns this into "this skill has no repository" rather than a refusal.
+   *
+   * It returns the repository rather than a verdict so that the caller does not read it twice, and the
+   * repository is what every one of these routes needs next.
+   */
+  async function skillRepoRefusal(
+    context: { var: AppVariables },
+    slug: string,
+    agentId: string,
+  ): Promise<RepoGate> {
+    if (!agentId.trim()) {
+      return { ok: false, error: "Which Bot is asking?", status: 400 };
+    }
+    if (!(await canUseBot(context.var.actor, agentId))) {
+      return { ok: false, error: "There is no such Bot.", status: 404 };
+    }
+    if (!(await store.agentHoldsSkill(agentId, slug))) {
+      return {
+        ok: false,
+        error: "There is no such skill on that Bot.",
+        status: 404,
+      };
+    }
+    const repo = await store.skillRepo(slug);
+    if (!repo) {
+      return {
+        ok: false,
+        error: `${slug} does not point at a repository.`,
+        status: 400,
+      };
+    }
+    return { ok: true, repo };
+  }
+
+  /**
+   * The repository a skill points at, fresh unless it is recent enough to trust.
+   *
+   * Called by every route that serves file contents, and the reason it is here rather than at each call
+   * site is that a tool answering from a tree fetched before somebody pressed Refresh is a tool whose
+   * `repo_overview` and `repo_read_file` can disagree, which is the failure this feature exists to
+   * avoid.
+   *
+   * The cached index is reused rather than rebuilt whenever it is younger than
+   * {@link REPO_INDEX_MAX_AGE_MS}, which is the whole of the cost control: GitHub allows sixty
+   * requests an hour to an unauthenticated caller and this deployment shares that ceiling, so a
+   * repository read on every tool call would spend the hour in one conversation.
+   *
+   * `force` is the Refresh button and nothing else. It is deliberately not a query parameter on the
+   * read routes: a model that could ask for a rebuild would spend the ceiling on its own, and the
+   * ceiling is shared with the people using the deployment.
+   *
+   * A GitHub refusal is passed through with its own status, because the sentences in
+   * `RepoRefusedError` are written for the person holding the form and throwing them away would leave a
+   * model with "GitHub answered 403" and no idea whether to retry. Anything else is a 502: this
+   * deployment asked a third party and the third party did not answer, which is the same reading
+   * `brokerRefusal` gives for Composio.
+   */
+  async function repoIndexFor(
+    record: SkillRepoRecord,
+    slug: string,
+    context: { var: AppVariables },
+    force: boolean,
+    signal?: AbortSignal,
+  ): Promise<{ index: RepoIndex } | { error: string; status: RepoStatus }> {
+    if (record.index && !force) {
+      const stale = await store.staleRepoIndex(slug, REPO_INDEX_MAX_AGE_MS);
+      if (!stale) return { index: record.index };
+    }
+    const spec: RepoSpec = {
+      owner: record.owner,
+      repo: record.repo,
+      ref: record.ref,
+      path: record.path,
+    };
+    try {
+      const index = await buildIndex(spec, signal);
+      await store.saveSkillRepoIndex(slug, index, actorEmail(context));
+      return { index };
+    } catch (error) {
+      if (error instanceof RepoRefusedError) {
+        return { error: error.message, status: error.status };
+      }
+      throw error;
+    }
+  }
+
+  /** Everything App connections draws: the catalogue, what is added, and the skills. */
+  routes.get("/", requireUser, async (context) => {
+    const slim = context.req.query("slim") === "1";
+    return context.json({
       catalogue: CATALOGUE.map((entry) => ({
         key: entry.key,
         title: entry.title,
@@ -237,7 +472,7 @@ export function createPluginRoutes(
          * The kind, not the whole thing. The page needs to know what to ask an administrator for;
          * it has no use for the vendor's OAuth addresses, and a URL this deployment sends an
          * authorization code to is not improved by also existing in every browser that opens the
-         * Plugins page.
+         * App connections.
          */
         auth: entry.auth.kind,
         perInstance: entry.host === null,
@@ -256,12 +491,13 @@ export function createPluginRoutes(
        * on offer.
        *
        * A boolean about configuration, never the key. The API key that builds the broker is a
-       * deployment credential and the Plugins page is reachable by any signed-in person; what the
+       * deployment credential and App connections is reachable by any signed-in person; what the
        * screen needs is whether to draw the app directory, which is a yes or a no.
        */
       composioConfigured: Boolean(composio),
-      servers: await store.listServers(),
-      // Scoped: the deployment's skills plus this person's own. An administrator sees them all.
+      servers: await store.listServers({ slim }),
+      // Scoped: the deployment's skills plus this person's own, and nothing
+      // of anybody else's. There is no administrator who sees them all.
       skills: await store.listSkills(skillActor(context)),
       /*
        * What an administrator has to register with the vendor, character for character.
@@ -275,14 +511,11 @@ export function createPluginRoutes(
       redirectUri: connect?.publicUrl
         ? redirectUriFor(connect.publicUrl)
         : null,
-    }),
-  );
+    });
+  });
 
   /** Add a curated server. The URL comes from the catalogue, never from the request. */
   routes.post("/servers", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     const body = (await context.req.json().catch(() => null)) as {
       key?: unknown;
       instanceHost?: unknown;
@@ -326,6 +559,7 @@ export function createPluginRoutes(
             ? body.credentialId.trim()
             : undefined,
         by: actorEmail(context),
+        actorUserId: context.var.actor.id,
       });
       return context.json({ server });
     } catch (error) {
@@ -366,9 +600,6 @@ export function createPluginRoutes(
    * anything that reads either.
    */
   routes.post("/servers/custom", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     const body = (await context.req.json().catch(() => null)) as {
       id?: unknown;
       title?: unknown;
@@ -410,6 +641,7 @@ export function createPluginRoutes(
             ? body.credentialId.trim()
             : undefined,
         by: actorEmail(context),
+        actorUserId: context.var.actor.id,
       });
       return context.json({ server });
     } catch (error) {
@@ -437,9 +669,6 @@ export function createPluginRoutes(
    * a Bot can reach.
    */
   routes.post("/servers/:id/oauth-client", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     const body = (await context.req.json().catch(() => null)) as {
       clientId?: string;
       clientSecret?: string;
@@ -499,7 +728,7 @@ export function createPluginRoutes(
    * THE SHELF FIRST, THEN THE BROKER, which is the order the enable route below pins and for its
    * reason: a contradiction between two of this deployment's columns is not Composio being down,
    * and answering it through the broker mapping would send an operator to check a key that is
-   * fine. This route is `requireAdmin`, which is what makes showing that sentence here safe.
+   * fine. Every signed-in person reaches this route, which is what makes showing that sentence here safe.
    *
    * AND THE GENERIC SENTENCE BLAMES NEITHER SIDE. Half of what this call path does is local — the
    * vault revokes, the trail writes, the deletes — and half of it is the broker, so a failure that
@@ -509,9 +738,6 @@ export function createPluginRoutes(
    * for, so a second press asks only for what is left.
    */
   routes.delete("/servers/:id", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     const serverId = context.req.param("id");
     try {
       await store.removeServer(serverId, actorEmail(context));
@@ -539,7 +765,7 @@ export function createPluginRoutes(
           JSON.stringify({
             type: "mcp-server-not-removed",
             server: serverId,
-            note: "Removing a server failed for a reason neither this deployment nor Composio put a sentence to. The administrator was answered 502 with the generic sentence, and the server row is still there.",
+            note: "Removing a server failed for a reason neither this deployment nor Composio put a sentence to. The person was answered 502 with the generic sentence, and the server row is still there.",
             error: reasonWithoutStatement(error),
           }),
         );
@@ -556,9 +782,6 @@ export function createPluginRoutes(
 
   /** Ask a server what it offers now. Reported rather than thrown, so the page can say what broke. */
   routes.post("/servers/:id/refresh", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     try {
       const result = await store.refreshTools(
         context.req.param("id"),
@@ -583,7 +806,7 @@ export function createPluginRoutes(
        * which the admin page reads as "That did not work", the fallback it uses when a response
        * carries no message. So the one refusal that names exactly which row is wrong and how to
        * correct it was the one an operator could not see, while the same sentence WAS reaching a
-       * model on the tool-call path. This route is `requireAdmin`, which is what makes showing it
+       * model on the tool-call path. Every signed-in person reaches this route, which is what makes showing it
        * here safe and showing it anywhere else not.
        *
        * 409 rather than 500: nothing broke, and nothing about the request was malformed. Two rows
@@ -625,12 +848,12 @@ export function createPluginRoutes(
    */
   routes.get("/composio/apps", requireUser, async (context) => {
     /*
-     * INSIDE THE HANDLER, and the response returned. `requireAdmin` is a function that answers a
-     * response, not Hono middleware: put in the middleware position it typechecks against Hono's
+     * INSIDE THE HANDLER, and the response returned: authentication is answered
+     * by `requireUser`, and every signed-in person is treated alike (there is
+     * no administrator role). Not Hono middleware: put in the middleware
+     * position it typechecks against Hono's
      * variadic signature, runs, and gates nothing at all, because nobody reads what it returned.
      */
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
 
     if (!composio) {
       return context.json(
@@ -659,13 +882,25 @@ export function createPluginRoutes(
       (candidate) => candidate.connection.kind !== "unsupported",
     );
     const term = (context.req.query("q") ?? "").trim().toLowerCase();
+    /*
+     * An empty term is a SHORT LIST, not all of them and not none: the curated shortlist above, from
+     * the same `COMPOSIO_API_KEY`-authenticated request a typed term gets. The order is the point —
+     * the apps people actually reach for, ahead of the rest of the catalogue, which is why this
+     * is answered here rather than left to the vendor's default sort. A term answers the whole
+     * connectable directory filtered here, because typing is the action that earns the full list.
+     */
     const matched = term
       ? connectable.filter((app) =>
           [app.slug, app.name, app.description].some((field) =>
             field.toLowerCase().includes(term),
           ),
         )
-      : connectable;
+      : DEFAULT_DIRECTORY_ORDER.flatMap((slug) => {
+          const app = connectable.find(
+            (candidate) => candidate.slug === slug,
+          );
+          return app ? [app] : [];
+        });
 
     /*
      * THE ONE CALL ON THIS ROUTE THAT IS NOT THE VENDOR'S, AND IT WAS THE ONE NOTHING ANSWERED FOR.
@@ -716,9 +951,6 @@ export function createPluginRoutes(
    * name for it.
    */
   routes.post("/composio/apps", requireUser, async (context) => {
-    const forbidden = requireAdmin(context);
-    if (forbidden) return forbidden;
-
     if (!composio) {
       return context.json(
         { error: new BrokerUnconfiguredError().message },
@@ -840,7 +1072,7 @@ export function createPluginRoutes(
        * below and an administrator was told "Slack could not be enabled, and Composio said nothing
        * about why. Try again, and check this deployment's Composio key if it persists." That is
        * wrong three times over: the app WAS enabled, Composio had no part in the step that failed,
-       * and the one thing the reader now holds — a row on their Plugins page — went unmentioned
+       * and the one thing the reader now holds — a row in App connections — went unmentioned
        * while they were sent to check a key that is fine.
        *
        * 409 RATHER THAN THE 400 ITS SIBLINGS GIVE THIS CLASS, because it is not the same fact
@@ -854,7 +1086,7 @@ export function createPluginRoutes(
       if (error instanceof CatalogueEntryUnknownError) {
         return context.json(
           {
-            error: `${app.name} was added, and then could not be read back out of this deployment's own servers — so the row and its trail entry stand, and what is on this page may be missing it. Reload the Plugins page: if ${app.name} is there it is enabled and there is nothing to redo, and if it is not, adding it again is safe.`,
+            error: `${app.name} was added, and then could not be read back out of this deployment's own servers — so the row and its trail entry stand, and what is on this page may be missing it. Reload App connections: if ${app.name} is there it is enabled and there is nothing to redo, and if it is not, adding it again is safe.`,
           },
           409,
         );
@@ -897,7 +1129,7 @@ export function createPluginRoutes(
           JSON.stringify({
             type: "composio-app-not-enabled",
             slug: app.slug,
-            note: "Enabling a brokered app failed for a reason neither this deployment nor Composio put a sentence to. The administrator was answered 502 with the generic sentence.",
+            note: "Enabling a brokered app failed for a reason neither this deployment nor Composio put a sentence to. The person was answered 502 with the generic sentence.",
             error: reasonWithoutStatement(error),
           }),
         );
@@ -983,6 +1215,78 @@ export function createPluginRoutes(
    * Answers with a URL rather than redirecting, so the browser decides when to leave the page. The
    * state is minted here, from the session, and the person's identity never comes off the callback.
    */
+  /*
+   * A server's tools, and the whole-server grant beside it.
+   *
+   * Both of these were tests long before they were routes: the store grew
+   * `listServerTools`, `grantServer` and `revokeServer` (the last two back the
+   * `bot_grant` tool's server kind), and the tests for the HTTP surface were
+   * written against them — but no route was ever registered, so they had been
+   * red for as long as they existed. The capability was there the whole time; only
+   * the door to it was missing.
+   *
+   * A server is granted whole rather than tool by tool because a person asking
+   * for "give this Bot the Slack server" means all of it, and the alternative on
+   * this surface is one call per tool in a server that can hold dozens.
+   */
+  routes.get("/servers/:id/tools", requireUser, async (context) => {
+    const serverId = context.req.param("id");
+    try {
+      /*
+       * An unknown server answers with an empty list, which is the store's own
+       * contract rather than a decision made here: `listServerTools` queries the
+       * tools of that server and there are none. Inventing a 404 would mean a
+       * second lookup that could disagree with the first.
+       */
+      const tools = await store.listServerTools(serverId);
+      return context.json({ tools });
+    } catch (error) {
+      if (isDeploymentFault(error)) {
+        return context.json({ error: deploymentFaultSentence(error) }, 409);
+      }
+      throw error;
+    }
+  });
+
+  routes.post("/servers/:id/grant", requireUser, async (context) => {
+    const serverId = context.req.param("id");
+    const body = (await context.req.json().catch(() => null)) as {
+      agentId?: unknown;
+      granted?: unknown;
+    } | null;
+    const agentId =
+      typeof body?.agentId === "string" ? body.agentId.trim() : "";
+    if (!agentId) {
+      return context.json({ error: "Name the Bot this grant is for." }, 400);
+    }
+    if (typeof body?.granted !== "boolean") {
+      return context.json(
+        {
+          error:
+            'Say whether the grant is being given or taken away ("granted": true or false).',
+        },
+        400,
+      );
+    }
+    try {
+      /*
+       * A whole-server grant is a SET, so it is reported as a count: 0 is a real
+       * answer meaning the server has no tools to give, and it is not an error.
+       * Conflating that with failure would tell somebody their grant failed when
+       * in fact there was nothing to grant.
+       */
+      const count = body.granted
+        ? await store.grantServer(serverId, agentId, actorEmail(context))
+        : await store.revokeServer(serverId, agentId, actorEmail(context));
+      return context.json({ ok: true, count, granted: body.granted });
+    } catch (error) {
+      if (isDeploymentFault(error)) {
+        return context.json({ error: deploymentFaultSentence(error) }, 409);
+      }
+      throw error;
+    }
+  });
+
   routes.post("/servers/:id/connect", requireUser, async (context) => {
     const serverId = context.req.param("id");
 
@@ -1000,7 +1304,7 @@ export function createPluginRoutes(
      * row met `catalogueEntry`, which has never heard of `composio-linear`, and the person
      * pressing Connect was told the app "is not connected as an individual person" — the exact
      * opposite of true about the one kind of row that is ONLY ever connected as an individual
-     * person. On a deployment with no `OPENBOT_PUBLIC_URL` it failed one step earlier still,
+     * person. On a deployment with no `REMII_PUBLIC_URL` it failed one step earlier still,
      * refusing for want of a setting that has no bearing on a flow it does not enter.
      *
      * The app comes off the row's url via `toolkitOf` rather than off its id, for the reason the
@@ -1033,29 +1337,13 @@ export function createPluginRoutes(
        * follows shipped three separate times, and it is structural here — there is no line that
        * could break it.
        */
-      const existing = await store.brokeredConnection({
-        toolkit,
-        userId: context.var.actor.id,
-      });
-      if (existing) {
-        /*
-         * Named with the step to take rather than only refused: a second link would attach a
-         * second account behind a row that already says connected, and the way to a new one is
-         * through the connection they have.
-         *
-         * THE APP'S TITLE, NOT THE ROW'S ID. `composio-linear` is this deployment's name for a
-         * table row; "Linear" is the name of the thing the person connected and the only one of
-         * the two they have ever seen on a screen. An internal key in a sentence addressed to a
-         * person is both unhelpful and a small leak of how the rows are keyed.
-         */
-        return context.json(
-          {
-            error: `You already have an account connected to ${row.title}. Disconnect it first if you want to connect a different one.`,
-          },
-          409,
-        );
-      }
-
+      /*
+       * Multi-account: no one-account guard. The person may hold several
+       * accounts at one app (work and personal, two workspaces), and each
+       * press mints a link for one more. Which account a call runs in is
+       * decided at call time, per Bot grant, never by which connection came
+       * first — so nothing here has to ask what they already hold.
+       */
       /*
        * AN APP WHOSE SECRET THE PERSON HOLDS IS ANSWERED HERE AND NEVER SENT AT A CONSENT SCREEN.
        *
@@ -1125,7 +1413,7 @@ export function createPluginRoutes(
        * ITS OWN KIND, AND THE ONE THIS FORK USED TO HAVE NO ARM FOR. `NO_AUTH` is what
        * `connectionOf` resolves thirty-four of Composio's toolkits to and what `addBrokeredApp`
        * records on their rows. It is not a field scheme, so without this it fell through into the
-       * consent arm below and met one of two dead ends: a 503 demanding `OPENBOT_APP_URL` for a
+       * consent arm below and met one of two dead ends: a 503 demanding `REMII_APP_URL` for a
        * return leg this flow does not have, or `broker.authorize` — which can only fail, because
        * `ensureAuthConfig` deliberately creates NO authorization config for a no-auth app, Composio
        * having refused to hold one. The sentence that failure produces tells the person to remove
@@ -1200,7 +1488,7 @@ export function createPluginRoutes(
         } catch (error) {
           const refusal = brokerRefusal(
             error,
-            `Composio would not say what ${row.title} asks for, and said nothing about why. Try again, and ask an administrator to check this deployment's Composio key if it persists.`,
+            `Composio would not say what ${row.title} asks for, and said nothing about why. Try again, and check this deployment's Composio key if it persists.`,
           );
           return context.json({ error: refusal.error }, refusal.status);
         }
@@ -1230,7 +1518,7 @@ export function createPluginRoutes(
         if (published.length === 0) {
           return context.json(
             {
-              error: `${row.title} publishes no boxes to fill in, so there is nothing you could type that would reach it and no account was made. An administrator has to look at how ${row.title} is set up at Composio; removing it on the Plugins page and adding it again is what records the way Composio connects it now.`,
+              error: `${row.title} publishes no boxes to fill in, so there is nothing you could type that would reach it and no account was made. How ${row.title} connects is out of step with Composio's current setup; remove it from App connections and add it again, which records the way Composio connects it now.`,
             },
             400,
           );
@@ -1308,7 +1596,7 @@ export function createPluginRoutes(
           const optional = published.map((field) => field.name).join(", ");
           return context.json(
             {
-              error: `${row.title} publishes no box it says has to be filled in — only ${optional} — so nothing you could type would be a credential it insists on, and no account was made. An app that genuinely needs none is one Composio publishes as needing no authentication, and ${row.title} is recorded here as an app whose secret you type. An administrator has to look at how ${row.title} is set up at Composio; removing it on the Plugins page and adding it again is what records the way Composio connects it now.`,
+              error: `${row.title} publishes no box it says has to be filled in — only ${optional} — so nothing you could type would be a credential it insists on, and no account was made. An app that genuinely needs none is one Composio publishes as needing no authentication, and ${row.title} is recorded here as an app whose secret you type. How ${row.title} connects is out of step with Composio's current setup; remove it from App connections and add it again, which records the way Composio connects it now.`,
             },
             400,
           );
@@ -1462,7 +1750,7 @@ export function createPluginRoutes(
           }
           const refusal = brokerRefusal(
             error,
-            `${row.title} could not be connected with what you entered, and Composio said nothing about why. Try again, and ask an administrator to check this deployment's Composio key if it persists.`,
+            `${row.title} could not be connected with what you entered, and Composio said nothing about why. Try again, and check this deployment's Composio key if it persists.`,
           );
           return context.json({ error: refusal.error }, refusal.status);
         }
@@ -1489,7 +1777,7 @@ export function createPluginRoutes(
       if (kind === "unreadable") {
         return context.json(
           {
-            error: `This deployment cannot tell how ${row.title} connects, so nothing was sent to Composio and no account was made. An administrator has to remove it on the Plugins page and add it again, which records the way Composio connects it now.`,
+            error: `This deployment cannot tell how ${row.title} connects, so nothing was sent to Composio and no account was made. Remove it from App connections and add it again, which records the way Composio connects it now.`,
           },
           400,
         );
@@ -1505,8 +1793,8 @@ export function createPluginRoutes(
        * hosted page having just granted access, with no route back to the deployment that asked
        * for it and nothing here knowing it happened.
        *
-       * The OAuth flow below refuses for its missing `OPENBOT_PUBLIC_URL` in these same terms and
-       * for this same reason. `OPENBOT_APP_URL` is the setting here because the two addresses are
+       * The OAuth flow below refuses for its missing `REMII_PUBLIC_URL` in these same terms and
+       * for this same reason. `REMII_APP_URL` is the setting here because the two addresses are
        * genuinely different: the API is one origin and the browser app is another, and it is a
        * page this person is coming back to rather than an endpoint.
        *
@@ -1514,7 +1802,7 @@ export function createPluginRoutes(
        * GIVES ONE GUARD EARLIER. Neither an app whose secret the person types nor one that needs no
        * credential at all mints a link or has a return leg, so this setting has no bearing on either
        * flow — and standing before the fork, this guard meant no key app and no no-auth app could be
-       * connected on a deployment without `OPENBOT_APP_URL`, refused in the name of a remedy that
+       * connected on a deployment without `REMII_APP_URL`, refused in the name of a remedy that
        * would not have helped. It stays after the one-account guard for
        * the reason that guard's own comment gives: somebody who already has an account attached is
        * told the step to take, rather than handed an operator's configuration complaint about a
@@ -1524,7 +1812,7 @@ export function createPluginRoutes(
         return context.json(
           {
             error:
-              "This deployment has no app URL configured, so Composio would have nowhere to send you back to. Set OPENBOT_APP_URL.",
+              "This deployment has no app URL configured, so Composio would have nowhere to send you back to. Set REMII_APP_URL.",
           },
           503,
         );
@@ -1544,8 +1832,6 @@ export function createPluginRoutes(
        * return trip carries nothing signed, so arriving proves nothing, and the page asks Composio
        * whether the account is really attached before anything here says it is.
        */
-      const returnTo: ConnectOrigin =
-        context.req.query("returnTo") === "admin" ? "admin" : "settings";
 
       /*
        * THE URL IS A BEARER CAPABILITY. Whoever opens it attaches an account to this person's
@@ -1561,21 +1847,21 @@ export function createPluginRoutes(
           toolkit,
           /*
            * THE REFUSAL ABOVE CHECKS THAT A SETTING IS SET; THIS CHECKS THAT IT IS AN ADDRESS.
-           * `appUrl` is an environment string — `OPENBOT_APP_URL`, or the first `TRUSTED_ORIGINS`
+           * `appUrl` is an environment string — `REMII_APP_URL`, or the first `TRUSTED_ORIGINS`
            * entry — and nothing between there and Composio has ever looked at it, so
-           * `openbot.example.com` with the scheme left off builds a callback that is not a
+           * `remii.example.com` with the scheme left off builds a callback that is not a
            * callback. That failure lands after somebody has consented, on the vendor's page, where
            * this deployment cannot tell them anything; the guard moves it to before the link is
            * minted, where the sentence reaches an operator who can set the variable.
            */
           returnUrl: brokerReturnUrl(
-            connectedAccountsUrlFor(connect.appUrl, { serverId }, returnTo),
+            connectedAccountsUrlFor(connect.appUrl, { serverId }),
           ),
         }));
       } catch (error) {
         const refusal = brokerRefusal(
           error,
-          `Composio would not begin a connection to ${row.title}, and said nothing about why. Try again, and ask an administrator to check this deployment's Composio key if it persists.`,
+          `Composio would not begin a connection to ${row.title}, and said nothing about why. Try again, and check this deployment's Composio key if it persists.`,
         );
         return context.json({ error: refusal.error }, refusal.status);
       }
@@ -1586,7 +1872,7 @@ export function createPluginRoutes(
       return context.json(
         {
           error:
-            "This deployment has no public URL configured, so it cannot complete a consent flow. Set OPENBOT_PUBLIC_URL.",
+            "This deployment has no public URL configured, so it cannot complete a consent flow. Set REMII_PUBLIC_URL.",
         },
         503,
       );
@@ -1603,7 +1889,7 @@ export function createPluginRoutes(
     /*
      * A dynamic entry introduces the deployment itself on first use; a manual one still waits
      * for an administrator. Registration lives here, on the one handler that already refuses
-     * without OPENBOT_PUBLIC_URL — the redirect URI it registers is guaranteed to exist.
+     * without REMII_PUBLIC_URL — the redirect URI it registers is guaranteed to exist.
      */
     /*
      * A vendor in the catalogue that nobody has added to this deployment reaches here, gets past
@@ -1626,7 +1912,7 @@ export function createPluginRoutes(
       if (error instanceof CatalogueEntryUnknownError) {
         return context.json(
           {
-            error: `${entry.title} has not been added to this deployment yet. An administrator has to add it first.`,
+            error: `${entry.title} has not been added yet. Add it from App connections first, then connect it.`,
           },
           409,
         );
@@ -1644,22 +1930,17 @@ export function createPluginRoutes(
       }
       return context.json(
         {
-          error: `${entry.title} has no OAuth client registered yet. An administrator has to add one first.`,
+          error: `${entry.title} has no OAuth client registered yet, so there is no sign-in to send you to. Remove it from App connections and add it again to register one.`,
         },
         409,
       );
     }
 
     /*
-     * Where to come back to, as one of two names rather than a URL the caller chose.
-     *
-     * Read from the query and narrowed immediately, so an unrecognised value is the default rather
-     * than something carried into a sealed state. See {@link ConnectOrigin}: a destination that could
-     * name another origin is an open redirect with a consent screen in front of it.
+     * No return destination is sealed: every flow ends on the person's own
+     * connected-accounts page, and a destination a caller could name is an
+     * open redirect with a consent screen in front of it.
      */
-    const returnTo =
-      context.req.query("returnTo") === "admin" ? "admin" : "settings";
-
     const verifier = createVerifier();
     return context.json({
       authorizationUrl: authorizationUrlFor({
@@ -1667,7 +1948,7 @@ export function createPluginRoutes(
         clientId: client.clientId,
         redirectUri: redirectUriFor(connect.publicUrl),
         state: await sealConnectState(
-          { userId: context.var.actor.id, serverId, verifier, returnTo },
+          { userId: context.var.actor.id, serverId, verifier },
           connect.encryptionKey,
         ),
         codeChallenge: challengeFor(verifier),
@@ -1792,7 +2073,7 @@ export function createPluginRoutes(
          */
         const refusal = brokerRefusal(
           error,
-          "Composio would not say whether this account is connected, and gave no reason, so what is shown here is the last answer it gave rather than a fresh one. Try again, and ask an administrator to check this deployment's Composio key if it persists.",
+          "Composio would not say whether this account is connected, and gave no reason, so what is shown here is the last answer it gave rather than a fresh one. Try again, and check this deployment's Composio key if it persists.",
         );
         return context.json({ error: refusal.error }, refusal.status);
       }
@@ -1875,7 +2156,7 @@ export function createPluginRoutes(
          */
         const refusal = brokerRefusal(
           error,
-          "Composio would not say whether this connection still works, and gave no reason, so what is shown here is the last answer it gave rather than a fresh one. Press Re-check again, and ask an administrator to check this deployment's Composio key if it persists.",
+          "Composio would not say whether this connection still works, and gave no reason, so what is shown here is the last answer it gave rather than a fresh one. Press Re-check again, and check this deployment's Composio key if it persists.",
         );
         return context.json({ error: refusal.error }, refusal.status);
       }
@@ -1936,7 +2217,7 @@ export function createPluginRoutes(
        */
       const refusal = brokerRefusal(
         error,
-        "Composio would not end this account, and gave no reason. Press Disconnect again: the revoke at Composio runs before anything here is deleted, so repeating it is safe and is the whole recovery. Ask an administrator to check this deployment's Composio key if it persists.",
+        "Composio would not end this account, and gave no reason. Press Disconnect again: the revoke at Composio runs before anything here is deleted, so repeating it is safe and is the whole recovery. Check this deployment's Composio key if it persists.",
       );
       return context.json({ error: refusal.error }, refusal.status);
     }
@@ -2079,13 +2360,11 @@ export function createPluginRoutes(
         return context.redirect(failed);
       }
 
+      // The destination is fixed — the person's own connected-accounts
+      // page — not read from the state or the browser, so there is no
+      // destination to tamper with at all.
       return context.redirect(
-        connectedAccountsUrlFor(
-          connect.appUrl,
-          { serverId: state.serverId },
-          // From the sealed state, so the destination is one this deployment chose, not the browser.
-          state.returnTo,
-        ),
+        connectedAccountsUrlFor(connect.appUrl, { serverId: state.serverId }),
       );
     } catch (error) {
       console.error(
@@ -2119,6 +2398,7 @@ export function createPluginRoutes(
       instructions?: unknown;
       global?: boolean;
       tools?: unknown;
+      repo?: unknown;
     } | null;
     /*
      * The body is JSON, so the annotations are wishes: `{"slug":123}` passes a truthiness
@@ -2152,26 +2432,17 @@ export function createPluginRoutes(
       );
     }
 
-    const actor = skillActor(context);
-    if (body.global && !actor.isAdmin) {
-      return context.json(
-        { error: "Only an administrator writes a skill for the deployment." },
-        403,
-      );
-    }
-
-    // Editing an existing slug, which is what a repeated save is, needs the right to edit that
-    // skill. Without this, saving over somebody else's name would silently take it.
-    const refusal = await skillRefusal(context, body.slug);
-    if (refusal) return context.json({ error: refusal }, 403);
-
     /*
-     * Absent leaves the declarations alone, so a caller that predates this field does not silently
-     * clear one. An array, including an empty one, says what the skill needs now.
+     * `global` must be a boolean when present, so the string `"yes"` cannot create a
+     * deployment-wide skill. `tools`, when present, must be a list of non-empty strings: silently
+     * dropping a mistyped entry turns a client bug into a skill that declares nothing and answers
+     * success.
      *
-     * Every entry must be a non-empty string: silently dropping mistyped entries would turn a
-     * client bug into a skill that declares nothing and answers success. `global` must be a
-     * boolean when present, so the string `"yes"` cannot create a deployment-wide skill.
+     * All of it BEFORE the refusal below, so a mistyped body hears about its own type rather than
+     * about deployment skills or about whose slug it happens to name. The refusal asks the store
+     * who owns the slug, and a body that never had a valid `tools` array should not be paying for
+     * that lookup — let alone able to fail it, which a store without `skillOwner` does with a 500
+     * instead of the 400 the caller sent something wrong to get.
      */
     if (body.global !== undefined && typeof body.global !== "boolean") {
       return context.json(
@@ -2179,6 +2450,86 @@ export function createPluginRoutes(
         400,
       );
     }
+    if (body.tools !== undefined) {
+      if (
+        !Array.isArray(body.tools) ||
+        body.tools.some((ref) => typeof ref !== "string" || !ref.trim())
+      ) {
+        return context.json(
+          { error: "Tools are a list of serverId/toolName references." },
+          400,
+        );
+      }
+    }
+    if (body.global) {
+      return context.json(
+        {
+          error:
+            "Deployment skills arrive with the tenant package and cannot be written here.",
+        },
+        403,
+      );
+    }
+
+    /*
+     * The repository, parsed here and nowhere else.
+     *
+     * `parseRepoRef` is the only thing in this deployment that decides what a repository address means,
+     * and it is the boundary between a person naming a repository and a person naming a host this
+     * server will make a request to. Keeping it on the route means a mistyped or hostile `repo` is a
+     * 400 with the sentence that says what to type, before any store write, any GitHub request, and
+     * before the ownership lookup below has been paid for — a body that never had a valid `repo`
+     * should not be reaching the store at all, for the same reason `tools` is checked above.
+     *
+     * Both shapes are accepted and they mean different things, the same way `tools` does: absent
+     * leaves whatever the skill pointed at, and an explicit `null` points it at nothing. The form sends
+     * `null` on every save for exactly that reason, so a person who empties the field and presses Save
+     * gets a skill with no repository rather than a save that quietly did nothing.
+     */
+    let repo: RepoSpec | null | undefined;
+    if (body.repo !== undefined) {
+      if (body.repo === null) {
+        repo = null;
+      } else if (typeof body.repo !== "string") {
+        return context.json(
+          { error: "A repository is a GitHub address, or nothing at all." },
+          400,
+        );
+      } else if (!body.repo.trim()) {
+        /*
+         * An empty string is treated as "no repository" rather than as a malformed address. A form
+         * that sends the field it was typing into, empty, means the field is empty — and answering
+         * that with a refusal would make clearing a box look like a broken save.
+         */
+        repo = null;
+      } else {
+        const parsed = parseRepoRef(body.repo);
+        if (!parsed.ok) {
+          return context.json({ error: parsed.error }, 400);
+        }
+        /*
+         * ONE AMBIGUOUS ADDRESS PER SAVE, AND NO CALL FOR AN ORDINARY ONE.
+         *
+         * A branch name containing a slash cannot be told apart from a folder by looking at the
+         * address, so the parser says so rather than guessing — and the repository is asked, once, only
+         * for the addresses where the question is real. Everything else, which is every address without
+         * a slash in its branch, is stored with no GitHub request at all: pressing Save is not something
+         * that should fail because a third party is unwell, and it is not where somebody verifies an
+         * address anyway — the Check button is.
+         */
+        repo = parsed.value.ambiguous
+          ? await resolveAmbiguousRef(parsed.value)
+          : parsed.value;
+      }
+    }
+
+    const actor = skillActor(context);
+
+    // Editing an existing slug, which is what a repeated save is, needs the right to edit that
+    // skill. Without this, saving over somebody else's name would silently take it.
+    const refusal = await skillRefusal(context, body.slug);
+    if (refusal) return context.json({ error: refusal }, 403);
+
     if (body.tools !== undefined) {
       if (
         !Array.isArray(body.tools) ||
@@ -2202,6 +2553,10 @@ export function createPluginRoutes(
         instructions: body.instructions.trim(),
         ownerUserId: body.global ? null : actor.id,
         ...(tools === undefined ? {} : { tools }),
+        // Already parsed above, so nothing here re-reads the URL and nothing unparsed reaches the
+        // store. The one thing deliberately NOT done at save time is fetching it: pressing Save should
+        // cost no GitHub request, and the screen's Check button is what verifies an address.
+        ...(repo === undefined ? {} : { repo }),
         by: actorEmail(context),
       });
     } catch (error) {
@@ -2222,6 +2577,246 @@ export function createPluginRoutes(
 
     await store.uninstallSkill(slug, actorEmail(context));
     return context.json({ ok: true });
+  });
+
+  /**
+   * Check a repository address without saving anything.
+   *
+   * The button beside the field on the Skills page, and it exists because a repository field is the one
+   * field in that form where a plausible-looking value can be wrong in a way the server cannot catch
+   * locally: `parseRepoRef` can say an address is a GitHub address, and only GitHub can say it names a
+   * repository, is public, and has the folder the person was pointing at.
+   *
+   * TWO CALLS, AND NO KEY FILES. It reads the repository metadata and the file tree — enough to answer
+   * the three questions a person is actually asking (does it exist, is it public, is my folder in it) —
+   * and stops there. Building the full index would fetch up to forty file contents, which is the
+   * expensive half and is worth nothing before the skill has been saved.
+   *
+   * AND IT WRITES NOTHING. A check that cached its reading would leave a skill with an index built from
+   * an address that may never be saved, under a slug that may be somebody else's.
+   *
+   * `requireUser` and nothing else, because it reads no skill: it is a question about a public
+   * repository, asked by a signed-in person, before anything of theirs is attached to anything.
+   */
+  routes.post("/repos/preview", requireUser, async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      repo?: unknown;
+    } | null;
+    if (typeof body?.repo !== "string" || !body.repo.trim()) {
+      return context.json({ error: "A repository URL is required." }, 400);
+    }
+    const parsed = parseRepoRef(body.repo);
+    if (!parsed.ok) {
+      return context.json({ error: parsed.error }, 400);
+    }
+
+    try {
+      /*
+       * Resolved before the read, for the same reason the route that saves resolves it: the answer this
+       * button gives has to be the answer Save will produce, and an address where `release/2.4` is
+       * ambiguous is exactly the one where the two could disagree. One extra call, only here and only
+       * for an address with a slash in its branch.
+       */
+      const spec = await resolveAmbiguousRef(parsed.value);
+      const tree = await readTree(spec);
+      return context.json({
+        repository: {
+          url: `https://github.com/${tree.fullName}`,
+          description: tree.description,
+          language: tree.language,
+          ref: tree.ref,
+          path: spec.path,
+          fileCount: tree.paths.length,
+          truncated: tree.truncated,
+        },
+      });
+    } catch (error) {
+      if (error instanceof RepoRefusedError) {
+        return context.json({ error: error.message }, error.status);
+      }
+      throw error;
+    }
+  });
+
+  /**
+   * Read a skill's repository, on behalf of a Bot that carries that skill.
+   *
+   * One route rather than two, because "what is in it" and "what does it say about X" are the same
+   * question asked with and without a term, and the tree behind both is the same tree. With no `q` it
+   * answers the overview a model needs before it can ask anything else: what this repository is, what
+   * the cached file list holds, and which of those files were carried whole.
+   *
+   * GATED BY THE GRANT, and by nothing else. `skillRepoRefusal` is the whole of the gate and the reason
+   * it is a function rather than three lines inline is that the sibling file route must not be able to
+   * answer this one — a repository reachable by knowing its address would make "a skill grants no
+   * capability" untrue in the way that matters, because the skill's author would be handing out read
+   * access to a codebase by granting a `/` command.
+   *
+   * THE SEARCH IS NOT FULL-TEXT AND THE ANSWER SAYS SO. `repo-index.ts` explains why: fetching every
+   * blob to grep it is not something a run does on the strength of one command, on an API with a shared
+   * hourly ceiling. So it covers paths and the carried files, and a result that says "nothing found"
+   * means nothing found in those — which is why the sentence it returns for an empty search names the
+   * limitation instead of leaving the model to report a negative it did not establish.
+   */
+  routes.get("/repos/:slug", requireUser, async (context) => {
+    const slug = context.req.param("slug");
+    const agentId = context.req.query("agentId") ?? "";
+    const gate = await skillRepoRefusal(context, slug, agentId);
+    if (!gate.ok) return context.json({ error: gate.error }, gate.status);
+
+    const index = await repoIndexFor(gate.repo, slug, context, false);
+    if ("error" in index) {
+      return context.json({ error: index.error }, index.status);
+    }
+
+    const term = context.req.query("q")?.trim() ?? "";
+    if (!term) {
+      return context.json({
+        repository: {
+          fullName: index.index.fullName,
+          description: index.index.description,
+          language: index.index.language,
+          ref: index.index.ref,
+          treeSha: index.index.treeSha,
+          truncated: index.index.truncated,
+          fileCount: index.index.tree.length,
+          keyFiles: Object.keys(index.index.keyFiles).sort(),
+        },
+        tree: index.index.tree,
+      });
+    }
+
+    const found = searchIndex(index.index, term);
+    return context.json({
+      repository: {
+        fullName: index.index.fullName,
+        ref: index.index.ref,
+        truncated: index.index.truncated,
+      },
+      query: term,
+      paths: found.paths satisfies RepoSearchHit[],
+      contents: found.contents satisfies RepoSearchHit[],
+      // Stated rather than left to be inferred, because "no results" and "not a full-text search" are
+      // different sentences and a model reporting the first as the second would be wrong in the way
+      // that costs somebody a wrong answer rather than a slow one.
+      searched:
+        "the cached file list, and the files carried whole (README, docs, manifests). Source files are not searched — use repo_overview to find a path and repo_read_file to read it.",
+    });
+  });
+
+  /**
+   * One file, as text.
+   *
+   * Separate from the route above because it is the only one that spends a GitHub request per call, and
+   * because a model reads a file by name rather than by term.
+   *
+   * A RANGE IS HONOURED BEFORE THE CLIP, so "lines 2000 to 2400 of a 5000-line file" is answerable at
+   * all. {@link clipToContext} alone would make the second half of any long file unreachable, and a
+   * model told the first two thousand lines and then unable to ask for the rest will reason about the
+   * part it has as though it were the whole thing — which is the exact failure the clip's own note is
+   * about, one step further along.
+   */
+  routes.get("/repos/:slug/file", requireUser, async (context) => {
+    const slug = context.req.param("slug");
+    const agentId = context.req.query("agentId") ?? "";
+    const path = context.req.query("path") ?? "";
+    if (!path.trim()) {
+      return context.json(
+        { error: "Which file? Give its path as repo_overview printed it." },
+        400,
+      );
+    }
+
+    /*
+     * Parsed by hand rather than by `Number()`, because `Number("")` is 0 and `Number("12abc")` is NaN
+     * — and a range silently read as 0..0 would answer "this file is empty", which is a plausible lie
+     * about a codebase. A range is either two whole positive numbers or it is no range at all.
+     */
+    const range = readLineRange(
+      context.req.query("startLine"),
+      context.req.query("endLine"),
+    );
+
+    const gate = await skillRepoRefusal(context, slug, agentId);
+    if (!gate.ok) return context.json({ error: gate.error }, gate.status);
+
+    const index = await repoIndexFor(gate.repo, slug, context, false);
+    if ("error" in index) {
+      return context.json({ error: index.error }, index.status);
+    }
+
+    try {
+      const whole = await readFile(
+        {
+          owner: gate.repo.owner,
+          repo: gate.repo.repo,
+          ref: gate.repo.ref,
+          path: gate.repo.path,
+        },
+        path,
+        index.index,
+      );
+      return context.json({
+        path: path.trim(),
+        ref: index.index.ref,
+        // Absent rather than the whole file when no range was asked for, so the clip's own note is the
+        // only thing describing a cut — two sentences saying so would be one too many.
+        ...(range
+          ? { content: sliceLines(whole, range), range }
+          : { content: whole }),
+      });
+    } catch (error) {
+      if (error instanceof RepoRefusedError) {
+        return context.json({ error: error.message }, error.status);
+      }
+      throw error;
+    }
+  });
+
+  /**
+   * Rebuild the index now, and say how long it is from being wrong.
+   *
+   * A button rather than something every read does, for the reason {@link repoIndexFor} gives: the
+   * hourly ceiling is the deployment's, not the Bot's. Somebody asking "is this current?" deserves an
+   * answer now, and somebody merely running a skill does not.
+   *
+   * OWNERSHIP, NOT THE GRANT. The person refreshing is the one who wrote the skill, which is decided by
+   * `skillRefusal` — the same check that guards Save and Delete. It is deliberately not the Bot gate:
+   * refreshing is not reading anything into a run, it is rebuilding a cache that is only ever consumed
+   * through the grant, so it does not need a Bot named at all.
+   */
+  routes.post("/skills/:slug/repo/refresh", requireUser, async (context) => {
+    const slug = context.req.param("slug");
+    const refusal = await skillRefusal(context, slug);
+    if (refusal) return context.json({ error: refusal }, 403);
+
+    const record = await store.skillRepo(slug);
+    if (!record) {
+      return context.json(
+        { error: `${slug} does not point at a repository.` },
+        400,
+      );
+    }
+
+    const index = await repoIndexFor(record, slug, context, true);
+    if ("error" in index) {
+      return context.json({ error: index.error }, index.status);
+    }
+    return context.json({
+      ok: true,
+      repository: {
+        url: `https://github.com/${index.index.fullName}`,
+        ref: index.index.ref,
+        treeSha: index.index.treeSha,
+        fileCount: index.index.tree.length,
+        truncated: index.index.truncated,
+        // Said rather than assumed. `saveSkillRepoIndex` does not move `indexedAt` when the tree hash
+        // is unchanged — it learned nothing, and a timestamp that advanced anyway would be a screen
+        // claiming freshness it does not have.
+        indexedAt:
+          (await store.skillRepo(slug))?.indexedAt?.toISOString() ?? null,
+      },
+    });
   });
 
   /**
@@ -2247,10 +2842,11 @@ export function createPluginRoutes(
   /**
    * May this person put this on that Bot?
    *
-   * MCP is an administrator's, always: it reaches another company's system with a stored credential.
-   * A skill is an instruction, so somebody may put their own skill on a Bot they own, and neither
-   * half alone is enough. Both are checked here rather than in the store, because this is the only
-   * place that knows who is asking.
+   * Ownership, on both ends: somebody may grant a tool, a skill or a handoff
+   * to a Bot they may act as, and only with things they may see. There is no
+   * administrator who may wire another person's Bot. Both are checked here
+   * rather than in the store, because this is the only place that knows who
+   * is asking.
    */
   async function enablementRefusal(
     context: { var: AppVariables },
@@ -2270,29 +2866,57 @@ export function createPluginRoutes(
   ): Promise<string | null> {
     const actor = skillActor(context);
 
+    // Taking something away is always allowed: see the note on `intent`. It
+    // comes first so no ownership check below can trap a dead row that
+    // somebody must be able to delete.
+    if (intent === "revoke") return null;
+
+    // The Bot being wired must be one the asker may act as. Checked before
+    // anything is looked up, so a refusal here cannot become an oracle for
+    // other people's private Bots.
+    if (!(await canUseBot(context.var.actor, agentId))) {
+      return "There is no such Bot.";
+    }
+
     if (kind === "mcp") {
-      return actor.isAdmin
-        ? null
-        : "An administrator decides which Bots may reach a tool.";
+      /*
+       * The Bot must be the ASKER'S, not merely one they can see.
+       *
+       * An MCP tool runs against the asker's own connected account, so on their own Bot that is
+       * nobody's privilege but theirs. On a Bot other people also reach it is not: wiring it in
+       * changes how a shared Bot behaves for everyone who uses it, which is exactly what the skill
+       * grant beside this one refuses. `canUseBot` would wave that through, because a shared Bot is
+       * reachable by design — hence this asks ownership instead.
+       *
+       * Same sentence as the "no such Bot" above, deliberately: a distinguishable refusal would
+       * turn this into an oracle for which Bot ids exist and who owns them.
+       */
+      /*
+       * Fails CLOSED when the check is not wired.
+       *
+       * A caller that forgot to pass the ownership check must not be able to grant a connection that
+       * spends somebody's account. Refusing is the safe direction and it is also the truthful one:
+       * an unwired check means this deployment cannot answer the question, and answering "yes"
+       * because the question was skipped is the failure this whole branch exists to prevent.
+       */
+      if (!canManageBot || !(await canManageBot(context.var.actor, agentId))) {
+        return "There is no such Bot.";
+      }
+      return null;
     }
 
     if (kind === "bot") {
       /*
-       * THE ROLE IS CHECKED BEFORE ANYTHING IS LOOKED UP, and that ordering is the point.
-       *
-       * One Bot reaching another lets it spend that Bot's model calls, wake its computer and reach
-       * whatever it may reach, so it is an administrator's decision rather than something somebody
-       * attaches to a coworker they own. But this route only requires a signed-in user, so every
-       * refusal below is readable by anybody: checking whether the Bot exists, and whether it runs
-       * here, before this line handed out three distinguishable answers and turned a 403 into an
-       * oracle for other people's private Bots. `handoff.ts` in this same feature collapses exactly
-       * this, deliberately, and this had it backwards.
+       * Both ends must be the asker's to see: one Bot reaching another lets
+       * it spend that Bot's model calls, wake its computer and reach whatever
+       * it may reach, so neither end may belong to somebody else. The
+       * existence checks below run after this one, so a refusal stays "no
+       * such Bot" rather than a distinguishable answer about somebody else's
+       * private Bot.
        */
-      if (!actor.isAdmin) {
-        return "An administrator decides which Bots may hand work to another Bot.";
+      if (!(await canUseBot(context.var.actor, ref))) {
+        return "There is no such Bot.";
       }
-      // Taking something away is always allowed: see the note on `intent`.
-      if (intent === "revoke") return null;
 
       /*
        * A grant that could never do anything is refused rather than stored, from both ends.
@@ -2323,14 +2947,29 @@ export function createPluginRoutes(
       return null;
     }
 
-    if (actor.isAdmin) return null;
-
     const owner = await store.skillOwner(ref);
     if (owner === undefined) return `There is no skill called ${ref}.`;
-    if (owner !== actor.id) {
-      return owner === null
-        ? `${ref} belongs to this deployment. An administrator decides which Bots use it.`
-        : `${ref} is somebody else's skill.`;
+    /*
+     * A DEPLOYMENT SKILL MAY BE GRANTED, AND THE BOT MUST STILL BE THE ASKER'S.
+     *
+     * This used to refuse every skill with no owner: "belongs to this deployment. Your own skills are
+     * the ones you may grant." The reasoning behind the refusal is sound and is preserved below —
+     * what it was protecting against is a person changing how a Bot OTHER PEOPLE reach behaves — but
+     * it was applied one level too high, and the two things it conflated are not the same thing.
+     *
+     * The property that matters is not "who wrote this skill" but "who does this Bot answer to". A
+     * skill with an owner is one person's writing, so putting it on a shared Bot would impose that
+     * person's instructions on everybody who reaches the Bot — that is the real hazard, and the Bot
+     * ownership check below catches it. A DEPLOYMENT skill is nobody's writing: it is content the
+     * deployment ships, and refusing to let anybody use it made it inert. A Bot seeded into the
+     * "Included skills" section that no person could put on any Bot they own is a setting that looks
+     * configurable and changes nothing.
+     *
+     * So the owner check now only refuses when there IS an owner and it is not the asker's. The Bot
+     * check is unchanged and is still the load-bearing one.
+     */
+    if (owner !== null && owner !== actor.id) {
+      return `${ref} is somebody else's skill.`;
     }
 
     const botOwner = await store.agentOwner(agentId);
@@ -2428,6 +3067,148 @@ export function createPluginRoutes(
     return context.json(await store.listForAgent(agentId));
   });
 
+  routes.get("/servers/:serverId/accounts", requireUser, async (context) => {
+    const serverId = context.req.param("serverId");
+    const toolkit = await store.brokeredToolkitForServer(serverId);
+    if (!toolkit) {
+      return context.json({ error: "There is no such app." }, 404);
+    }
+    return context.json({
+      accounts: await store.listBrokeredAccounts({
+        toolkit,
+        userId: context.var.actor.id,
+      }),
+    });
+  });
+
+  routes.get("/account-grants/:agentId", requireUser, async (context) => {
+    const agentId = context.req.param("agentId");
+    if (!(await canUseBot(context.var.actor, agentId))) {
+      return context.json({ error: "There is no such Bot." }, 404);
+    }
+    return context.json({
+      grants: await store.listAccountGrantsForAgent({
+        agentId,
+        userId: context.var.actor.id,
+      }),
+    });
+  });
+
+  routes.post(
+    "/servers/:serverId/accounts/:connectionId/grant",
+    requireUser,
+    async (context) => {
+      const serverId = context.req.param("serverId");
+      const connectionId = context.req.param("connectionId");
+      const body = (await context.req.json().catch(() => null)) as {
+        agentId?: unknown;
+        granted?: unknown;
+      } | null;
+      if (
+        typeof body?.agentId !== "string" ||
+        !body.agentId.trim() ||
+        typeof body.granted !== "boolean"
+      ) {
+        return context.json(
+          { error: "A Bot and a boolean granted value are required." },
+          400,
+        );
+      }
+      const agentId = body.agentId.trim();
+      if (!(await canUseBot(context.var.actor, agentId))) {
+        return context.json({ error: "There is no such Bot." }, 404);
+      }
+      const toolkit = await store.brokeredToolkitForServer(serverId);
+      if (!toolkit) {
+        return context.json({ error: "There is no such app." }, 404);
+      }
+      try {
+        if (body.granted) {
+          await store.grantAccountToAgent({
+            connectionId,
+            agentId,
+            userId: context.var.actor.id,
+            toolkit,
+          });
+        } else {
+          await store.revokeAccountFromAgent({
+            connectionId,
+            agentId,
+            userId: context.var.actor.id,
+            toolkit,
+          });
+        }
+        return context.json({ ok: true });
+      } catch (error) {
+        if (error instanceof PluginRefusedError) {
+          return context.json({ error: error.message }, 404);
+        }
+        throw error;
+      }
+    },
+  );
+
+  routes.delete(
+    "/servers/:serverId/accounts/:connectionId",
+    requireUser,
+    async (context) => {
+      const serverId = context.req.param("serverId");
+      const connectionId = context.req.param("connectionId");
+      const toolkit = await store.brokeredToolkitForServer(serverId);
+      if (!toolkit) {
+        return context.json({ error: "There is no such app." }, 404);
+      }
+      try {
+        const result = await store.disconnectBrokeredAccount({
+          connectionId,
+          toolkit,
+          userId: context.var.actor.id,
+          by: actorEmail(context),
+          reason: "self",
+        });
+        return context.json({ ok: true, ...result });
+      } catch (error) {
+        if (error instanceof PluginRefusedError) {
+          return context.json({ error: error.message }, 404);
+        }
+        const refusal = brokerRefusal(
+          error,
+          "Composio would not disconnect that account.",
+        );
+        return context.json({ error: refusal.error }, refusal.status);
+      }
+    },
+  );
+
+  routes.patch(
+    "/servers/:serverId/accounts/:connectionId",
+    requireUser,
+    async (context) => {
+      const serverId = context.req.param("serverId");
+      const connectionId = context.req.param("connectionId");
+      const body = (await context.req.json().catch(() => null)) as {
+        label?: unknown;
+      } | null;
+      if (typeof body?.label !== "string" || body.label.length > 120) {
+        return context.json(
+          { error: "A label of at most 120 characters is required." },
+          400,
+        );
+      }
+      const toolkit = await store.brokeredToolkitForServer(serverId);
+      if (!toolkit) {
+        return context.json({ error: "There is no such app." }, 404);
+      }
+      await store.updateAccountLabel({
+        connectionId,
+        toolkit,
+        userId: context.var.actor.id,
+        label: body.label,
+      });
+      return context.json({ ok: true, label: body.label.trim() || null });
+    },
+  );
+
   /**
    * Call a tool, as a Bot.
    *
@@ -2497,6 +3278,9 @@ export function createPluginRoutes(
       });
       return context.json(result);
     } catch (error) {
+      if (error instanceof PluginInvalidArgumentsError) {
+        return context.json({ error: error.message }, 400);
+      }
       if (error instanceof PluginRefusedError) {
         return context.json({ error: error.message, rule: error.rule }, 403);
       }
@@ -2511,7 +3295,7 @@ export function createPluginRoutes(
        *
        * REASON. Two things would be wrong at once. `failed: true` and 502 say somebody else's
        * software did not answer, which is a false statement about a call that never went out —
-       * and this route is `requireUser`, not `requireAdmin`, so the sentence naming our columns
+       * and this route is `requireUser` for every signed-in person (no administrator tier exists), so the sentence naming our columns
        * and the correction to make would be readable by anybody with a session. The operator who
        * can act on it reads it on the refresh route above, which is admin-gated; here the honest
        * answer is that the deployment cannot make this call as it stands.
@@ -2520,7 +3304,7 @@ export function createPluginRoutes(
         return context.json(
           {
             error:
-              "That tool is not configured in a way this deployment can act on. An administrator has to look at the server it belongs to.",
+              "That tool is not configured in a way this deployment can act on. Check the app's own connection settings.",
           },
           500,
         );

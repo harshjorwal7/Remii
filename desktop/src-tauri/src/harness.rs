@@ -4,7 +4,7 @@
 //! a manifest rather than a branch in wizard code, so adding a harness is an entry here plus an
 //! image, and never a new screen.
 //!
-//! Two things this list deliberately does not contain. OpenBot's own `built-in` agent type, which
+//! Two things this list deliberately does not contain. Remii's own `built-in` agent type, which
 //! is a system prompt and not a harness: everybody leaves setup with a real one, either an image we
 //! publish or an address they already run. And anything whose AG-UI integration we would have to
 //! write ourselves. A harness earns a row only when the integration exists and somebody other than
@@ -44,8 +44,6 @@ pub enum Credential {
     /// *subscription* only ever buys its own vendor's models, and this is the row where the
     /// subscription path exists.
     Anthropic,
-    /// The person's own endpoint. Nothing is installed and no key is ours to ask for.
-    TheirEndpoint,
 }
 
 /// One row.
@@ -111,23 +109,6 @@ pub struct Harness {
 #[serde(rename_all = "camelCase")]
 pub struct HarnessChoice {
     pub id: String,
-    #[serde(default)]
-    pub agent_url: Option<String>,
-}
-
-fn byo_remote_ag_ui_url(value: &str) -> Result<String, String> {
-    if value.chars().any(char::is_control) {
-        return Err("Enter a valid http:// or https:// address for the agent endpoint.".into());
-    }
-    let trimmed = value.trim();
-    let parsed = reqwest::Url::parse(trimmed).map_err(|_| {
-        "Enter a valid http:// or https:// address for the agent endpoint.".to_string()
-    })?;
-    if matches!(parsed.scheme(), "http" | "https") && parsed.has_host() {
-        Ok(trimmed.into())
-    } else {
-        Err("Enter a valid http:// or https:// address for the agent endpoint.".into())
-    }
 }
 
 /// The list, ranked as the build doc ranks it: stars first, with downloads as the sanity check,
@@ -139,7 +120,7 @@ fn byo_remote_ag_ui_url(value: &str) -> Result<String, String> {
 ///
 /// Mastra is here on different terms from the rest, and the difference is in the server rather than
 /// in this list. Every other row is an image serving an AG-UI route; Mastra's image is a plain
-/// Mastra server, and OpenBot dials it through `getRemoteAgents` from `@ag-ui/mastra`, the bridge
+/// Mastra server, and Remii dials it through `getRemoteAgents` from `@ag-ui/mastra`, the bridge
 /// Mastra and AG-UI maintain between them. See `remoteTransport` in server/src/copilot.ts.
 ///
 /// It reads as a harness like any other because the difference ends at the transport: a Mastra Bot
@@ -147,6 +128,10 @@ fn byo_remote_ag_ui_url(value: &str) -> Result<String, String> {
 /// this list still refuses is writing that translation by hand, which is what mounting
 /// `registerCopilotKit` in the harness amounted to: that route serves the CopilotKit Runtime
 /// protocol, not AG-UI, and a run reached it and came back asking for a `method` field.
+///
+/// Every row ships an image this build installs. There is no row for an address a person supplies:
+/// the deployment runs the Bot it picks, and a coworker is registered against this deployment's own
+/// engine rather than somebody else's process.
 pub fn catalogue() -> Vec<Harness> {
     // Marks are vendored under the row's own id, so a row finds its own without a second mapping.
     // The three with none are named here rather than discovered at draw time, because a missing
@@ -155,10 +140,10 @@ pub fn catalogue() -> Vec<Harness> {
     /*
      * The directory is given, not derived from the id, and that is deliberate.
      *
-     * A release publishes `openbot-<directory>`, taken from the Dockerfile paths in the tree, so
+     * A release publishes `remii-<directory>`, taken from the Dockerfile paths in the tree, so
      * the image name belongs to the directory and not to whatever this list calls the row. Derived
-     * from the id it was wrong for every row — `openbot-harness-crewai` against a published
-     * `openbot-agent-crewai` — and wrong twice for the four whose id does not match their folder.
+     * from the id it was wrong for every row — `remii-harness-crewai` against a published
+     * `remii-agent-crewai` — and wrong twice for the four whose id does not match their folder.
      * A picker that names an image nobody publishes fails at the pull, on a first run, with nothing
      * on screen to say why. `every_image_is_one_a_release_publishes` holds it.
      */
@@ -172,7 +157,7 @@ pub fn catalogue() -> Vec<Harness> {
         id: id.into(),
         name: name.into(),
         summary: summary.into(),
-        // The manifest's own key, which is the directory the image is built from. `openbot-` is
+        // The manifest's own key, which is the directory the image is built from. `remii-` is
         // the published repository's prefix and belongs to the reference, not to this name.
         image: Some(directory.to_string()),
         port: Some(port),
@@ -295,20 +280,6 @@ pub fn catalogue() -> Vec<Harness> {
             "TypeScript agents, with their own server.",
             Maintainer::Partnership,
         ),
-        Harness {
-            id: "byo-url".into(),
-            name: "An agent you already run".into(),
-            summary: "Give its address. It is proved with a real AG-UI run before it is saved."
-                .into(),
-            image: None,
-            port: None,
-            health_path: None,
-            run_path: String::new(),
-            credential: Credential::TheirEndpoint,
-            maintainer: Maintainer::Community,
-            // Stands for whatever the person already runs, so no vendor's mark is honest here.
-            mark: None,
-        },
     ]
 }
 
@@ -341,20 +312,6 @@ pub fn picked(
         .into_iter()
         .find(|row| row.id == id)
         .ok_or_else(|| format!("There is no Bot called \"{id}\" to install."))?;
-    if row.id == "byo-url" {
-        let url = choice
-            .agent_url
-            .as_deref()
-            .ok_or_else(|| {
-                "Enter a valid http:// or https:// address for the agent endpoint.".to_string()
-            })
-            .and_then(byo_remote_ag_ui_url)?;
-        return Ok(Some(crate::env::PickedHarness::RemoteAgUi {
-            url,
-            name: row.name,
-            remote_agent_id: String::new(),
-        }));
-    }
     let (Some(image), Some(port)) = (row.image, row.port) else {
         return Err(format!("\"{id}\" is not a Bot this can install."));
     };
@@ -368,7 +325,7 @@ pub fn picked(
         // Our own Mastra image serves one agent, named for the product. Somebody pointing at their
         // own Mastra server names theirs on the Bot's page.
         remote_agent_id: if mastra {
-            "openbot".to_string()
+            "remii".to_string()
         } else {
             String::new()
         },
@@ -416,7 +373,7 @@ mod tests {
 
     use super::*;
 
-    /// OpenBot's own `built-in` agent type is a system prompt, not a harness, and the doc is
+    /// Remii's own `built-in` agent type is a system prompt, not a harness, and the doc is
     /// explicit that it is not offered. Everybody leaves setup with a real one.
     #[test]
     fn the_built_in_agent_type_is_not_offered() {
@@ -429,33 +386,17 @@ mod tests {
         }
     }
 
-    /// Every row either ships an image or is the row where the person brings the address. A row
-    /// that is neither cannot be started and should not be on screen.
+    /// Every row ships an image we publish. A row that does not cannot be started and should not be
+    /// on screen.
     #[test]
-    fn every_row_is_either_an_image_we_publish_or_an_address_they_give() {
+    fn every_row_is_an_image_we_publish() {
         for harness in catalogue() {
-            match harness.credential {
-                Credential::TheirEndpoint => {
-                    assert!(
-                        harness.image.is_none(),
-                        "{} installs and should not",
-                        harness.id
-                    );
-                    assert!(
-                        harness.health_path.is_none(),
-                        "{} has no container to poll",
-                        harness.id
-                    );
-                }
-                _ => {
-                    assert!(harness.image.is_some(), "{} offers no image", harness.id);
-                    assert!(
-                        harness.health_path.is_some(),
-                        "{} has no readiness path",
-                        harness.id
-                    );
-                }
-            }
+            assert!(harness.image.is_some(), "{} offers no image", harness.id);
+            assert!(
+                harness.health_path.is_some(),
+                "{} has no readiness path",
+                harness.id
+            );
         }
     }
 
@@ -554,9 +495,9 @@ mod tests {
             .filter_map(|row| row.image)
             .map(|image| {
                 format!(
-                    "\"{image}\": {{ \"repository\": \"ghcr.io/copilotkit/openbot-{image}\", \
+                    "\"{image}\": {{ \"repository\": \"ghcr.io/copilotkit/remii-{image}\", \
                      \"digest\": \"sha256:abc\", \
-                     \"reference\": \"ghcr.io/copilotkit/openbot-{image}@sha256:abc\" }}"
+                     \"reference\": \"ghcr.io/copilotkit/remii-{image}@sha256:abc\" }}"
                 )
             })
             .collect();
@@ -582,7 +523,7 @@ mod tests {
             crate::deployment::images_path(root),
             "{ \"version\": \"v9.9.9\", \"images\": { \
              \"agent-crewai\": { \
-             \"reference\": \"ghcr.io/copilotkit/openbot-agent-crewai@sha256:abc\" } } }",
+             \"reference\": \"ghcr.io/copilotkit/remii-agent-crewai@sha256:abc\" } } }",
         )
         .expect("manifest is written");
     }
@@ -590,7 +531,6 @@ mod tests {
     fn choice(id: &str) -> HarnessChoice {
         HarnessChoice {
             id: id.into(),
-            agent_url: None,
         }
     }
 
@@ -617,122 +557,8 @@ mod tests {
         let crate::env::PickedHarness::Installed { image, .. } = picked else {
             panic!("crewai should install a harness image");
         };
-        assert_eq!(image, "ghcr.io/copilotkit/openbot-agent-crewai@sha256:abc");
+        assert_eq!(image, "ghcr.io/copilotkit/remii-agent-crewai@sha256:abc");
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Bringing your own address registers that remote AG-UI endpoint, and installs nothing.
-    #[test]
-    fn the_byo_row_resolves_to_a_remote_ag_ui_endpoint() {
-        let root = std::env::temp_dir();
-        let byo = HarnessChoice {
-            id: "byo-url".into(),
-            agent_url: Some("  https://agent.example/ag-ui  ".into()),
-        };
-        assert_eq!(
-            picked(Some(&byo), &root).expect("it was refused"),
-            Some(crate::env::PickedHarness::RemoteAgUi {
-                url: "https://agent.example/ag-ui".into(),
-                name: "An agent you already run".into(),
-                remote_agent_id: String::new(),
-            })
-        );
-        assert_eq!(picked(None, &root).expect("it was refused"), None);
-        assert_eq!(
-            picked(Some(&choice("   ")), &root).expect("it was refused"),
-            None
-        );
-    }
-
-    #[test]
-    fn byo_remote_endpoint_requires_a_parseable_http_url_with_host_before_env_persistence() {
-        let root = std::env::temp_dir();
-        for endpoint in [
-            "http://",
-            "https://",
-            "https://exa mple.example/ag-ui",
-            "https://agent.example/ag-ui\nOPENAI_API_KEY=injected",
-            "https://agent.example/ag-ui\r\nPICKED_HARNESS_KIND=remote-mastra",
-        ] {
-            let byo = HarnessChoice {
-                id: "byo-url".into(),
-                agent_url: Some(endpoint.into()),
-            };
-            let refused = picked(Some(&byo), &root).expect_err(endpoint);
-            assert!(
-                refused.contains("valid http:// or https:// address"),
-                "{endpoint:?}: {refused}"
-            );
-        }
-
-        for (endpoint, expected) in [
-            (
-                "  http://localhost:11434/ag-ui  ",
-                "http://localhost:11434/ag-ui",
-            ),
-            (
-                "https://models.example/ag-ui",
-                "https://models.example/ag-ui",
-            ),
-            ("http://[::1]:8000/ag-ui", "http://[::1]:8000/ag-ui"),
-        ] {
-            let byo = HarnessChoice {
-                id: "byo-url".into(),
-                agent_url: Some(endpoint.into()),
-            };
-            assert_eq!(
-                picked(Some(&byo), &root).expect(endpoint),
-                Some(crate::env::PickedHarness::RemoteAgUi {
-                    url: expected.into(),
-                    name: "An agent you already run".into(),
-                    remote_agent_id: String::new(),
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn picked_byo_endpoint_reaches_env_file_as_one_trimmed_setting() {
-        let root = scratch("byo-env-persistence");
-        let byo = HarnessChoice {
-            id: "byo-url".into(),
-            agent_url: Some("  https://agent.example/ag-ui  ".into()),
-        };
-        let picked = picked(Some(&byo), &root)
-            .expect("BYO endpoint should be valid")
-            .expect("BYO endpoint should register a harness");
-        let env = crate::env::compose(
-            &crate::env::Intelligence {
-                api_url: "https://api.example".into(),
-                gateway_ws_url: "wss://realtime.example".into(),
-                api_key: "key".into(),
-            },
-            &crate::env::Model::default(),
-            &crate::engine::EngineStatus {
-                engine: None,
-                address: None,
-                responding: true,
-                engine_socket: None,
-                detail: String::new(),
-            },
-            &crate::env::Ports::default(),
-            &[],
-            Some(&picked),
-            &std::collections::BTreeMap::new(),
-        );
-        let path = root.join(".env");
-        crate::env::write(&path, &env, &std::collections::BTreeMap::new())
-            .expect("env should be persisted");
-
-        let written = std::fs::read_to_string(&path).expect("env should be readable");
-        assert!(written.contains("\nPICKED_HARNESS_URL=https://agent.example/ag-ui\n"));
-        assert_eq!(
-            written.matches("PICKED_HARNESS_URL=").count(),
-            1,
-            "{written}"
-        );
-        assert!(!written.contains("OPENAI_API_KEY=injected"), "{written}");
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A real row resolves to the image the release publishes and the port that image listens on.
@@ -752,7 +578,7 @@ mod tests {
         else {
             panic!("crewai should install a harness image");
         };
-        assert_eq!(image, "ghcr.io/copilotkit/openbot-agent-crewai@sha256:abc");
+        assert_eq!(image, "ghcr.io/copilotkit/remii-agent-crewai@sha256:abc");
         assert_eq!(port, 4202);
         assert!(!mastra);
         assert!(remote_agent_id.is_empty());
@@ -776,7 +602,7 @@ mod tests {
             panic!("mastra should install a harness image");
         };
         assert!(mastra);
-        assert_eq!(remote_agent_id, "openbot");
+        assert_eq!(remote_agent_id, "remii");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -836,7 +662,7 @@ mod tests {
     THE SAME BUG THREE TIMES. First the names were built from the ids and matched nothing a release
     publishes. Then the version stopped being appended, so an engine read the bare name as
     `:latest`. Then the name was correct and tagged and still unqualified, so Podman resolved
-    `openbot-agent-langgraph-agui:v0.0.8` to `docker.io/library/...` and the person was told access
+    `remii-agent-langgraph-agui:v0.0.8` to `docker.io/library/...` and the person was told access
     was denied. Each one is a perfectly good string, each one failed at the pull on a first run, and
     the fix is that no reference is built here at all: they are read from the release's manifest.
     */
@@ -902,7 +728,7 @@ mod tests {
         assert_eq!(unmarked, vec!["agno", "ag2", "langroid"]);
     }
 
-    /// Mastra is offered, and the row is the assertion that the bridge on OpenBot's side works.
+    /// Mastra is offered, and the row is the assertion that the bridge on Remii's side works.
     /// It was out while the only thing a harness could mount served the wrong protocol; it is in
     /// because `remoteTransport` dials Mastra's own API instead. Removing the row means that path
     /// regressed, so this fails rather than the picker quietly shrinking.
@@ -938,12 +764,12 @@ mod tests {
     }
 
     /// Ranked, and the order is load-bearing: it is what somebody reads top-down. CrewAI leads on
-    /// stars and the paste-a-URL row is last because it is the one that installs nothing.
+    /// stars, and Mastra is last among the installable rows.
     #[test]
-    fn the_list_is_ranked_and_ends_with_the_address_row() {
+    fn the_list_is_ranked() {
         let ids: Vec<String> = catalogue().into_iter().map(|h| h.id).collect();
         assert_eq!(ids.first().map(String::as_str), Some("crewai"));
-        assert_eq!(ids.last().map(String::as_str), Some("byo-url"));
+        assert_eq!(ids.last().map(String::as_str), Some("mastra"));
     }
 
     /// Ids become image names and Compose service names, so they have to stay boring.

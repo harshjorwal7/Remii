@@ -4,7 +4,7 @@
 //! person needs a sentence about their situation and what to do next; whoever is debugging needs
 //! the actual output, verbatim, including the bits that are only meaningful to them. Collapse them
 //! and one of the two is failed: a plain sentence alone throws away the evidence, and raw engine
-//! output alone is what put "pull access denied for openbot-agent-langgraph-agui, repository does
+//! output alone is what put "pull access denied for remii-agent-langgraph-agui, repository does
 //! not exist or may require 'docker login'" in front of somebody who was setting up an app.
 //!
 //! The window shows `said` as the failure and keeps `detail` behind a disclosure, so the default
@@ -80,17 +80,17 @@ pub fn said_about(output: &str) -> String {
         || lower.contains("manifest unknown")
         || lower.contains("not found: manifest")
     {
-        return "OpenBot could not download one of the parts it needs. That version may not have \
-                been published yet. Check for an OpenBot update, and try again."
+        return "Remii could not download one of the parts it needs. That version may not have \
+                been published yet. Check for an Remii update, and try again."
             .into();
     }
     if lower.contains("port is already allocated") || lower.contains("address already in use") {
-        return "Something else on this computer is using a port OpenBot needs. Close it, or \
+        return "Something else on this computer is using a port Remii needs. Close it, or \
                 restart the computer, and try again."
             .into();
     }
     if lower.contains("no space left") {
-        return "This computer has run out of disk space, so OpenBot could not finish. Free some \
+        return "This computer has run out of disk space, so Remii could not finish. Free some \
                 space and try again."
             .into();
     }
@@ -98,7 +98,7 @@ pub fn said_about(output: &str) -> String {
         || lower.contains("is the docker daemon running")
         || lower.contains("connection refused")
     {
-        return "OpenBot cannot reach the container engine. Start Docker or Podman, wait for it to \
+        return "Remii cannot reach the container engine. Start Docker or Podman, wait for it to \
                 finish starting, and try again."
             .into();
     }
@@ -108,12 +108,12 @@ pub fn said_about(output: &str) -> String {
             .into();
     }
     if lower.contains("unauthorized") || lower.contains("permission denied") {
-        return "OpenBot was refused permission for something it needed. The details below say \
+        return "Remii was refused permission for something it needed. The details below say \
                 what, and are worth sending to whoever set this up."
             .into();
     }
 
-    "Something went wrong while setting OpenBot up. The details below are worth sending to \
+    "Something went wrong while setting Remii up. The details below are worth sending to \
      whoever set this up."
         .into()
 }
@@ -126,19 +126,19 @@ mod tests {
     #[test]
     fn a_refused_pull_reads_as_a_missing_release_not_a_login_problem() {
         let raw =
-            "Error response from daemon: pull access denied for openbot-agent-langgraph-agui, \
+            "Error response from daemon: pull access denied for remii-agent-langgraph-agui, \
                    repository does not exist or may require 'docker login'";
         let said = said_about(raw);
         assert!(said.contains("could not download"), "{said}");
         // The person is never told to run `docker login`, which is not a thing they have.
         assert!(!said.to_lowercase().contains("docker login"), "{said}");
-        assert!(!said.contains("openbot-agent"), "{said}");
+        assert!(!said.contains("remii-agent"), "{said}");
     }
 
     #[test]
     fn a_taken_port_says_so_in_words_somebody_can_act_on() {
         let said = said_about("Bind for 0.0.0.0:4202 failed: port is already allocated");
-        assert!(said.contains("port OpenBot needs"), "{said}");
+        assert!(said.contains("port Remii needs"), "{said}");
     }
 
     #[test]

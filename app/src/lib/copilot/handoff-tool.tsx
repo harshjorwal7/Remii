@@ -75,5 +75,35 @@ export function HandoffTool() {
     },
   });
 
+  /*
+   * The Remi spelling of the same hop, drawn the same way. `delegate_bot` runs on the server
+   * through the same desk as `message_bot`; without this it still appears, as a generic tool
+   * call with its arguments as JSON. A chief of staff fanning work out should read as
+   * delegating, not as calling something.
+   */
+  useRenderTool({
+    name: "delegate_bot",
+    parameters,
+    render: ({ parameters: given, result, status }) => {
+      const asked = given?.bot?.trim();
+      const running = status !== "complete" && result === undefined;
+      return (
+        <ToolLine
+          label={asked ? `Delegated to ${asked}` : "Delegated to another Bot"}
+          detail={given?.task}
+          running={running}
+          refused={!running && refused(result)}
+        >
+          <div className="space-y-1 text-sm">
+            {given?.task ? <p>{given.task}</p> : null}
+            {typeof result === "string" ? (
+              <p className="text-muted-foreground">{result}</p>
+            ) : null}
+          </div>
+        </ToolLine>
+      );
+    },
+  });
+
   return null;
 }

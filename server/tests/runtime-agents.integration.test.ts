@@ -7,7 +7,6 @@ import { createRuntimeAgentLoader } from "../src/agents/runtime-agents";
 import { createChannelStore } from "../src/channels/routes";
 import { createThreadIdentity } from "../src/channels/thread-identity";
 import { standingRoleMessage } from "../src/copilot";
-import { type CredentialSecretReader, encryptSecret } from "../src/credentials";
 import { createDatabase } from "../src/db/client";
 import {
   agentProfiles,
@@ -31,8 +30,7 @@ const channelStore = createChannelStore(
   createThreadIdentity("test-deployment"),
 );
 const managedAgentToken = "managed-agent-token";
-const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-const loadAgents = createRuntimeAgentLoader(database, undefined, {
+const loadAgents = createRuntimeAgentLoader(database, {
   endpoint: managedEndpoint,
   token: managedAgentToken,
   alsoRun: mastraManagedEndpoint,
@@ -122,7 +120,7 @@ describe("runtime agent loading", () => {
       name: "Expense Manager",
       type: "remote_ag_ui",
       endpoint: managedEndpoint.toString(),
-      headers: { "x-openbot-agent-token": managedAgentToken },
+      headers: { "x-remii-agent-token": managedAgentToken },
       standingMessage: standingRoleMessage({
         id: profile.id,
         name: "Expense Manager",
@@ -140,7 +138,7 @@ describe("runtime agent loading", () => {
       type: "remote_mastra",
       configuration: {
         endpoint: mastraManagedEndpoint.toString(),
-        remoteAgentId: "openbot",
+        remoteAgentId: "remii",
       },
     });
 
@@ -151,8 +149,8 @@ describe("runtime agent loading", () => {
       name: "Expense Manager",
       type: "remote_mastra",
       endpoint: mastraManagedEndpoint.toString(),
-      remoteAgentId: "openbot",
-      headers: { "x-openbot-agent-token": managedAgentToken },
+      remoteAgentId: "remii",
+      headers: { "x-remii-agent-token": managedAgentToken },
       standingMessage: standingRoleMessage({
         id: profile.id,
         name: "Expense Manager",
@@ -163,73 +161,67 @@ describe("runtime agent loading", () => {
     });
   });
 
-  test("resolves vault auth headers for a Mastra endpoint that names a credential", async () => {
+  /*
+   * WAS "resolves vault auth headers for a Mastra endpoint that names a credential", and it went with
+   * the feature rather than with a rename.
+   *
+   * A Bot could be pointed at an address a person supplied and sit behind a bearer key of theirs,
+   * read from the vault on every load so a revocation took effect on the next run rather than the
+   * next restart. Neither half exists now: nobody can supply an address or a key, so the only
+   * credential on a run is the deployment's own token, and only for an endpoint this deployment runs.
+   *
+   * The row below is written straight into `agents.configuration`, which is the only way an address
+   * that is not ours can still exist — a package-supplied row is registered the same way. So this
+   * asserts the floor that is left: an address we do not run gets no credential of ours, ever.
+   */
+  test("carries no credential for an endpoint this deployment does not run", async () => {
     const owner = await createUser();
     const profile = await createCoworker(owner, { name: "Research Mastra" });
-    const vaultReads: string[] = [];
-    const credentialId = `credential-${randomUUID()}`;
-    const reader: CredentialSecretReader = {
-      readSecret: async (id) => {
-        vaultReads.push(id);
-        return id === credentialId
-          ? {
-              encryptedValue: await encryptSecret(
-                encryptionKey,
-                "Bearer mastra-secret",
-              ),
-              revokedAt: null,
-            }
-          : null;
-      },
-    };
     await setAgentRun(profile.id, {
       type: "remote_mastra",
       configuration: {
-        endpoint: "https://customer-mastra.example.test",
+        endpoint: "https://elsewhere.example.test",
         remoteAgentId: "research",
-        auth: {
-          header: "Authorization",
-          credentialId,
-        },
       },
     });
-    const loadWithVault = createRuntimeAgentLoader(database, {
-      reader,
-      encryptionKey,
-    });
 
-    const loaded = await loadWithVault(owner);
+    const loaded = await loadAgents(owner);
 
-    expect(vaultReads).toEqual([credentialId]);
-    expect(loaded).toContainEqual({
-      id: profile.id,
-      name: "Research Mastra",
-      type: "remote_mastra",
-      endpoint: "https://customer-mastra.example.test",
-      remoteAgentId: "research",
-      headers: { Authorization: "Bearer mastra-secret" },
-      standingMessage: standingRoleMessage({
-        id: profile.id,
-        name: "Research Mastra",
-        title: "Finance Operations",
-        roleDescription:
-          "Review receipts, categorize expenses, and prepare reimbursement reports.",
-      }),
-    });
+    const row = loaded.find((agent) => agent.id === profile.id) as
+      | { type?: string; endpoint?: string; headers?: Record<string, string> }
+      | undefined;
+    expect(row?.type).toBe("remote_mastra");
+    expect(row?.endpoint).toBe("https://elsewhere.example.test");
+    // The whole point: the deployment token is for endpoints this deployment runs, and this is not
+    // one of them, so the call carries no credential of ours at all.
+    expect(row?.headers).toBeUndefined();
   });
 
-  test("hides a private coworker from everybody but its owner and administrators", async () => {
+  /*
+   * WAS "hides a private coworker from everybody but its owner and administrators" — the last actor
+   * was an administrator, who could see it — and "shares a public coworker with everybody".
+   *
+   * Neither holds now. Public sharing was removed, so the loader's filter admits a row on `systemOwned`
+   * or `ownerUserId`, and `visibility` is not part of the decision: a public row is the owner's and
+   * nobody else's. And there is no administrator override, so an actor carrying `role: "admin"` is
+   * refused exactly as any other non-owner is.
+   *
+   * The admin is still created in the first case, because "the role confers nothing" is the property
+   * that replaced the override and a test that simply dropped the actor would not notice it returning.
+   */
+  test("hides a private coworker from everybody but its owner", async () => {
     const owner = await createUser();
     const otherUser = await createUser();
     const administrator = await createUser("admin");
     const profile = await createCoworker(owner);
 
     expect(idsOf(await loadAgents(owner))).toContain(profile.id);
-    expect(idsOf(await loadAgents(otherUser))).not.toContain(profile.id);
-    expect(idsOf(await loadAgents(administrator))).toContain(profile.id);
+    for (const actor of [otherUser, administrator]) {
+      expect(idsOf(await loadAgents(actor))).not.toContain(profile.id);
+    }
   });
 
-  test("shares a public coworker with everybody", async () => {
+  test("a public coworker is still only its owner's", async () => {
     const owner = await createUser();
     const otherUser = await createUser();
     const profile = await createCoworker(owner, {
@@ -237,7 +229,8 @@ describe("runtime agent loading", () => {
       visibility: "public",
     });
 
-    expect(idsOf(await loadAgents(otherUser))).toContain(profile.id);
+    expect(idsOf(await loadAgents(owner))).toContain(profile.id);
+    expect(idsOf(await loadAgents(otherUser))).not.toContain(profile.id);
   });
 
   test("drops a deleted coworker that has no history to restore", async () => {

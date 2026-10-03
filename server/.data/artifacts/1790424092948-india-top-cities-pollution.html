@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Top Polluted Cities in India — Bar Graph</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #f7f8fa; margin: 0; padding: 40px 20px; color: #222; }
+  .card { max-width: 760px; margin: 0 auto; background: #fff; border-radius: 14px; padding: 32px 36px; box-shadow: 0 4px 18px rgba(0,0,0,0.08); }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 24px; }
+  .chart { display: flex; flex-direction: column; gap: 12px; }
+  .row { display: grid; grid-template-columns: 120px 1fr 64px; align-items: center; gap: 10px; }
+  .label { font-size: 14px; font-weight: 600; text-align: right; }
+  .track { background: #eef0f3; border-radius: 8px; height: 28px; position: relative; overflow: hidden; }
+  .bar { height: 100%; border-radius: 8px; display: flex; align-items: center; justify-content: flex-end; padding-right: 8px; color: #fff; font-size: 12px; font-weight: 700; min-width: 24px; transition: width 0.8s ease; }
+  .val { font-size: 13px; font-weight: 700; color: #333; }
+  .note { margin-top: 26px; font-size: 12px; color: #888; border-top: 1px solid #eee; padding-top: 14px; line-height: 1.5; }
+  .badge { display: inline-block; background: #fff3cd; color: #8a6d00; border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🌫️ Top Polluted Cities in India</h1>
+  <div class="sub">Annual average PM2.5 concentration (µg/m³) — <span class="badge">Approximate / indicative figures</span></div>
+
+  <div class="chart">
+    <div class="row"><div class="label">Delhi</div><div class="track"><div class="bar" style="width:100%; background:#b91c1c;">102</div></div><div class="val">102</div></div>
+    <div class="row"><div class="label">Begusarai</div><div class="track"><div class="bar" style="width:97%; background:#c2410c;">111*</div></div><div class="val">111*</div></div>
+    <div class="row"><div class="label">Kolkata</div><div class="track"><div class="bar" style="width:82%; background:#ea580c;">84</div></div><div class="val">84</div></div>
+    <div class="row"><div class="label">Mumbai</div><div class="track"><div class="bar" style="width:64%; background:#d97706;">65</div></div><div class="val">65</div></div>
+    <div class="row"><div class="label">Hyderabad</div><div class="track"><div class="bar" style="width:44%; background:#eab308;">45</div></div><div class="val">45</div></div>
+    <div class="row"><div class="label">Pune</div><div class="track"><div class="bar" style="width:42%; background:#a3a635;">43</div></div><div class="val">43</div></div>
+    <div class="row"><div class="label">Chennai</div><div class="track"><div class="bar" style="width:32%; background:#65a30d;">33</div></div><div class="val">33</div></div>
+    <div class="row"><div class="label">Bengaluru</div><div class="track"><div class="bar" style="width:30%; background:#16a34a;">31</div></div><div class="val">31</div></div>
+  </div>
+
+  <div class="note">
+    *Begusarai (Bihar) has topped some global rankings for annual PM2.5 in recent years (≈111 µg/m³), so it can rank above Delhi depending on the source year.<br>
+    Values shown are widely reported annual average PM2.5 figures (IQAir World Air Quality Report / CPCB-based reporting, 2023–24) and are <b>indicative only</b> — I could not verify them against a live source just now. WHO guideline: 5 µg/m³ annual average. All figures above far exceed it.
+  </div>
+</div>
+</body>
+</html>

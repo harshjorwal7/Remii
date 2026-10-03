@@ -1,8 +1,7 @@
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { sso } from "@better-auth/sso";
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
-import { genericOAuth, okta } from "better-auth/plugins";
+import { emailOTP, genericOAuth, okta, username } from "better-auth/plugins";
 import { eq, sql } from "drizzle-orm";
 import type { AuditEventInput, AuditStore } from "../audit";
 import { recordAuditEvent } from "../audit";
@@ -15,8 +14,12 @@ import {
   users,
   verifications,
 } from "../db/schema";
+import {
+  sendMagicLinkEmail,
+  sendPasswordResetEmail,
+  sendVerificationOTPEmail,
+} from "./email";
 import { encryptSsoConfig } from "./encrypt-sso-config";
-import { applyConfiguredAdmin, seedRole } from "./roles";
 
 /**
  * Write a row about a sign-in, and never let the writing of it stop one.
@@ -76,7 +79,7 @@ export async function stampSignIn(
  * configuration. `common`, the default tenant here, is multi-tenant.
  *
  * Better Auth maps `email` straight through with no fallback, so on those deployments it is
- * undefined. That matters more here than in most products: every authorization decision OpenBot
+ * undefined. That matters more here than in most products: every authorization decision Remii
  * makes about a person is keyed on their address. `INITIAL_ADMIN_EMAILS`, the role, the deny list
  * and the People screen all read it, so an absent address is not a cosmetic gap. Somebody would
  * sign in successfully, match no administrator, and land as a plain user with nothing on any screen
@@ -113,20 +116,12 @@ export function createAuth(
   config: DeploymentConfig,
   database: Database,
   /**
-   * Whether an administrator has removed this address.
+   * Where getting in is written down.
    *
-   * Checked here rather than only in the request guard, because a removed person whose sign-in
-   * still succeeds gets a session, a user row and a place in the list: the removal would read as
-   * having worked while quietly not having.
-   */
-  isRevoked?: (email: string) => Promise<boolean>,
-  /**
-   * Where getting in, and being turned away, are written down.
-   *
-   * Sign-in was the one thing this deployment did that left no trace. Two questions could not be
-   * answered at all: who granted themselves the administrator role by editing the configuration, and
-   * whether a person somebody has just removed had ever been here, because removing them deletes the
-   * sessions that were the only evidence.
+   * Individual-user SaaS has no administrator and nobody to remove: every
+   * account that can authenticate may sign in, and its own data is the only
+   * thing it can reach. Sign-in was the one thing this deployment did that
+   * left no trace, so the signed-in row stays.
    *
    * Optional and never fatal. A trail that is unavailable must not stop somebody signing in, so every
    * write below is guarded and its failure is logged rather than raised.
@@ -150,6 +145,33 @@ export function createAuth(
    * sign-in screen has one code path and does not need to know which kind each provider is.
    */
   const plugins = [
+    ...(authConfig.emailPassword
+      ? [
+          /*
+           * Login names alongside emails. Someone signs in with whichever they remember; the
+           * email behind a username is resolved by the plugin, not by a second account.
+           */
+          username(),
+          /*
+           * Email verification codes. Required for signup only when mail can actually be
+           * delivered (see below): without a mail provider there is no code to type, and
+           * requiring one would lock everybody out on first signup.
+           */
+          ...(authConfig.email
+            ? [
+                emailOTP({
+                  expiresIn: 600,
+                  sendVerificationOTP: async ({ email, otp }) => {
+                    await sendVerificationOTPEmail(authConfig.email, {
+                      to: email,
+                      otp,
+                    });
+                  },
+                }),
+              ]
+            : []),
+        ]
+      : []),
     ...(authConfig.okta
       ? [
           genericOAuth({
@@ -176,14 +198,9 @@ export function createAuth(
      * reads as a broken deployment rather than a first sign-in.
      */
     sso({
-      provisionUser: async ({ user }) => {
-        await seedRole(
-          database,
-          user.id,
-          user.email,
-          authConfig.initialAdminEmails,
-        );
-      },
+      // Individual-user SaaS has no roles to provision: signing in is the
+      // whole bar, and every row the run touches is scoped to this id.
+      provisionUser: async () => {},
     }),
   ];
 
@@ -191,6 +208,48 @@ export function createAuth(
     baseURL: authConfig.baseUrl,
     secret: authConfig.secret,
     trustedOrigins: authConfig.trustedOrigins,
+    /*
+     * Email (or username) plus password, Remi-style. Verification is required only when mail
+     * delivery is configured: with no provider there is no code to type, and requiring one
+     * would refuse every first sign-in rather than anyone's second.
+     */
+    ...(authConfig.emailPassword
+      ? {
+          emailAndPassword: {
+            enabled: true,
+            requireEmailVerification: authConfig.email !== undefined,
+            ...(authConfig.email
+              ? {
+                  sendVerificationEmail: async ({
+                    user,
+                    url,
+                  }: {
+                    user: { email: string };
+                    url: string;
+                  }) => {
+                    await sendMagicLinkEmail(authConfig.email, {
+                      to: user.email,
+                      url,
+                    });
+                  },
+                  sendResetPassword: async ({
+                    user,
+                    url,
+                  }: {
+                    user: { email: string };
+                    url: string;
+                  }) => {
+                    await sendPasswordResetEmail(authConfig.email, {
+                      to: user.email,
+                      url,
+                    });
+                  },
+                }
+              : {}),
+            minPasswordLength: 8,
+          },
+        }
+      : {}),
     /*
      * Wrapped, so a company's client secret is ciphertext in the column.
      *
@@ -236,117 +295,33 @@ export function createAuth(
     databaseHooks: {
       user: {
         create: {
-          /*
-           * Refuse before the account exists.
-           *
-           * Somebody removed and then signing in again would otherwise arrive as a brand-new person
-           * with a fresh id, no role and no memory of having been removed, which is why the deny
-           * list is keyed on the address rather than the id.
-           */
           before: async (user) => {
-            if (await isRevoked?.(user.email)) {
-              // The row a removed person coming back produces. Nothing else records the attempt:
-              // no user row is written and no session exists to look at afterwards.
-              await record(auditStore, {
-                eventType: "session.refused",
-                targetType: "person",
-                payload: {
-                  email: user.email,
-                  reason: "access removed by an administrator",
-                },
-              });
-              throw new APIError("FORBIDDEN", {
-                message: "Your access to this deployment has been removed.",
-              });
-            }
             return { data: user };
           },
           after: async (user) => {
-            /*
-             * Who is an administrator is decided by email, not by which provider signed them in. A
-             * deployment mid-migration has the same person arriving through Entra one week and
-             * Okta the next, and they are the same person to this list.
-             */
-            await seedRole(
-              database,
-              user.id,
-              user.email,
-              authConfig.initialAdminEmails,
-            );
+            await record(auditStore, {
+              eventType: "session.signed_in",
+              targetType: "person",
+              targetId: user.id,
+              actorUserId: user.id,
+              payload: { email: user.email },
+            });
           },
         },
       },
       session: {
         create: {
-          /*
-           * And again for somebody who already has an account. The user hook above only fires for a
-           * new one, so without this a removed person signs straight back in.
-           */
           before: async (session) => {
-            const [user] = await database
-              .select({ email: users.email })
-              .from(users)
-              .where(eq(users.id, session.userId))
-              .limit(1);
-            if (user && (await isRevoked?.(user.email))) {
-              await record(auditStore, {
-                eventType: "session.refused",
-                targetType: "person",
-                targetId: session.userId,
-                actorUserId: session.userId,
-                payload: {
-                  email: user.email,
-                  reason: "access removed by an administrator",
-                },
-              });
-              throw new APIError("FORBIDDEN", {
-                message: "Your access to this deployment has been removed.",
-              });
-            }
             return { data: session };
           },
           after: async (session) => {
             await stampSignIn(database, session.userId, session.createdAt);
 
-            /*
-             * The configured floor, re-applied on every sign-in. Editing the list has to mean
-             * something for people already in the table, or adding yourself after you first signed
-             * in silently does nothing. Only promotes, and only addresses the list names: everybody
-             * else's role belongs to the admin screen.
-             */
-            const promoted = await applyConfiguredAdmin(
-              database,
-              session.userId,
-              authConfig.initialAdminEmails,
-            );
-
             const [user] = await database
               .select({ email: users.email })
               .from(users)
               .where(eq(users.id, session.userId))
               .limit(1);
-
-            /*
-             * The promotion, on the trail.
-             *
-             * The floor is applied silently by design, which meant anybody who could edit
-             * `INITIAL_ADMIN_EMAILS` made themselves an administrator and nothing anywhere said so.
-             * Written only when the role actually changed, so a returning administrator does not
-             * produce one of these on every sign-in.
-             */
-            if (promoted) {
-              await record(auditStore, {
-                eventType: "person.admin_by_configuration",
-                targetType: "person",
-                targetId: session.userId,
-                actorUserId: session.userId,
-                payload: {
-                  email: user?.email,
-                  reason:
-                    "this address is named in INITIAL_ADMIN_EMAILS, so the configuration granted it",
-                },
-              });
-            }
 
             await record(auditStore, {
               eventType: "session.signed_in",

@@ -111,7 +111,7 @@ export function DetailPanel({
                   variant="ghost"
                   size="icon"
                 >
-                  <IconX className="size-4.5" />
+                  <IconX />
                 </Button>
               </div>
             </div>

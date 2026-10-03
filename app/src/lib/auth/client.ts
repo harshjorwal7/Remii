@@ -1,8 +1,11 @@
 import { ssoClient } from "@better-auth/sso/client";
+import { emailOTPClient, usernameClient } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
 import type { AuthProviderId } from "./queries";
 
-export const authClient = createAuthClient({ plugins: [ssoClient()] });
+export const authClient = createAuthClient({
+  plugins: [ssoClient(), usernameClient(), emailOTPClient()],
+});
 
 /** What each provider is called on the button, since none of them are called by their id. */
 const PROVIDER_NAMES: Record<AuthProviderId, string> = {

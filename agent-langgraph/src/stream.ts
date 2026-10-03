@@ -27,6 +27,30 @@ import { textOfChunk } from "./deltas";
 export const EMPTY_REPLY_FALLBACK =
   "The model returned an empty reply and the run ended without an answer. This can happen with a strict provider; try asking again.";
 
+/**
+ * The line a run ends on when it went round its tool loop too many times.
+ *
+ * The tool loop is bounded, and hitting that bound is an ordinary outcome rather than a fault: the
+ * model asked for tools, read the answers, asked again, and never arrived. Left alone it surfaces as
+ * the framework's own exception — "Recursion limit of 25 reached without hitting a stop condition"
+ * plus a troubleshooting URL for a graph the person cannot see and did not write. That is a framework
+ * sentence shown to somebody who asked a question, and it names a number that is not the one this
+ * Bot uses any more, so it is both unhelpful and wrong.
+ *
+ * Spoken as an outcome instead, in the same shape as {@link EMPTY_REPLY_FALLBACK} and for the same
+ * reason: the person is owed a sentence about their own conversation, not a stack trace about ours.
+ * It says what happened and what to do, because "try a smaller question" is genuinely the next move
+ * and a bare failure leaves them guessing.
+ */
+export const LOOP_LIMIT_FALLBACK =
+  "This Bot went round its tool loop without settling on an answer, so the run was stopped. Nothing was changed. Try asking for one step at a time, or a narrower question.";
+
+/** Whether a thrown error is the tool loop hitting its bound, rather than anything else. */
+export function isLoopLimit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /recursion ?limit/i.test(message);
+}
+
 /** The framework's streamed events, in the shape this reader looks at. */
 export interface RunStreamEvent {
   event: string;
@@ -227,6 +251,50 @@ export async function streamRun(
     // error is reported. agent-bot has the same hazard and the same ordering.
     if (textOpen) {
       send({ type: "TEXT_MESSAGE_END", messageId } as BaseEvent);
+    }
+    /*
+     * The loop running out of steps is only a failure when it produced nothing.
+     *
+     * A long job is a long job: an audit that reads DNS, DMARC, TLS, CORS and a dozen pages is
+     * legitimately more than a couple of dozen steps, and a real run here gathered all of that,
+     * wrote its report and stated its findings — and then hit the bound and had the whole thing
+     * reported as a failure. So the answer was on the wire and the delivery called it an error
+     * anyway, retried the entire audit, and did that four more times.
+     *
+     * WHICH MEANS: if the run already said something, the bound is where it stopped, not a fault,
+     * and what it said is the answer. It is finished as it stands. Only a run that reached the
+     * bound having said nothing needs the sentence, and that one has genuinely told the person
+     * nothing.
+     */
+    if (isLoopLimit(error)) {
+      if (sentVisibleText || sentToolCall) {
+        // The message is already closed by the catch above; closing it twice would emit a second
+        // TEXT_MESSAGE_END for a message the surface has ended, which is the same class of protocol
+        // error as reopening one.
+        send({
+          type: "RUN_FINISHED",
+          threadId: input.threadId,
+          runId: input.runId,
+        } as BaseEvent);
+        return;
+      }
+      send({
+        type: "TEXT_MESSAGE_START",
+        messageId,
+        role: "assistant",
+      } as BaseEvent);
+      send({
+        type: "TEXT_MESSAGE_CONTENT",
+        messageId,
+        delta: LOOP_LIMIT_FALLBACK,
+      } as BaseEvent);
+      send({ type: "TEXT_MESSAGE_END", messageId } as BaseEvent);
+      send({
+        type: "RUN_FINISHED",
+        threadId: input.threadId,
+        runId: input.runId,
+      } as BaseEvent);
+      return;
     }
     send({
       type: "RUN_ERROR",

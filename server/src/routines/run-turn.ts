@@ -58,6 +58,7 @@ import { EventType } from "@ag-ui/client";
 import { frameFiring } from "../../../shared/routine-firing";
 import { sanitizeSeededHistory } from "../agents/history-sanitize";
 import type { AuditInitiator } from "../audit";
+import { extractUsageTokens, MAX_TURN_TOOL_CALLS } from "../billing/metering";
 import { historyOrEmpty } from "../copilot";
 import type { TurnRunner } from "./runner";
 
@@ -244,6 +245,19 @@ export function createTurnRunner(options: {
   heartbeatMs?: number;
   /** See {@link DEFAULT_ABORT_GRACE_MS}. */
   abortGraceMs?: number;
+  /**
+   * Charge one finished turn against its owner's credits, returning what was
+   * deducted so the run row carries real spend. Absent, the runner records
+   * the flat default and the daily circuit breaker counts runs, not credits.
+   */
+  chargeUsage?: (input: {
+    ownerUserId: string;
+    agentId: string;
+    threadId: string;
+    promptTokens: number;
+    completionTokens: number;
+    browserDurationSeconds: number;
+  }) => Promise<number>;
 }): TurnRunner {
   const {
     intelligence,
@@ -253,6 +267,7 @@ export function createTurnRunner(options: {
     lockTtlSeconds = DEFAULT_LOCK_TTL_SECONDS,
     heartbeatMs = DEFAULT_HEARTBEAT_MS,
     abortGraceMs = DEFAULT_ABORT_GRACE_MS,
+    chargeUsage,
   } = options;
 
   return async ({ ownerUserId, routineId, agentId, threadId, instruction }) => {
@@ -369,6 +384,41 @@ export function createTurnRunner(options: {
     const spoken = agent.subscribe({
       onTextMessageEndEvent: ({ textMessageBuffer }) => {
         if (textMessageBuffer.length > 0) chunks.push(textMessageBuffer);
+      },
+    });
+    /*
+     * The turn's own meter, on the same subscriber seam as the reply above.
+     *
+     * The runner drives `runAgent`, not `run`, so an enforcement wrapper
+     * around `run` would never fire here. Counting TOOL_CALL_START on the
+     * subscribed events covers this path directly: past 15 iterative calls
+     * the turn is stopped the same way the deadline stops it. Token totals
+     * feed the charge below, so the daily circuit breaker counts credits.
+     */
+    let toolCalls = 0;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let loopBroken = false;
+    const metered = agent.subscribe({
+      onEvent: ({ event }) => {
+        const record = event as { type?: unknown };
+        if (record.type === EventType.TOOL_CALL_START) {
+          toolCalls += 1;
+          if (toolCalls > MAX_TURN_TOOL_CALLS && !loopBroken) {
+            loopBroken = true;
+            stopTurn();
+          }
+        }
+        const tokens = extractUsageTokens(event);
+        if (tokens.promptTokens > 0) {
+          promptTokens = Math.max(promptTokens, tokens.promptTokens);
+        }
+        if (tokens.completionTokens > 0) {
+          completionTokens = Math.max(
+            completionTokens,
+            tokens.completionTokens,
+          );
+        }
       },
     });
 
@@ -495,6 +545,7 @@ export function createTurnRunner(options: {
       if (deadline !== undefined) clearTimeout(deadline);
       if (backstop !== undefined) clearTimeout(backstop);
       spoken.unsubscribe();
+      metered.unsubscribe();
       await intelligence
         .ɵcleanupThreadLock({ threadId, runId })
         .catch(() => undefined);
@@ -519,6 +570,18 @@ export function createTurnRunner(options: {
       await stopPromise;
       throw new Error(
         `The routine's turn was stopped after ${Math.round(turnTimeoutMs / 1000)}s.`,
+      );
+    }
+
+    /*
+     * And the same for a turn the loop breaker stopped: past 15 iterative
+     * tool calls the turn is going in circles, and posting its half-answer
+     * would read as success.
+     */
+    if (loopBroken) {
+      await stopPromise;
+      throw new Error(
+        `The routine's turn exceeded ${MAX_TURN_TOOL_CALLS} iterative tool calls and was stopped.`,
       );
     }
 
@@ -548,6 +611,30 @@ export function createTurnRunner(options: {
       throw new Error("The turn finished without saying anything.");
     }
 
-    return { replyText };
+    /*
+     * Real spend on the run row, so the daily circuit breaker counts credits
+     * rather than firings. A charge that fails does not fail the turn — the
+     * answer was already produced, and losing it over the ledger would be
+     * charging the person twice: once in spend, once in silence.
+     */
+    let creditsDeducted: number | undefined;
+    if (chargeUsage) {
+      try {
+        creditsDeducted = await chargeUsage({
+          ownerUserId,
+          agentId,
+          threadId,
+          promptTokens,
+          completionTokens,
+          browserDurationSeconds: 0,
+        });
+      } catch {
+        creditsDeducted = undefined;
+      }
+    }
+
+    return creditsDeducted === undefined
+      ? { replyText }
+      : { replyText, creditsDeducted };
   };
 }

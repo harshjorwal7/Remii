@@ -34,8 +34,42 @@ describe("classifyAttachment", () => {
     expect(classifyAttachment("application/json")).toBe("text");
   });
 
-  test("anything else is unsupported", () => {
-    expect(classifyAttachment("application/zip")).toBe("unsupported");
+  /*
+   * WHAT IS UNSUPPORTED CHANGED, AND THESE ARE THE TWO CASES THAT MATTER.
+   *
+   * This used to assert that anything unrecognised is `unsupported`, which is no longer the policy:
+   * a file that NAMES a format is stored and served whole as a download, because refusing a zip or a
+   * spreadsheet on principle loses the person's file for no safety gained. The safety is bought
+   * elsewhere — the bytes are sniffed on arrival, and the types a browser would EXECUTE are refused
+   * by name.
+   *
+   * So the assertions are split into the part that is a convenience (unknown-but-named is kept) and
+   * the part that is a boundary (executable types are refused, and a type that names nothing at all
+   * is refused rather than treated as a licence to accept anything).
+   */
+  test("a named format nobody renders inline is kept as a download", () => {
+    expect(classifyAttachment("application/zip")).toBe("binary");
+    expect(classifyAttachment("application/x-tar")).toBe("binary");
+  });
+
+  test("a type the browser would execute is refused by name, not defaulted", () => {
+    // The list is checked BEFORE the `binary` default, which is the only order in which it means
+    // anything — a list applied afterwards would be a list that never fires.
+    expect(classifyAttachment("text/html")).toBe("unsupported");
+    // Its own kind, and the distinction is useful: an image/* that a browser would execute is
+    // refused as an image, so the composer can say "that is an image we will not show" rather than
+    // "we do not know what this is". Both are refusals, which is the property being asserted.
+    expect(classifyAttachment("image/svg+xml")).toBe("unsupported-image");
+    // Not `image/*`, so the image rule above never sees it, and it would otherwise fall through to
+    // the default and be stored as an ordinary download.
+    expect(classifyAttachment("text/xml")).toBe("unsupported");
+    expect(classifyAttachment("application/xslt+xml")).toBe("unsupported");
+  });
+
+  test("a claim that names no format at all is refused", () => {
+    // The composer screens a file it has not uploaded and whose bytes it has not seen, so "I do not
+    // know what this is" must not become a licence to accept anything.
+    expect(classifyAttachment("application/octet-stream")).toBe("unsupported");
   });
 
   test("a charset parameter does not defeat the match", () => {
@@ -298,13 +332,22 @@ describe("an unnamed claim is unsupported AND unnamed, which is what defers to t
     }
   });
 
-  test("a named refusal is refused by kind and NOT excused by name", () => {
-    // The other half of the branch: the two sides already agree about a claim
-    // that names a format, so the composer refuses it itself rather than
-    // spending a round trip to be told the same thing.
+  test("a claim that names a format is NOT excused by name, whatever the kind", () => {
+    /*
+     * The other half of the branch: `namesNoFormat` is about whether the claim SAYS anything, not
+     * about whether the answer is a refusal. The two must agree on that for the composer to decide
+     * by itself rather than spend a round trip.
+     *
+     * The kinds here are the current policy and no longer the same for both: `application/zip`
+     * names a format nobody renders inline, so it is KEPT as a download, while `text/html` names a
+     * format a browser would execute and is refused. This test used to assert both were `unsupported`
+     * and was left behind when the file policy deliberately widened — it is the assertion that was
+     * stale, not the behaviour.
+     */
     for (const claim of ["application/zip", "text/html"]) {
-      expect(classifyAttachment(claim)).toBe("unsupported");
       expect(namesNoFormat(claim)).toBe(false);
     }
+    expect(classifyAttachment("application/zip")).toBe("binary");
+    expect(classifyAttachment("text/html")).toBe("unsupported");
   });
 });

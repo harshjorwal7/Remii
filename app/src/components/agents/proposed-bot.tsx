@@ -104,7 +104,7 @@ export function ProposedBotCard({
   if (!checked.ok) {
     return <Unwritable problems={checked.problems} respond={respond} />;
   }
-  const { values, skills } = checked;
+  const { values, skills, trimmed } = checked;
 
   const make = async () => {
     setSending("create");
@@ -126,7 +126,7 @@ export function ProposedBotCard({
      * Pressing again is not offered from here on: the coworker exists, and a second press would make
      * a second one. The answer carries its id, which is what the completed card links to.
      */
-    await answer(respond, botCardAnswer.created(outcome));
+    await answer(respond, botCardAnswer.created({ ...outcome, trimmed }));
   };
 
   const decline = async () => {
@@ -172,6 +172,29 @@ export function ProposedBotCard({
       <p className="mt-1 max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">
         {values.roleDescription}
       </p>
+
+      {/*
+       * The cut is drawn here, not only said to the model.
+       *
+       * The scroller above exists so a clamp cannot hide the second half of an instruction that
+       * will run on somebody's behalf from the one person being asked to agree to it. Trimming the
+       * text to fit is that same clamp, so it owes the person the same disclosure: they are about to
+       * create a coworker, they pressed a button, and what they are agreeing to is shorter than
+       * what the Bot wrote. Saying so after the fact is not the same as asking them first, but
+       * showing them nothing is how a coworker ends up running on half a brief.
+       */}
+      {trimmed.length > 0 ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Trimmed to fit before you saw it:{" "}
+          {trimmed
+            .map(
+              (entry) =>
+                `${entry.field} ${entry.was} → ${entry.now} characters`,
+            )
+            .join(", ")}
+          . Anything important that fell off the end is not on the coworker.
+        </p>
+      ) : null}
 
       <p className="mt-2 text-muted-foreground text-xs">
         It arrives private, with no address, no connector and no tool. Anything

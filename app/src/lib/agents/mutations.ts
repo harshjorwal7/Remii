@@ -1,5 +1,6 @@
 import { mutationOptions, type QueryClient } from "@tanstack/react-query";
 import { client } from "@/lib/client";
+import type { MascotChoice } from "../../../../shared/mascot-ids";
 import {
   type AgentProfile,
   type AgentVisibility,
@@ -12,10 +13,15 @@ export type AgentInput = {
   title: string;
   roleDescription: string;
   visibility: AgentVisibility;
-  /** Where this coworker runs. Empty means the Bot in the box. */
-  endpoint?: string;
-  /** Write-only auth value; omitted when the user leaves the key field empty. */
-  auth?: { header: string; value: string };
+  /**
+   * The mascot to save.
+   *
+   * Partial, and omitted to mean "leave this coworker as they are" — the server reads a missing
+   * `mascot` as untouched and a present one as a replacement, so sending the resolved mascot on every
+   * save would quietly turn every seeded coworker into a chosen one and break "reset" the first time
+   * somebody edited a name. Sending `{}` is how the customizer resets one.
+   */
+  mascot?: Partial<MascotChoice>;
 };
 
 /** The sentence for every write here, since they all fail the same way to a reader. */
@@ -80,37 +86,6 @@ export function deleteAgentMutationOptions(queryClient: QueryClient) {
   return mutationOptions({
     mutationFn: async (agentId: string) => {
       await client(agentApiPath(agentId), {
-        method: "DELETE",
-        fallback: FALLBACK,
-      });
-    },
-    onSuccess: () => invalidateAgents(queryClient),
-  });
-}
-
-/**
- * Issue this coworker a credential for calling tools back, and hand it over once.
- *
- * The token is in this response and nowhere else, ever again, so the caller has to show it to the
- * person immediately. Calling this on a coworker that already has one rotates it, which is how a
- * leaked token is retired.
- */
-export function issueCallbackTokenMutationOptions(queryClient: QueryClient) {
-  return mutationOptions({
-    mutationFn: (agentId: string): Promise<string> =>
-      client(`${agentApiPath(agentId)}/callback-token`, "token", {
-        method: "POST",
-        fallback: FALLBACK,
-      }),
-    onSuccess: () => invalidateAgents(queryClient),
-  });
-}
-
-/** Take the credential away. The coworker may still talk; it may not reach anything outside a chat. */
-export function revokeCallbackTokenMutationOptions(queryClient: QueryClient) {
-  return mutationOptions({
-    mutationFn: async (agentId: string) => {
-      await client(`${agentApiPath(agentId)}/callback-token`, {
         method: "DELETE",
         fallback: FALLBACK,
       });

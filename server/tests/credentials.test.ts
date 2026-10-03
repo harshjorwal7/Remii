@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import {
   createCredential,
@@ -19,7 +18,6 @@ import { TEST_POOL, testDatabaseUrl } from "./support/database";
 import { testEnvironment } from "./support/environment";
 
 const key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-const config = loadConfig(testEnvironment({ KEY_ENCRYPTION_KEY: key }));
 const database = createDatabase(testDatabaseUrl(), TEST_POOL);
 const credentialIds: string[] = [];
 
@@ -683,180 +681,17 @@ describe("credential secret update", () => {
   });
 });
 
-describe("admin credential API", () => {
-  test("returns only credential status and metadata", async () => {
-    const app = createApp(
-      config,
-      {
-        handler: () => new Response(null, { status: 204 }),
-        api: {
-          getSession: async () => ({
-            user: { id: "admin", email: "admin@openbot.test" },
-          }),
-        },
-      },
-      { rolesForUser: async () => ["admin"] },
-      undefined,
-      {
-        list: async () => [
-          {
-            id: "credential-1",
-            kind: "model",
-            provider: "openai",
-            keyId: "primary",
-            metadata: { label: "Production OpenAI" },
-            revokedAt: null,
-          },
-        ],
-      },
-    );
-
-    const response = await app.request(
-      "http://openbot.local/api/admin/credentials",
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      credentials: [
-        {
-          id: "credential-1",
-          kind: "model",
-          provider: "openai",
-          keyId: "primary",
-          metadata: { label: "Production OpenAI" },
-          revokedAt: null,
-        },
-      ],
-    });
-  });
-
-  test("accepts plaintext only on credential creation and returns safe status", async () => {
-    const created: unknown[] = [];
-    const app = createApp(
-      config,
-      {
-        handler: () => new Response(null, { status: 204 }),
-        api: {
-          getSession: async () => ({
-            user: { id: "admin", email: "admin@openbot.test" },
-          }),
-        },
-      },
-      { rolesForUser: async () => ["admin"] },
-      undefined,
-      {
-        list: async () => [],
-        create: async (input) => {
-          created.push(input);
-          return {
-            id: "credential-1",
-            kind: input.kind,
-            provider: input.provider,
-            keyId: input.keyId,
-            metadata: input.metadata,
-            revokedAt: null,
-          };
-        },
-      },
-    );
-
-    const response = await app.request(
-      "http://openbot.local/api/admin/credentials",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: "model",
-          provider: "openai",
-          keyId: "primary",
-          metadata: { label: "Production OpenAI" },
-          plaintext: "openai-secret-value",
-        }),
-      },
-    );
-
-    expect(response.status).toBe(201);
-    await expect(response.json()).resolves.toEqual({
-      credential: {
-        id: "credential-1",
-        kind: "model",
-        provider: "openai",
-        keyId: "primary",
-        metadata: { label: "Production OpenAI" },
-        revokedAt: null,
-      },
-    });
-    expect(created).toEqual([
-      {
-        kind: "model",
-        provider: "openai",
-        keyId: "primary",
-        metadata: { label: "Production OpenAI" },
-        plaintext: "openai-secret-value",
-        actorUserId: "admin",
-      },
-    ]);
-  });
-
-  test("rotates and revokes through write-only administrator operations", async () => {
-    const calls: string[] = [];
-    const app = createApp(
-      config,
-      {
-        handler: () => new Response(null, { status: 204 }),
-        api: {
-          getSession: async () => ({
-            user: { id: "admin", email: "admin@openbot.test" },
-          }),
-        },
-      },
-      { rolesForUser: async () => ["admin"] },
-      undefined,
-      {
-        list: async () => [],
-        create: async () => {
-          throw new Error("not used");
-        },
-        rotate: async (input) => {
-          calls.push(`rotate:${input.previousCredentialId}`);
-          return {
-            id: "credential-new",
-            kind: input.kind,
-            provider: input.provider,
-            keyId: input.keyId,
-            metadata: input.metadata,
-            revokedAt: null,
-          };
-        },
-        revoke: async (id) => {
-          calls.push(`revoke:${id}`);
-          return { id, revokedAt: new Date("2026-08-13T12:00:00.000Z") };
-        },
-      },
-    );
-
-    const rotate = await app.request(
-      "http://openbot.local/api/admin/credentials/credential-old/rotate",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: "model",
-          provider: "openai",
-          keyId: "secondary",
-          metadata: {},
-          plaintext: "rotated-secret",
-        }),
-      },
-    );
-    const revoke = await app.request(
-      "http://openbot.local/api/admin/credentials/credential-new/revoke",
-      { method: "POST" },
-    );
-
-    expect(rotate.status).toBe(200);
-    expect(revoke.status).toBe(200);
-    expect(calls).toEqual(["rotate:credential-old", "revoke:credential-new"]);
-    expect(await rotate.text()).not.toContain("rotated-secret");
-  });
-});
+/*
+ * WAS a `describe("admin credential API")` here with three tests: listing credential status,
+ * creating one with plaintext, and rotating and revoking through
+ * `POST /api/admin/credentials/...`.
+ *
+ * That surface is gone. `createApp`'s fourth parameter is `_credentialService` — the underscore is
+ * the whole of the signal, and it is mounted nowhere — and the per-user replacement is the Vault
+ * (`/api/vault`, covered in `vault-routes.test.ts`). So all three were answering 404 while asserting
+ * 200 and 201.
+ *
+ * What is above is the encryption itself, which is what the Vault also stands on: `encryptSecret`,
+ * `decryptSecret`, `readSecret`, the key length check, and the fact that a plaintext credential is
+ * never returned once stored. None of it moved, and none of it is affected by the route going away.
+ */

@@ -49,84 +49,125 @@ export function toLangChainMessages(
   ];
 
   /*
-   * Which calls in this history were ever answered.
+   * Which calls are still waiting for a result, walked in order rather than
+   * collected up front.
    *
-   * A tool call the surface owns ends the run without a result on purpose: the surface draws it, or
-   * puts it to a person, and starts the next run carrying the answer. When nobody answers — a Bot
-   * asks for the wheel to get past a sign-in and the person decides they do not need it after all —
-   * no answer is ever carried, and the call stays in the history with nothing following it.
+   * A tool call the surface owns ends the run without a result on purpose: the
+   * surface draws it, or puts it to a person, and starts the next run carrying
+   * the answer. When nobody answers — a Bot asks for the wheel to get past a
+   * sign-in and the person decides they do not need it after all — no answer is
+   * ever carried, and the call stays in the history with nothing following it.
    *
-   * OpenAI rejects that outright on the NEXT turn: "an assistant message with 'tool_calls' must be
-   * followed by tool messages responding to each 'tool_call_id'". So the conversation was not merely
-   * stuck on that request, it was finished. Every later message failed the same way, and the only
-   * escape was starting a new one, which loses it.
+   * OpenAI rejects that outright on the NEXT turn: "an assistant message with
+   * 'tool_calls' must be followed by tool messages responding to each
+   * 'tool_call_id'". So the conversation was not merely stuck on that request, it
+   * was finished. Every later message failed the same way, and the only escape
+   * was starting a new one, which loses it.
    *
-   * Collected up front because an answer arrives as a later message than the call it answers.
+   * WHY THIS IS A WALK AND NOT A SET. The obvious implementation gathers every
+   * `tool_call_id` that appears anywhere in the history and treats a call as
+   * answered if its id is in that set. It is wrong, and wrong in the way that
+   * produces the very error above: the set has no position, so a result that
+   * sits BEFORE the assistant message declaring the call marks it answered, the
+   * closing message is not written, and the assistant message goes to the
+   * provider with nothing after it. A run that was cut short mid-tool-loop and
+   * replayed does exactly that, which is why this arrived as a hard 400 on an
+   * ordinary follow-up rather than as something visible in the transcript.
    */
-  const answered = new Set(
-    input.messages
-      .filter((message) => message.role === "tool")
-      .map((message) => (message as { toolCallId?: string }).toolCallId)
-      .filter((id): id is string => Boolean(id)),
-  );
+  let pending: Array<{ id: string; name: string }> = [];
+
+  /*
+   * Answer whatever is still open, in the position the provider requires.
+   *
+   * Not cosmetic: a tool result has to follow the assistant message that made
+   * the call, so these are written here rather than collected for the end. A
+   * real answer arriving later in the history is matched and consumed in its own
+   * turn instead.
+   */
+  const closePending = () => {
+    for (const call of pending) {
+      messages.push(
+        new ToolMessage({
+          tool_call_id: call.id,
+          content: NO_ANSWER_CAME,
+          name: call.name,
+        }),
+      );
+    }
+    pending = [];
+  };
 
   for (const message of input.messages) {
     if (message.role === "user") {
+      // A person speaking ends the previous turn's calls: whatever they are
+      // still waiting for will never be answered now.
+      closePending();
       messages.push(
         new HumanMessage({ content: userContent(message.content) }),
       );
       continue;
     }
     if (message.role === "system" || message.role === "developer") {
+      closePending();
       messages.push(new SystemMessage(String(message.content ?? "")));
       continue;
     }
     if (message.role === "tool") {
-      // Tool results are appended so the model can continue from the completed call.
+      const id = (message as { toolCallId?: string }).toolCallId;
+      /*
+       * A result with nothing open to answer is dropped rather than written.
+       *
+       * Two shapes land here. A result whose call is missing altogether is an
+       * orphan from a truncated history, and a duplicate id is a replayed
+       * result. Neither can be placed, because a result that does not directly
+       * follow its assistant message is itself a rejection — so carrying it
+       * forward would trade one provider refusal for another.
+       */
+      const match = pending.findIndex((call) => call.id === id);
+      if (match === -1) continue;
+      const [call] = pending.splice(match, 1);
       messages.push(
         new ToolMessage({
-          tool_call_id: message.toolCallId,
+          tool_call_id: id as string,
           content: String(message.content ?? ""),
+          name: call?.name,
         }),
       );
       continue;
     }
     if (message.role === "assistant") {
+      // A second assistant turn cannot answer the first one's calls.
+      closePending();
+      const calls = message.toolCalls ?? [];
+      /*
+       * Each call's id, resolved ONCE and used for both the message written to
+       * the provider and the entry left open below.
+       *
+       * A call that arrives without an id cannot be closed by a matching result,
+       * because there is nothing to match, so it would reach the provider
+       * unanswered and take the whole run down. Naming it here means the closing
+       * message can answer it. It has to be the same name in both places: derived
+       * twice it is two names, and the message written to the model names a call
+       * that the closing message does not answer — the original error, rebuilt.
+       */
+      const identified = calls.map((call) => ({
+        id:
+          call.id ||
+          `unanswered_call_${messages.length}_${calls.indexOf(call)}`,
+        name: callDetails(call).name,
+        args: parseArguments(callDetails(call).arguments),
+      }));
       messages.push(
         new AIMessage({
           content: message.content ?? "",
-          tool_calls:
-            message.toolCalls?.map((call) => ({
-              id: call.id,
-              name: callDetails(call).name,
-              // LangChain wants parsed arguments where AG-UI carries the raw string. A call whose
-              // arguments did not parse is passed as empty rather than dropped: the model needs to
-              // see that it made the call, or it makes it again.
-              args: parseArguments(callDetails(call).arguments),
-            })) ?? [],
+          tool_calls: identified,
         }),
       );
-
-      /*
-       * Close any of its calls that nothing ever answered, immediately after it.
-       *
-       * Position is not cosmetic: a tool result has to follow the assistant message that made the
-       * call, so these go here rather than being appended at the end. A call answered later in the
-       * history is left alone and its real answer arrives in its own turn.
-       */
-      for (const call of message.toolCalls ?? []) {
-        if (call.id && !answered.has(call.id)) {
-          messages.push(
-            new ToolMessage({
-              tool_call_id: call.id,
-              content: NO_ANSWER_CAME,
-              name: callDetails(call).name,
-            }),
-          );
-        }
-      }
+      pending = identified.map(({ id, name }) => ({ id, name }));
     }
   }
+  // The history can end on an open call: a run that was cut off mid-loop.
+  closePending();
 
   /*
    * A run that carries no human turn is answered by OpenAI and refused by the strict providers.

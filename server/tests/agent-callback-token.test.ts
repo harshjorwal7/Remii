@@ -8,9 +8,9 @@ import {
   readRunAssertion,
   sameToken,
 } from "../src/agents/callback-token";
-import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import { PluginRefusedError, type PluginStore } from "../src/plugins/store";
+import { createTestApp } from "./support/app";
 import { testEnvironment } from "./support/environment";
 
 const KEY = "test-encryption-key-not-a-real-one";
@@ -383,42 +383,33 @@ describe("the tool-call route a callback token guards", () => {
   /**
    * The app with one thing in it: a store whose `callTool` throws what the test is about.
    *
-   * `pluginStore` is the fifteenth positional argument, so the gap is spelled rather than guessed —
-   * a miscount here would silently hand the store to `componentStore` and leave the route absent.
+   * The store is NAMED. It used to be the fifteenth positional argument, spelled as a run of
+   * `undefined` with a comment saying the count was deliberate — and a miscount there silently hands
+   * the store to `componentStore` and leaves the route unmounted, which is a 404 naming nothing. See
+   * `support/app.ts`.
    */
   function appWhoseToolThrows(thrown: unknown) {
-    return createApp(
+    return createTestApp({
       config,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      {
-        callTool: async () => {
-          throw thrown;
-        },
-      } as unknown as PluginStore,
-    );
+      parts: {
+        pluginStore: {
+          callTool: async () => {
+            throw thrown;
+          },
+        } as unknown as PluginStore,
+      },
+    });
   }
 
   /** What the model is handed, as the route builds it. */
   async function toolResult(thrown: unknown): Promise<string> {
     const response = await appWhoseToolThrows(thrown).request(
-      "http://openbot.local/api/agent-tools/call",
+      "http://remii.local/api/agent-tools/call",
       {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-openbot-agent-token": DEPLOYMENT_TOKEN,
+          "x-remii-agent-token": DEPLOYMENT_TOKEN,
         },
         body: JSON.stringify({
           name: "mcp__linear__LINEAR_CREATE_ISSUE",
@@ -586,27 +577,19 @@ describe("the tool-call route a callback token guards", () => {
 
   /** Both doors' answers to one call against the same store: the callback route's, and the in-process one's. */
   async function bothDoors(store: PluginStore) {
-    const response = await createApp(
+    /*
+     * The store is NAMED, not counted into place: `createApp` is a thirty-five-parameter positional
+     * function and every one after `config` is optional, so fourteen `undefined`s is a number that
+     * silently stops meaning what it meant. See `support/app.ts`.
+     */
+    const response = await createTestApp({
       config,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      store,
-    ).request("http://openbot.local/api/agent-tools/call", {
+      parts: { pluginStore: store },
+    }).request("http://remii.local/api/agent-tools/call", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-openbot-agent-token": DEPLOYMENT_TOKEN,
+        "x-remii-agent-token": DEPLOYMENT_TOKEN,
       },
       body: JSON.stringify({
         name: "mcp__linear__LINEAR_CREATE_ISSUE",

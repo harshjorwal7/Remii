@@ -3,6 +3,14 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { parse } from "yaml";
+import {
+  isMascotColorId,
+  isMascotShapeId,
+  MASCOT_COLOR_IDS,
+  MASCOT_SHAPE_IDS,
+  type MascotChoice,
+} from "../../shared/mascot-ids";
+import { mascotColumnValues } from "./agents/mascot";
 import { DEPLOYMENT_ROUTES } from "./computer/deployment-routes";
 import type { Database } from "./db/client";
 import {
@@ -12,9 +20,11 @@ import {
   channels as channelTable,
   deploymentPackages,
   pluginGrants,
+  skillRepos as skillRepoTable,
   skills as skillTable,
   skillTools,
 } from "./db/schema";
+import { parseRepoRef, type RepoSpec } from "./plugins/repo-index";
 
 const approvedThemeVariables = new Set([
   "--background",
@@ -162,6 +172,18 @@ export type TenantSkill = {
    * which is none of them.
    */
   tools: string[];
+  /**
+   * A public GitHub repository this skill is about, or null.
+   *
+   * The same field the API takes and the same rules, with `parseRepoRef` called on it here rather than
+   * being trusted — a package is a file on disk that a fork may edit, and a skill that boots pointing
+   * at nothing is a skill everybody is given and nothing works.
+   *
+   * A repository and nothing else, for the reason `repo-index.ts` gives: the content is public, so
+   * reading it adds no capability, which is the whole of what lets a skill be writable by anybody
+   * signed in.
+   */
+  repo: RepoSpec | null;
 };
 
 /**
@@ -178,6 +200,19 @@ type TenantAgent = {
   title: string;
   roleDescription: string;
   avatarSeed?: string;
+  /**
+   * The mascot a package's coworker wears, if the operator chose one.
+   *
+   * Partial, and for the same reason the columns are: an axis left out is filled from `avatarSeed`,
+   * so a package that only sets a colour still gets a variety of shapes. Undefined throughout is the
+   * common case and resolves the whole mascot from the seed.
+   *
+   * No expression, and `mascot_expression` in the YAML is ignored with a warning rather than refused.
+   * The key was real until migration 0070, so a package in the field still carries it, and refusing to
+   * load a working deployment over a field nobody can see in the product would be a worse failure than
+   * dropping it. The face is the agent's work now — see `app/src/mascot/ids.ts`.
+   */
+  mascot?: Partial<MascotChoice>;
   type: "built_in" | "remote_ag_ui" | "remote_mastra";
   configuration: Record<string, unknown>;
   /**
@@ -193,6 +228,15 @@ type TenantAgent = {
    * pairs them by hand. The pairing is the package's to state: it wrote both files.
    */
   skills: string[];
+  /**
+   * Whether this coworker is a shared template.
+   *
+   * Templates render in the marketplace grid and are meant to be duplicated,
+   * not edited in place. Set with `system_template: true` in the package;
+   * absent means false. A person's own coworkers are never templates, so the
+   * synchronizer only ever writes this onto ownerless package rows.
+   */
+  systemTemplate: boolean;
 };
 
 type TenantChannel = {
@@ -212,7 +256,7 @@ export type TenantPackage = {
   omittedAgentIds: string[];
   channels: TenantChannel[];
   model: {
-    provider: "openai" | "anthropic";
+    provider: "openai";
     credentialSecretRef: string;
     defaultModel: string;
   };
@@ -302,6 +346,83 @@ function requiredString(value: unknown, name: string): string {
   }
   return value;
 }
+
+/**
+ * A closed-vocabulary id from a tenant package, or undefined when the operator left it out.
+ *
+ * Throws rather than dropping, and the reason is the same as in the request parser: a package is
+ * hand-edited YAML, a typo in `mascot_shape` would otherwise load a deployment where every coworker
+ * silently wears the wrong shape, and the operator has no way to see that from the log line the load
+ * prints. Failing the load says exactly which key is wrong.
+ *
+ * Unlike `requiredString`, absent is fine and normal. A package that never mentions a mascot is the
+ * common case and must keep working, which it would not if absence were an error.
+ */
+function optionalMascotId<T>(
+  value: unknown,
+  name: string,
+  isId: (candidate: unknown) => candidate is T,
+): T | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isId(value)) {
+    throw new Error(
+      `${name} must be one of: ${VOCABULARY_BY_KEY[name]?.join(", ") ?? "(see shared/mascot-ids.ts)"}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * The mascot a package's coworker wears, from whatever axes the package declares.
+ *
+ * Always an object, though a usually empty one: `mascotShape` and `mascotColor` are written straight
+ * through to the columns, where an absent axis is SQL NULL and NULL means "the seed decides". A package
+ * that says nothing about the mascot therefore produces the same nulls as before rather than a
+ * partial choice that means something.
+ *
+ * `mascot_expression` is read only to be reported. It was a real axis until migration 0070, so a
+ * package in the field still carries it, and refusing to load a deployment that has been working for
+ * months over a field nobody can see in the product would be a worse failure than dropping it. The
+ * operator is told in the log instead, which is the difference between a key they can delete and a
+ * deployment that will not start.
+ */
+function mascotOf(agent: {
+  mascot_shape?: unknown;
+  mascot_color?: unknown;
+  mascot_expression?: unknown;
+}): Partial<MascotChoice> {
+  if (
+    agent.mascot_expression !== undefined &&
+    agent.mascot_expression !== null
+  ) {
+    console.warn(
+      JSON.stringify({
+        type: "package-mascot-expression-ignored",
+        value: String(agent.mascot_expression),
+        reason:
+          "a mascot's expression follows the agent's work state and is no longer chosen; remove agent.mascot_expression from the package",
+      }),
+    );
+  }
+  return {
+    shape: optionalMascotId(
+      agent.mascot_shape,
+      "agent.mascot_shape",
+      isMascotShapeId,
+    ),
+    color: optionalMascotId(
+      agent.mascot_color,
+      "agent.mascot_color",
+      isMascotColorId,
+    ),
+  };
+}
+
+/** The spellings an operator may use, keyed by the YAML field, so the error can list them. */
+const VOCABULARY_BY_KEY: Record<string, readonly string[]> = {
+  "agent.mascot_shape": MASCOT_SHAPE_IDS,
+  "agent.mascot_color": MASCOT_COLOR_IDS,
+};
 
 function stringArray(value: unknown, name: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
@@ -414,6 +535,7 @@ function parseAgents(
           agent.avatar_seed === undefined
             ? undefined
             : requiredString(agent.avatar_seed, "agent.avatar_seed"),
+        mascot: mascotOf(agent),
         type,
         configuration:
           type === "built_in"
@@ -443,6 +565,7 @@ function parseAgents(
           agent.skills === undefined || agent.skills === null
             ? []
             : stringArray(agent.skills, "agent.skills"),
+        systemTemplate: agent.system_template === true,
       },
     ];
   });
@@ -560,8 +683,8 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
     },
   );
   const model = asRecord(modelYaml.model, "model");
-  if (model.provider !== "openai" && model.provider !== "anthropic") {
-    throw new Error("model.provider must be openai or anthropic");
+  if (model.provider !== "openai") {
+    throw new Error("model.provider must be openai");
   }
   const sources = asList(knowledgeYaml.sources, "knowledge.yaml sources").map(
     (value) => {
@@ -634,12 +757,31 @@ function parseTenantSkills(value: unknown): TenantSkill[] {
             }
             return ref;
           });
+    /*
+     * Refused at load rather than discovered at boot. A package is edited by hand, so the address is as
+     * likely to be wrong as anything else in the file, and stopping here names the key — which the
+     * validation around it does for every other field.
+     */
+    let repo: RepoSpec | null = null;
+    if (skill.repo !== undefined && skill.repo !== null) {
+      if (typeof skill.repo !== "string") {
+        throw new Error("skill.repo must be a GitHub URL, or absent");
+      }
+      const parsed = parseRepoRef(skill.repo);
+      if (!parsed.ok) {
+        throw new Error(
+          `skill.repo "${skill.repo}" is not a repository that can be read: ${parsed.error}`,
+        );
+      }
+      repo = parsed.value;
+    }
     return {
       slug,
       title: requiredString(skill.title, "skill.title"),
       summary: requiredString(skill.summary, "skill.summary"),
       instructions: requiredString(skill.instructions, "skill.instructions"),
       tools,
+      repo,
     };
   });
 }
@@ -795,6 +937,15 @@ export async function synchronizeTenantPackage(
       throw new Error("Tenant package could not be synchronized");
     }
 
+    // Strict per-user SaaS sandbox: no "public" coworkers exist. Backfill any
+    // rows from before this rule so a upgraded deployment converges without a
+    // separate migration step. System templates stay reachable via the
+    // null-owner rule, not via visibility.
+    await transaction
+      .update(agentProfiles)
+      .set({ visibility: "private", updatedAt: new Date() })
+      .where(eq(agentProfiles.visibility, "public"));
+
     // Disable only explicitly unconfigured agents still owned by this package. Keep canonical
     // rows and conversation memberships: runtime tombstones preserve their readable history.
     // Normal seeding below clears deletedAt if an endpoint is configured again.
@@ -833,6 +984,7 @@ export async function synchronizeTenantPackage(
           type: agent.type,
           configuration: agent.configuration,
           packageId: deploymentPackage.id,
+          isSystemTemplate: agent.systemTemplate,
         })
         .onConflictDoUpdate({
           target: agentTable.id,
@@ -842,6 +994,7 @@ export async function synchronizeTenantPackage(
             type: agent.type,
             configuration: agent.configuration,
             packageId: deploymentPackage.id,
+            isSystemTemplate: agent.systemTemplate,
             updatedAt,
           },
         })
@@ -858,10 +1011,19 @@ export async function synchronizeTenantPackage(
         .values({
           agentId: canonicalAgent.id,
           ownerUserId: null,
+          isSystemTemplate: agent.systemTemplate,
           title: agent.title,
           roleDescription: agent.roleDescription,
           avatarSeed: agent.avatarSeed ?? canonicalAgent.id,
-          visibility: "public",
+          // A package that names no mascot writes three nulls, which resolves from `avatarSeed` — so
+          // a package and the client agree on what an undressed coworker looks like without either
+          // of them having to own the default.
+          ...mascotColumnValues(agent.mascot),
+          // Strict per-user SaaS sandbox: no "public" coworkers. System
+          // templates are definitions visible to everyone via the null-owner
+          // rule; each user still gets their own sandbox, workspace and
+          // connections. Stored as private so no "public" sharing exists.
+          visibility: "private",
           deletedAt: null,
           updatedAt,
         })
@@ -870,10 +1032,15 @@ export async function synchronizeTenantPackage(
           setWhere: isNull(agentProfiles.ownerUserId),
           set: {
             ownerUserId: null,
+            isSystemTemplate: agent.systemTemplate,
             title: agent.title,
             roleDescription: agent.roleDescription,
             avatarSeed: agent.avatarSeed ?? canonicalAgent.id,
-            visibility: "public",
+            // Replaces the row's mascot outright rather than leaving it, so an operator who removes
+            // `mascot_color` from a package gets the seeded colour back instead of a colour frozen
+            // at whatever the last load set.
+            ...mascotColumnValues(agent.mascot),
+            visibility: "private",
             deletedAt: null,
             updatedAt,
           },
@@ -1031,6 +1198,28 @@ export async function synchronizeTenantPackage(
             declaredBy: null,
           })),
         );
+      }
+
+      /*
+       * The repository, on the same terms as the tools above.
+       *
+       * Replaced wholesale rather than merged, and — the part worth stating — the cached index is NOT
+       * carried across. A redeploy happens on every boot, and a redeploy that preserved the index would
+       * mean a package could never move its skill to a different branch and have that take effect, since
+       * the old tree would be served for a day. So the pointer is rewritten and the index is dropped;
+       * the first run after a deploy rebuilds it, and `indexedAt` reads as never until it does.
+       */
+      await transaction
+        .delete(skillRepoTable)
+        .where(eq(skillRepoTable.skillId, seeded.id));
+      if (skill.repo) {
+        await transaction.insert(skillRepoTable).values({
+          skillId: seeded.id,
+          owner: skill.repo.owner,
+          repo: skill.repo.repo,
+          ref: skill.repo.ref,
+          path: skill.repo.path,
+        });
       }
 
       /*

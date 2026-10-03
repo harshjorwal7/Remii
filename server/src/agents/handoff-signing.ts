@@ -19,6 +19,9 @@ export function handoffDeliveryRunAssertion(
     runId,
     threadId: work.threadId,
     depth: work.depth,
+    // The work item's `runId` is the run that ASKED — this hop is the work it was asked to do, and
+    // the addressed Bot's own run id is minted fresh above. So this is the edge, not a repetition.
+    ...(work.runId ? { parentRunId: work.runId } : {}),
     ...(work.initiator ? { initiator: work.initiator } : {}),
   };
 }

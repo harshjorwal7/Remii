@@ -1,21 +1,40 @@
 import type { BaseEvent, Message, RunAgentInput } from "@ag-ui/client";
-import { AbstractAgent, HttpAgent } from "@ag-ui/client";
-import type { BuiltInAgentConfiguration } from "@copilotkit/runtime/v2";
-import {
-  BuiltInAgent,
-  CopilotKitIntelligence,
-  CopilotRuntime,
+import { AbstractAgent, EventType, HttpAgent } from "@ag-ui/client";
+import type {
+  AgentRunner,
+  BuiltInAgentConfiguration,
 } from "@copilotkit/runtime/v2";
+import { CopilotRuntime } from "@copilotkit/runtime/v2";
 import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
-import type { Observable } from "rxjs";
-import { defer, finalize, from, fromEvent, switchMap, takeUntil } from "rxjs";
+import type { Observable, OperatorFunction } from "rxjs";
+import {
+  concat,
+  defer,
+  EMPTY,
+  finalize,
+  from,
+  fromEvent,
+  of,
+  switchMap,
+  takeUntil,
+} from "rxjs";
 import { z } from "zod";
 import {
   COMPUTER_GUIDANCE,
+  COMPUTERLESS_GUIDANCE,
+  MOTIVE_GUIDANCE,
   PROVENANCE_GUIDANCE,
+  SOLE_PERSON_GUIDANCE,
 } from "../../shared/bot-prompt";
+import { botHoldsTheComputer } from "../../shared/remii";
+import { CONNECT_APP_TOOL } from "./agents/connect-app";
+import { DELEGATE_TOOL } from "./agents/handoff-tool";
 import { sanitizeSeededHistory } from "./agents/history-sanitize";
 import type { AgentActor } from "./agents/profile-types";
+import {
+  readDelegationOnly,
+  withoutSupervisorTools,
+} from "./agents/supervision";
 import type { AuditInitiator } from "./audit";
 import {
   attachmentIdsIn,
@@ -23,7 +42,12 @@ import {
   resolveAttachmentParts,
   type StoredAttachment,
 } from "./channels/attachment-parts";
-import type { AgentFetch, StallGuard } from "./channels/stall-guard";
+import {
+  type AgentFetch,
+  inWords,
+  MAX_CHANNEL_RUN_MS,
+  type StallGuard,
+} from "./channels/stall-guard";
 import type { DeploymentConfig } from "./config";
 import { desktopTelemetryProperties } from "./desktop-telemetry";
 import type { SelectableSkill, Selection } from "./plugins/selection";
@@ -34,19 +58,30 @@ import {
 } from "./plugins/selection";
 import type { GrantedTool } from "./plugins/tools";
 import { grantedToolGuidance } from "./plugins/tools";
+import { BOT_ADMIN_TOOL_NAMES } from "./remi/bot-admin";
+import {
+  COMPOSIO_TOOL_NAMES,
+  searchAndBatchToolsFor,
+} from "./remi/composio-tools";
+import { GOG_TOOL_NAMES } from "./remi/gog";
+import type { RemiInstance } from "./remi/instance";
+import { type RemiAfterRun, RemiLoopAgent } from "./remi/loop-agent";
+import type { RecallHooks } from "./remi/memory-router";
+import { REMI_TOOL_NAMES } from "./remi/tools";
+import type { ThreadLock, ThreadStore } from "./threads/local";
 
 /**
- * The CopilotKit runtime, always in Intelligence mode.
+ * The CopilotKit runtime, in local SSE mode.
  *
- * Package-declared built-in Bots run as CopilotKit `BuiltInAgent` instances. External Bots are
- * reached over AG-UI as `HttpAgent` instances, so anything that speaks the protocol remains a Bot
- * with no framework adapter here: LangGraph, Pydantic-AI, CrewAI, Mastra, ADK, or a hand-written
- * server.
+ * Package-declared built-in Bots run as Remi loop agents (see `remi/loop-agent.ts`), the ported
+ * Remi ReAct loop speaking AG-UI events. External Bots are reached over AG-UI as `HttpAgent`
+ * instances, so anything that speaks the protocol remains a Bot with no framework adapter here:
+ * LangGraph, Pydantic-AI, CrewAI, Mastra, ADK, or a hand-written server.
  *
- * There is no SSE branch. Intelligence is a requirement of the product, not a tier: it owns
- * durable threads, memory and learning, and a deployment without it silently forgets every
- * conversation. config.ts refuses to boot without the full contract, so by the time this runs the
- * settings are present and this file has one mode.
+ * Threads, messages, run execution and locks all live in this deployment's
+ * own Postgres (see threads/local): no cloud calls, nothing to provision, no
+ * key. The AG-UI/CopilotKit protocol to the browser is unchanged, so the app
+ * keeps working exactly as before.
  */
 
 /** Resolve the signed-in person for a request. Threads and memory are scoped to whoever this returns. */
@@ -59,6 +94,16 @@ type RegisteredBuiltInAgent = {
   name: string;
   type: "built_in";
   systemPrompt: string;
+  /**
+   * Whether this Bot is a supervisor: it organises other Bots and does not do
+   * the work itself.
+   *
+   * Carried here rather than looked up per run so that everything which has to
+   * agree about it — the tools it is offered, the tools the browser may hand
+   * it, and what its prompt is told exists — reads the same value. Where it is
+   * false or absent the Bot is a worker and behaves exactly as before.
+   */
+  delegationOnly?: boolean;
 };
 
 type RegisteredRemoteAgentFacts = {
@@ -150,26 +195,29 @@ export function standingRoleMessage(
 }
 
 export type RuntimeModel = {
-  provider: "openai" | "anthropic";
+  provider: "openai";
   defaultModel: string;
 };
 
 /** Optional desktop environment values may be present but blank; SDKs treat them as URLs. */
+/**
+ * Trim the one base URL this deployment dials, and drop it when it is blank.
+ *
+ * `OPENAI_BASE_URL` only. The Anthropic half of this function is gone: OpenAI is the only provider,
+ * so there is one endpoint to point somewhere and no `/messages` selector shape to match a version
+ * against. `ANTHROPIC_BASE_URL` is left exactly as it is found — an env file written for a deployment
+ * that had one still boots, and nothing reads it.
+ *
+ * The `else if (key === "ANTHROPIC_BASE_URL")` branch this replaces was unreachable: the loop named
+ * one key, so the branch could never run and the version-segment rule inside it was dead. Keeping
+ * it would have left the impression that a second base URL is still normalized.
+ */
 export function normalizeModelBaseUrls(
   environment: Record<string, string | undefined> = process.env,
 ): void {
-  for (const key of ["OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"]) {
-    const value = environment[key]?.trim();
-    if (!value) {
-      delete environment[key];
-    } else if (key === "ANTHROPIC_BASE_URL") {
-      // The SDK appends only /messages; match the selector's versioned-base contract.
-      const base = value.replace(/\/+$/, "");
-      environment[key] = /\/v\d+$/.test(base) ? base : `${base}/v1`;
-    } else {
-      environment[key] = value;
-    }
-  }
+  const value = environment.OPENAI_BASE_URL?.trim();
+  if (!value) delete environment.OPENAI_BASE_URL;
+  else environment.OPENAI_BASE_URL = value;
 }
 
 export function runtimeModelForEnvironment(
@@ -177,25 +225,21 @@ export function runtimeModelForEnvironment(
   environment: Record<string, string | undefined> = process.env,
 ): RuntimeModel {
   const selectedModel = environment.BOT_MODEL?.trim();
-  const selectedProvider = environment.BOT_PROVIDER?.trim().toLowerCase();
-  // The desktop writes an empty provider when switching back to OpenAI. An absent
-  // choice leaves the tenant package authoritative.
-  const provider =
-    selectedProvider === "anthropic"
-      ? "anthropic"
-      : selectedProvider === "openai" || selectedProvider === ""
-        ? "openai"
-        : packageModel.provider;
+  // OpenAI is the only provider, so there is nothing to select: the package stays
+  // authoritative and BOT_PROVIDER, which used to choose a vendor, no longer decides
+  // anything. A tenant package still carrying `provider: anthropic` lands on OpenAI
+  // rather than refusing to boot, because a stale package field is not a reason to
+  // take the whole deployment down.
+  const provider = "openai";
+  // Not `packageModel.defaultModel` unconditionally: a stale Anthropic package carries
+  // `claude-sonnet-4-5` as its model name, and pairing that with provider "openai" would
+  // send a Claude model id to an OpenAI-compatible endpoint. An unrecognised package
+  // provider therefore falls back to the known OpenAI default.
   const defaultModel =
-    provider === packageModel.provider
+    packageModel.provider === "openai"
       ? packageModel.defaultModel
-      : provider === "anthropic"
-        ? "claude-sonnet-4-5"
-        : "gpt-5.6-terra";
-  const selectedModelApplies =
-    provider === "anthropic" ||
-    ((!selectedProvider || selectedProvider === "openai") &&
-      !!environment.OPENAI_BASE_URL?.trim());
+      : "gpt-5.6-terra";
+  const selectedModelApplies = !!environment.OPENAI_BASE_URL?.trim();
   return {
     provider,
     defaultModel:
@@ -208,6 +252,8 @@ type RuntimeAgentRow = {
   name: string;
   type: "built_in" | "remote_ag_ui" | "remote_mastra";
   configuration: unknown;
+  /** Optional so a caller that has no reason to read the supervisor flag need not. */
+  override?: unknown;
   title: string;
   roleDescription: string;
 };
@@ -229,6 +275,9 @@ export function registeredAgentFromRow(
           name: row.name,
           type: "built_in",
           systemPrompt: trimmedSystemPrompt,
+          // Read once, here, so the tool list, the browser's hand-off and the
+          // prompt are all decided from the same value. See supervision.ts.
+          delegationOnly: readDelegationOnly(row.override),
         }
       : null;
   }
@@ -275,7 +324,7 @@ function isHttpUrl(value: string) {
 /**
  * What the person asking has said they want, in every channel, from every coworker.
  *
- * The OpenBot equivalent of a CLAUDE.md, and the third instruction carrier beside the two that
+ * The Remii equivalent of a CLAUDE.md, and the third instruction carrier beside the two that
  * already existed. A role is the coworker's and reads the same to everybody who talks to it; a skill
  * is pulled in for one task. This is the person's, and it is true of every task they ever ask for —
  * how they want to be written to, what their company is called, what it is not to be called.
@@ -349,44 +398,21 @@ export function builtInAgentConfiguration(
       // biome-ignore lint/correctness/useYield: this agent must fail when iteration starts.
       factory: async function* () {
         throw new Error(
-          `Model credential is not configured for ${agent.name}. Add the package credential or set ${model.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"}.`,
+          `Model credential is not configured for ${agent.name}. Add the package credential or set ${"OPENAI_API_KEY"}.`,
         );
       },
     };
   }
 
-  const standing = standingInstructionsGuidance(standingInstructions);
-
   return {
     model: `${model.provider}/${model.defaultModel}`,
-    /*
-     * The package's role, then the person's own standing instructions, then what this Bot actually
-     * holds, then the computer.
-     *
-     * The grants go BEFORE the computer prose on purpose. That prose is long and emphatic about the
-     * browser and mentions connectors nowhere, so a Bot that read it last reached for the browser
-     * even when it held a tool for the exact system being asked about.
-     *
-     * The person's instructions go straight after the role and before all of it, because they are
-     * the other half of the same question — who you are and who you are working for — and because
-     * their precedence sentence only means anything next to the role it defers to.
-     */
-    prompt: [
-      agent.systemPrompt,
-      ...(standing ? [standing] : []),
-      /*
-       * Unconditional, unlike the two below it.
-       *
-       * Those describe things a deployment may or may not have. This describes how to answer at all,
-       * and a Bot with no tools and no computer needs it most: it has nothing to read, so everything
-       * it says comes from its own knowledge, and saying so is the only honest move available.
-       */
-      PROVENANCE_GUIDANCE,
-      ...(grantedToolGuidance(tools, connectedVendors)
-        ? [grantedToolGuidance(tools, connectedVendors)]
-        : []),
-      ...(computerGuidance ? [computerGuidance] : []),
-    ].join("\n\n"),
+    prompt: builtInAgentPrompt(
+      agent,
+      tools,
+      computerGuidance,
+      connectedVendors,
+      standingInstructions,
+    ),
     apiKey,
     /*
      * A run stops after one step unless told otherwise, which for a Bot with tools means it calls
@@ -402,12 +428,81 @@ export function builtInAgentConfiguration(
 }
 
 /**
+ * The system prompt a built-in Bot runs on, composed from the same carriers either loop uses.
+ *
+ * Extracted from `builtInAgentConfiguration` when the Remi loop replaced the CopilotKit one:
+ * the prompt outlives the runtime, and both the old configuration (kept for tests) and the
+ * Remi loop agent read it from here so they can never disagree about what a Bot is told.
+ *
+ * The order is the whole of it. The package's role, then the person's own standing
+ * instructions, then what this Bot actually holds, then the computer: the grants go BEFORE
+ * the computer prose on purpose, because that prose is long and emphatic about the browser
+ * and mentions connectors nowhere, so a Bot that read it last reached for the browser even
+ * when it held a tool for the exact system being asked about. The person's instructions go
+ * straight after the role and before all of it, because they are the other half of the same
+ * question — who you are and who you are working for — and because their precedence
+ * sentence only means anything next to the role it defers to.
+ */
+export function builtInAgentPrompt(
+  agent: RegisteredBuiltInAgent,
+  tools: GrantedTool[] = [],
+  computerGuidance?: string,
+  connectedVendors: readonly string[] = [],
+  standingInstructions?: string | null,
+): string {
+  const standing = standingInstructionsGuidance(standingInstructions);
+  /*
+   * Who gets told about the computer, decided here rather than at each call site.
+   *
+   * One paragraph was going to every Bot, and it described hands: a mouse, a keyboard, a screen. So a
+   * person with five coworkers had five Bots each believing it owned the desktop, each reaching for a
+   * screen that only one of them has, and each able to start the one machine — which is also how a
+   * flat monthly price ends up depending on how many Bots somebody created.
+   *
+   * There is one computer per person and Remii holds it. A Bot without it is told that plainly, and
+   * told who to ask, because a Bot merely not mentioning a screen invents a reason for the absence —
+   * and the reason it invents is a permission somebody is withholding, which on this deployment does
+   * not exist. Told the truth it asks Remii, and `message_bot` carries the answer back.
+   */
+  const guidance = botHoldsTheComputer(agent.id)
+    ? computerGuidance
+    : COMPUTERLESS_GUIDANCE;
+  return [
+    agent.systemPrompt,
+    ...(standing ? [standing] : []),
+    /*
+     * Unconditional, unlike the two below it.
+     *
+     * Those describe things a deployment may or may not have. This describes how to answer at all,
+     * and a Bot with no tools and no computer needs it most: it has nothing to read, so everything
+     * it says comes from its own knowledge, and saying so is the only honest move available.
+     */
+    PROVENANCE_GUIDANCE,
+    MOTIVE_GUIDANCE,
+    /*
+     * Who they are talking to, ahead of everything a deployment may or may not have — including the
+     * two paragraphs above, which describe how to answer and not to whom. A Bot asked for something
+     * this deployment cannot do is the Bot most likely to need this, and it is the Bot that reached
+     * for an administrator who does not exist. See `SOLE_PERSON_GUIDANCE`.
+     */
+    SOLE_PERSON_GUIDANCE,
+    ...(grantedToolGuidance(tools, connectedVendors)
+      ? [grantedToolGuidance(tools, connectedVendors)]
+      : []),
+    ...(guidance ? [guidance] : []),
+  ].join("\n\n");
+}
+
+/**
  * How many turns of the tool loop one run may take.
  *
- * Enough for a Bot to search, read what came back, search again on a better term, and answer.
- * Beyond that a model is not making progress, and every extra step is somebody's money.
+ * Enough for a Bot to work a real task end to end: search, read, search again on a better
+ * term, hand part of the work to a coworker, check what came back, and answer. A chief of
+ * staff that stops after a handful of steps is a Bot that reports "I started" instead of
+ * finishing, and every extra step here is bounded by the per-turn metering anyway. Beyond
+ * this a model is not making progress, and every further step is somebody's money.
  */
-const TOOL_STEPS = 8;
+const TOOL_STEPS = 25;
 
 /**
  * Build the built-in and remote AG-UI agent map the runtime serves.
@@ -464,6 +559,36 @@ export async function buildAgents(
    * `loadAttachment` for the positional reason it gives. Absent means nothing is recorded.
    */
   markAttachmentsSent?: MarkAttachmentsSent,
+  /**
+   * Wrap each built Bot with metering and loop breaking. Appended last for the
+   * positional reason above. Absent means no enforcement.
+   */
+  enforceTurn?: EnforceTurn,
+  /**
+   * After a finished built-in run, with everything the turn said and spent. Appended last for
+   * the positional reason above. Absent means no post-run work.
+   */
+  onAfterRun?: (info: RemiAfterRun) => void,
+  /**
+   * Pre-turn memory recall for this person's runs, bound to them upstream
+   * beside `loadTools`. Absent means the model holds `memory_search` itself,
+   * which is what every deployment did before recall existed.
+   */
+  memoryHooks?: RecallHooks,
+  /**
+   * Told how a built-in run ended. See `RemiLoopConfig.onRunOutcome`, which is where it is read.
+   *
+   * A collaborator rather than a field on the agent, because there is no other place a run's ending
+   * becomes visible: the loop reports it, the settlement cannot see it, and the thread lock is told
+   * only that something ended.
+   */
+  onRunEnded?: (outcome: {
+    botId: string;
+    runId: string;
+    threadId: string;
+    outcome: "done" | "stopped" | "failed";
+    reason?: string;
+  }) => void,
 ): Promise<Record<string, AbstractAgent>> {
   let vendors: readonly string[] = [];
   try {
@@ -502,9 +627,8 @@ export async function buildAgents(
   }
   return Object.fromEntries(
     await Promise.all(
-      agents.map(async (agent) => [
-        agent.id,
-        await buildAgent(
+      agents.map(async (agent) => {
+        const built = await buildAgent(
           agent,
           model,
           apiKey,
@@ -520,8 +644,12 @@ export async function buildAgents(
           initiator,
           loadAttachment,
           markAttachmentsSent,
-        ),
-      ]),
+          onAfterRun,
+          memoryHooks,
+          onRunEnded,
+        );
+        return [agent.id, enforceTurn?.(agent.id, built) ?? built] as const;
+      }),
     ),
   );
 }
@@ -656,7 +784,7 @@ export type MarkAttachmentsSent = (
  * the same thread. The concurrency given up is one round trip per message that carries a file,
  * which is very few messages in very few threads.
  */
-async function inlineAttachments(
+export async function inlineAttachments(
   messages: Message[],
   load: LoadAttachment,
   /**
@@ -778,10 +906,47 @@ async function buildAgent(
   loadAttachment?: LoadAttachment,
   /** How this run records that those files were sent. See {@link buildAgents}. */
   markAttachmentsSent?: MarkAttachmentsSent,
+  /**
+   * After a finished built-in run, with everything the turn said and spent. Appended last for
+   * the positional reason above. Absent means no post-run work: memory extraction lives here.
+   */
+  onAfterRun?: (info: RemiAfterRun) => void,
+  /**
+   * Pre-turn memory recall for this person's runs, bound upstream beside
+   * `loadTools`. Appended last. Absent means the model holds `memory_search`
+   * itself.
+   */
+  memoryHooks?: RecallHooks,
+  /**
+   * Told how a built-in run ended. See `RemiLoopConfig.onRunOutcome`, which is where it is read.
+   *
+   * A collaborator rather than a field on the agent, because there is no other place a run's ending
+   * becomes visible: the loop reports it, the settlement cannot see it, and the thread lock is told
+   * only that something ended.
+   */
+  onRunEnded?: (outcome: {
+    botId: string;
+    runId: string;
+    threadId: string;
+    outcome: "done" | "stopped" | "failed";
+    reason?: string;
+  }) => void,
 ): Promise<AbstractAgent> {
   if (agent.type === "unavailable") {
     return new UnavailableAgent(agent);
   }
+
+  /*
+   * Whether this Bot is a supervisor, resolved once.
+   *
+   * Read off the narrowed union rather than off `agent.delegationOnly`, which
+   * only the built-in variant carries. Computed here because three decisions
+   * below have to agree about it — the tool list, the tools a browser may hand
+   * it, and whether its prompt is told a computer exists — and a supervisor
+   * whose prompt advertises a browser it cannot call burns turns discovering
+   * that, every run.
+   */
+  const supervisor = agent.type === "built_in" && agent.delegationOnly === true;
 
   const granted = await loadTools(agent.id);
 
@@ -885,28 +1050,90 @@ async function buildAgent(
       narrowing ? offeredFor : undefined,
       loadAttachment,
       markAttachmentsSent,
+      handoff,
     );
   }
 
   /*
-   * A built-in Bot takes its tools in its configuration, so narrowing means building it again once
-   * the message is known. The guidance it is given is generated from the tools passed here, which is
-   * what keeps a narrowed run from being told it holds something it was not offered.
+   * A built-in Bot takes its tools in its loop configuration, so narrowing means building it
+   * again once the message is known. The guidance it is given is generated from the tools passed
+   * here, which is what keeps a narrowed run from being told it holds something it was not
+   * offered.
+   *
+   * Search and batch join the set they search: they rank and run the very tools handed here,
+   * narrowed and handed-on ones included, with no second grants read.
    */
-  const withTools = (tools: GrantedTool[]) =>
-    new BuiltInAgentWithSaneHistory(
-      builtInAgentConfiguration(
-        agent,
-        model,
+  const withTools = (tools: GrantedTool[]) => {
+    /*
+     * Gate two of three: the capabilities a supervisor is not given.
+     *
+     * This is the seam that catches what the grants read cannot, because the
+     * Google CLI tools and web search are not granted to a Bot at all — they
+     * are built for whichever Bot is running and arrive down the handoff door
+     * beside the delegation tools. Filtering here covers both, and covers the
+     * per-run rebuild below as well as the first build, because both go through
+     * this function.
+     *
+     * Search and batch go with them, which is a naming problem as much as a
+     * capability one: both are Composio's words for "the app tools this Bot
+     * holds", and a supervisor holding none would be offered a tool that
+     * searches for tools it does not have.
+     */
+    const held = supervisor ? withoutSupervisorTools(tools) : tools;
+    const full = supervisor ? held : [...held, ...searchAndBatchToolsFor(held)];
+    return new RemiLoopAgent(
+      {
+        botId: agent.id,
+        ...(memoryHooks
+          ? {
+              recallBeforeRun: (input) => memoryHooks.recall(agent.id, input),
+              recordCited: (memoryIds) =>
+                memoryHooks.recordCited(agent.id, memoryIds),
+            }
+          : {}),
+        systemPrompt: builtInAgentPrompt(
+          agent,
+          full,
+          // Undefined for a supervisor, not merely unused here: its prompt must
+          // not describe a computer it is not allowed to drive.
+          supervisor ? undefined : computerGuidance,
+          connectedVendors,
+          standingInstructions,
+        ),
+        // Gate three, and the only one a browser could otherwise walk around.
+        // See the loop's own note on it.
+        acceptFrontendTools: !supervisor,
+        /*
+         * How this run ended, and whether it ended well.
+         *
+         * Given to the loop rather than watched for from outside, because the loop is the only place
+         * that knows: a run can finish, be stopped, or break, and each ends on a different path
+         * inside it. Reported as `stopped` and `failed` rather than left to the settlement, because a
+         * settlement cannot tell them apart — both are just "the run is over" — and a person who
+         * stopped a run and a run that broke are not the same event.
+         */
+        onRunOutcome: (outcome) => {
+          try {
+            onRunEnded?.({ botId: agent.id, ...outcome });
+          } catch {
+            // Housekeeping must never fail the turn it follows.
+          }
+        },
+        tools: full,
+        maxDurationMs: MAX_CHANNEL_RUN_MS,
+        model: { provider: model.provider, model: model.defaultModel },
         apiKey,
-        tools,
-        computerGuidance,
-        connectedVendors,
-        standingInstructions,
-      ),
+        ...(apiKey
+          ? {}
+          : {
+              missingKeyMessage: `Model credential is not configured for ${agent.name}. Add the package credential or set ${"OPENAI_API_KEY"}.`,
+            }),
+        ...(onAfterRun ? { onAfterRun } : {}),
+      },
       loadAttachment,
       markAttachmentsSent,
     );
+  };
 
   const whole = withTools(granted);
   if (!narrowing && !handoff) return whole;
@@ -1154,6 +1381,16 @@ function remoteAgentWithStandingRole(
   loadAttachment?: LoadAttachment,
   /** How this run records that those files were sent. See {@link buildAgents}. */
   markAttachmentsSent?: MarkAttachmentsSent,
+  /**
+   * How a run gets deployment tools that execute through the signed callback (connect_app,
+   * Remi memory/todos/schedules). Absent means remote Bots are offered grants alone.
+   *
+   * Deliberately NOT the whole per-run list: `message_bot` and `ask_person` execute in this
+   * process against grants and caps, and the callback path cannot run them — describing one
+   * would hand the endpoint a tool it can announce and never invoke. Only names the callback
+   * in app.ts can actually execute are appended; see CALLABLE_DEPLOYMENT_TOOLS.
+   */
+  handoff?: HandoffForRun,
 ) {
   /*
    * What this Bot holds, as a second standing message.
@@ -1193,7 +1430,7 @@ function remoteAgentWithStandingRole(
     const deploymentTools = tools.map((tool) => tool.name);
     const forwardedProps = {
       ...(isPlainObject(input.forwardedProps) ? input.forwardedProps : {}),
-      openbotBotId: agent.id,
+      remiiBotId: agent.id,
       /*
        * Which of those tools this deployment runs, as opposed to the surface.
        *
@@ -1203,7 +1440,7 @@ function remoteAgentWithStandingRole(
        * could not, and then apologised to the person for not showing the chart that was on screen
        * in front of them. Only this side knows which is which, so only this side can say.
        */
-      openbotDeploymentTools: deploymentTools,
+      remiiDeploymentTools: deploymentTools,
       /*
        * This deployment's own statement of what this run is.
        *
@@ -1214,7 +1451,7 @@ function remoteAgentWithStandingRole(
        * one shared secret.
        */
       ...(runAssertion
-        ? { openbotRun: runAssertion }
+        ? { remiiRun: runAssertion }
         : /*
            * Absent means this deployment cannot sign, so the agent is given nothing to hand back
            * and its tool calls will be refused. That is the right direction to fail: a Bot that
@@ -1292,7 +1529,7 @@ function remoteAgentWithStandingRole(
             agent.type === "remote_mastra"
               ? [
                   ...callerMastraContext(input.context ?? []),
-                  ...mastraOpenBotContext({
+                  ...mastraRemiiContext({
                     standingMessage: agent.standingMessage,
                     holdingsMessage,
                     botId: agent.id,
@@ -1316,8 +1553,42 @@ function remoteAgentWithStandingRole(
   return new CloningRemoteAgent(remote, (target) => {
     target.use((input, next) =>
       defer(() =>
-        from(narrow ? narrow(input) : Promise.resolve(tools)).pipe(
-          switchMap((offered) => runWith(offered, input, next)),
+        from(
+          (async () => {
+            const offered = narrow ? await narrow(input) : tools;
+            /*
+             * Deployment tools the callback can execute, appended for remote Bots too.
+             * Filtered to names app.ts actually runs (connect_app, delegate_bot, bot-admin,
+             * composio on-demand, local gog and Remi mind tools): the rest of the per-run list executes in
+             * this process and would be dead names at an endpoint. failures here must not fail
+             * the run — a deployment-tool read that throws leaves the Bot with its grants, the
+             * way a failed narrowing does.
+             */
+            let callable: GrantedTool[] = [];
+            try {
+              const passing = (await handoff?.(agent.id, input)) ?? [];
+              callable = passing.filter(
+                (tool) =>
+                  tool.name === CONNECT_APP_TOOL ||
+                  tool.name === DELEGATE_TOOL ||
+                  (BOT_ADMIN_TOOL_NAMES as readonly string[]).includes(
+                    tool.name,
+                  ) ||
+                  (COMPOSIO_TOOL_NAMES as readonly string[]).includes(
+                    tool.name,
+                  ) ||
+                  (GOG_TOOL_NAMES as readonly string[]).includes(tool.name) ||
+                  (REMI_TOOL_NAMES as readonly string[]).includes(tool.name),
+              );
+            } catch {
+              callable = [];
+            }
+            return { offered, callable };
+          })(),
+        ).pipe(
+          switchMap(({ offered, callable }) =>
+            runWith([...offered, ...callable], input, next),
+          ),
         ),
       ),
     );
@@ -1325,11 +1596,11 @@ function remoteAgentWithStandingRole(
 }
 
 const RESERVED_MASTRA_CONTEXT_DESCRIPTIONS = new Set([
-  "OpenBot standing role",
-  "OpenBot granted tools guidance",
-  "OpenBot Bot id",
-  "OpenBot deployment tools",
-  "OpenBot signed run assertion",
+  "Remii standing role",
+  "Remii granted tools guidance",
+  "Remii Bot id",
+  "Remii deployment tools",
+  "Remii signed run assertion",
 ]);
 
 function callerMastraContext(context: AgentContext[]): AgentContext[] {
@@ -1338,7 +1609,7 @@ function callerMastraContext(context: AgentContext[]): AgentContext[] {
   );
 }
 
-function mastraOpenBotContext({
+function mastraRemiiContext({
   standingMessage,
   holdingsMessage,
   botId,
@@ -1353,29 +1624,29 @@ function mastraOpenBotContext({
 }): AgentContext[] {
   return [
     {
-      description: "OpenBot standing role",
+      description: "Remii standing role",
       value: standingMessage.content,
     },
     ...(holdingsMessage
       ? [
           {
-            description: "OpenBot granted tools guidance",
+            description: "Remii granted tools guidance",
             value: holdingsMessage.content,
           },
         ]
       : []),
     {
-      description: "OpenBot Bot id",
+      description: "Remii Bot id",
       value: botId,
     },
     {
-      description: "OpenBot deployment tools",
+      description: "Remii deployment tools",
       value: JSON.stringify(deploymentTools),
     },
     ...(runAssertion
       ? [
           {
-            description: "OpenBot signed run assertion",
+            description: "Remii signed run assertion",
             value: runAssertion,
           },
         ]
@@ -1389,7 +1660,7 @@ class CloningRemoteAgent extends AbstractAgent {
 
   constructor(
     remote: AbstractAgent,
-    private readonly attachOpenBotMiddleware: (target: AbstractAgent) => void,
+    private readonly attachRemiiMiddleware: (target: AbstractAgent) => void,
   ) {
     super({
       agentId: remote.agentId,
@@ -1403,7 +1674,7 @@ class CloningRemoteAgent extends AbstractAgent {
     if (this.remote.headers) {
       this.headers = { ...this.remote.headers };
     }
-    this.attachOpenBotMiddleware(this);
+    this.attachRemiiMiddleware(this);
   }
 
   run(input: RunAgentInput): Observable<BaseEvent> {
@@ -1426,7 +1697,7 @@ class CloningRemoteAgent extends AbstractAgent {
     const clonedRemote = this.remote.clone() as AbstractAgent;
     const clone = new CloningRemoteAgent(
       clonedRemote,
-      this.attachOpenBotMiddleware,
+      this.attachRemiiMiddleware,
     );
     if (this.headers) {
       clone.headers = { ...this.headers };
@@ -1446,103 +1717,16 @@ class CloningRemoteAgent extends AbstractAgent {
  * to answer it, and every retry sent it straight back up as `input.messages`. The conversation was
  * finished until the person worked out for themselves to start another one.
  *
- * The guard has to be on this side of `run`. `BuiltInAgent.run` converts `input.messages` itself,
- * with no seam in between, so wrapping the agent is the only place left to stand. The reasoning for
- * why a dangling call is DROPPED rather than repaired, and why ids are never changed, is in
- * `agents/history-sanitize.ts`, where the routines path found the same failure first.
+ * The guard lives in `agents/history-sanitize.ts`, which the Remi loop applies to every run
+ * before converting history: a dangling call is dropped (or answered from `input.resume`)
+ * rather than replayed at a provider. The routines path found the same failure first, which is
+ * why the filter lives beside both turn paths instead of inside either of them.
  *
- * A RESUMED CALL IS NOT A DANGLE. `run` appends a tool result for each `input.resume` entry by
- * `interruptId` AFTER converting the messages, so a call that a resume is about to answer must
- * survive this pass or the appended result lands on nothing.
+ * (The CopilotKit `BuiltInAgent` wrapper that used to stand here was removed when the Remi loop
+ * replaced it. The history behind this comment is kept because the failure it describes is
+ * about stored conversations, not about any one runtime, and the next runtime would meet it
+ * the same way.)
  */
-class BuiltInAgentWithSaneHistory extends BuiltInAgent {
-  /**
-   * The configuration, held a second time because the base class keeps its own copy private and
-   * {@link clone} has to build another one of THIS class rather than of the base.
-   */
-  private readonly configuration: BuiltInAgentConfiguration;
-  /**
-   * How this Bot's attached files are inlined, or absent to leave them alone.
-   *
-   * Held for the same reason {@link configuration} is: {@link clone} builds another one of THIS
-   * class and everything the run depends on has to survive that.
-   */
-  private readonly loadAttachment: LoadAttachment | undefined;
-  /**
-   * How this Bot records that the files on the message it is answering were sent, or absent to
-   * record nothing. Held for the reason {@link loadAttachment} is: {@link clone} builds another one
-   * of THIS class, and a seam lost in a clone is a seam that never runs.
-   */
-  private readonly markAttachmentsSent: MarkAttachmentsSent | undefined;
-
-  constructor(
-    configuration: BuiltInAgentConfiguration,
-    loadAttachment?: LoadAttachment,
-    markAttachmentsSent?: MarkAttachmentsSent,
-  ) {
-    super(configuration);
-    this.configuration = configuration;
-    this.loadAttachment = loadAttachment;
-    this.markAttachmentsSent = markAttachmentsSent;
-  }
-
-  run(input: RunAgentInput): Observable<BaseEvent> {
-    const answeredByResume = new Set(
-      (input.resume ?? []).map((entry) => entry.interruptId),
-    );
-    const history = sanitizeSeededHistory(input.messages, answeredByResume);
-    const load = this.loadAttachment;
-    /*
-     * ALONGSIDE THE GUARD ABOVE, NOT INSTEAD OF IT. One drops a conversation the model provider is
-     * going to refuse; this replaces the stored reference a person's attachment arrives as with the
-     * bytes themselves, because `BuiltInAgent.run` converts `input.messages` with no seam in
-     * between and a `/api/attachments/<id>` URL is not something a model provider will go and fetch.
-     *
-     * Nothing to load means nothing to inline, and the run goes up exactly as it did before any of
-     * this existed.
-     */
-    if (!load) return super.run({ ...input, messages: history });
-    /*
-     * Deferred, because `run` has to answer with a stream straight away and reading the bytes is a
-     * database round trip. `defer` puts that read on the subscription, which is where the run
-     * actually begins, so nothing is fetched until somebody is listening.
-     */
-    return defer(() =>
-      from(
-        inlineAttachments(
-          history,
-          load,
-          // As above: the run's own conversation, not the actor's channels at large.
-          input.threadId,
-          this.markAttachmentsSent,
-        ),
-      ).pipe(switchMap((messages) => super.run({ ...input, messages }))),
-    );
-  }
-
-  /**
-   * Carried by hand, for the same reason {@link RunBuiltAgent.clone} is.
-   *
-   * The runtime clones an agent before every run, and the base class's clone hard-codes
-   * `new BuiltInAgent(this.config)`: inherited unchanged, the very first message anybody sends
-   * would go through an agent that does none of the above. The middleware list is copied because
-   * the base clone copies it, and it is reached through a cast because `AbstractAgent` declares it
-   * private. Nothing registers middleware on a built-in Bot today, and this is here so that the day
-   * something does, it is not lost in a clone.
-   */
-  clone(): BuiltInAgentWithSaneHistory {
-    const cloned = new BuiltInAgentWithSaneHistory(
-      this.configuration,
-      this.loadAttachment,
-      this.markAttachmentsSent,
-    );
-    type WithMiddlewares = { middlewares: unknown[] };
-    (cloned as unknown as WithMiddlewares).middlewares = [
-      ...(this as unknown as WithMiddlewares).middlewares,
-    ];
-    return cloned;
-  }
-}
 
 /**
  * An agent whose tools are decided when the run starts, because that is the first moment anybody
@@ -1559,6 +1743,38 @@ class BuiltInAgentWithSaneHistory extends BuiltInAgent {
  * The deferral is per subscription, so a retried run reselects rather than reusing a decision made
  * for a message that is no longer the last one.
  */
+/**
+ * Append one event after the stream settles, when a deadline — and not a person — ended it.
+ *
+ * `RunBuiltAgent` stops a run by aborting its controller and settling the subscription with
+ * `takeUntil`, which COMPLETES. Completion is read as success everywhere downstream: the browser
+ * clears its `awaitingReply` flag, reports the turn as answered, and the transcript closes on
+ * whatever half-answer had been streamed. So a run cut off by the channel's execution limit was
+ * indistinguishable from one that finished, and the limit existed only to bound the damage.
+ *
+ * The event is appended rather than emitted first on purpose. `takeUntil` is what makes Stop
+ * immediate — writing before it would mean waiting on a collaborator that may never yield another
+ * event, which is the exact failure `takeUntil` is there to survive. The sentence still arrives, one
+ * event after the close.
+ *
+ * `timedOut` is read lazily so it is true only once the deadline has actually fired, which is also
+ * what keeps a person's own Stop from being announced as a failure: their abort settles the stream
+ * through the same `takeUntil` while this predicate is still false.
+ */
+function announceDeadline(
+  timedOut: () => boolean,
+  event: () => BaseEvent | null,
+): OperatorFunction<BaseEvent, BaseEvent> {
+  return (source) =>
+    concat(
+      source,
+      defer(
+        (): Observable<BaseEvent> =>
+          timedOut() && event() !== null ? of(event() as BaseEvent) : EMPTY,
+      ),
+    );
+}
+
 class RunBuiltAgent extends AbstractAgent {
   /**
    * Stop must reach the pending build as well as the eventual model. Keep both in one per-run
@@ -1567,6 +1783,8 @@ class RunBuiltAgent extends AbstractAgent {
   private active?: { controller: AbortController; inner?: AbstractAgent };
   /** The same Bot with nothing narrowed, kept to answer questions that are not about one run. */
   private whole: AbstractAgent;
+  /** This Bot's name, for the sentence its own deadline writes into the transcript. */
+  private botName: string;
   private build: (
     input: RunAgentInput,
     signal: AbortSignal,
@@ -1583,15 +1801,34 @@ class RunBuiltAgent extends AbstractAgent {
     super(identity);
     this.whole = whole;
     this.build = build;
+    // Kept because the run's deadline explains itself in this Bot's name, and `run` has no other
+    // way to learn it — `identity` is a constructor parameter and this method is called long after.
+    this.botName = identity.description;
   }
 
   run(input: RunAgentInput): Observable<BaseEvent> {
-    return defer(() => {
+    return defer((): Observable<BaseEvent> => {
       const active: NonNullable<RunBuiltAgent["active"]> = {
         controller: new AbortController(),
       };
       this.active = active;
       const { signal } = active.controller;
+      /*
+       * Set by the deadline itself, immediately before it aborts, and the only thing that tells a
+       * deadline apart from a person pressing Stop. Both arrive as the same aborted signal, and only
+       * one of them is something the person needs to be told about.
+       */
+      let timedOut = false;
+      const timeoutId = setTimeout(() => {
+        timedOut = true;
+        active.controller.abort(
+          new Error(
+            `${this.botName} exceeded the maximum continuous execution limit of ${inWords(MAX_CHANNEL_RUN_MS)}.`,
+          ),
+        );
+      }, MAX_CHANNEL_RUN_MS);
+      timeoutId.unref?.();
+
       return defer(() => this.build(input, signal)).pipe(
         switchMap((agent) => {
           signal.throwIfAborted();
@@ -1600,7 +1837,36 @@ class RunBuiltAgent extends AbstractAgent {
         }),
         // Settle Stop even if a collaborator ignores the signal or rejects after cancellation.
         takeUntil(fromEvent(signal, "abort")),
+        /*
+         * THE DEADLINE IS ANNOUNCED, NOT JUST ENFORCED.
+         *
+         * `takeUntil` settles the stream when the signal fires, which is what makes Stop reliable
+         * against a collaborator that ignores cancellation — but it COMPLETES, and a completion is
+         * read as success. So a run that ran out of time ended looking exactly like a run that
+         * finished: `channel-chat.tsx` treats it as a finished reply, and the transcript closes on
+         * whatever half-answer had been streamed. The one failure this deadline exists to bound was
+         * being reported as a success.
+         *
+         * The sentence is concatenated after the settle rather than emitted before it, because
+         * `takeUntil` is what makes the stop immediate — writing first would mean waiting on a
+         * collaborator that may never yield another event, which is the failure mode `takeUntil`
+         * exists to avoid. The event still reaches the browser, just after the stream has closed.
+         *
+         * A person pressing Stop is untouched: their abort takes the `takeUntil` path without
+         * `timedOut` having been set, so nothing is written here.
+         */
+        announceDeadline(
+          () => timedOut,
+          () =>
+            ({
+              type: EventType.RUN_ERROR,
+              message: `${this.botName} exceeded the maximum continuous execution limit of ${inWords(MAX_CHANNEL_RUN_MS)}. This turn was ended to keep the channel moving.`,
+              threadId: input.threadId,
+              runId: input.runId,
+            }) as BaseEvent,
+        ),
         finalize(() => {
+          clearTimeout(timeoutId);
           if (this.active === active) this.active = undefined;
           active.controller.abort();
         }),
@@ -1632,6 +1898,9 @@ class RunBuiltAgent extends AbstractAgent {
     const cloned = super.clone() as RunBuiltAgent;
     cloned.whole = this.whole;
     cloned.build = this.build;
+    // Carried by hand for the same reason as the two above: the runtime clones before every run,
+    // and `botName` is only read by the deadline that a run's abort can reach.
+    cloned.botName = this.botName;
     // A clone owns its cancellation state, including while its build is pending.
     cloned.active = undefined;
     return cloned;
@@ -1710,6 +1979,35 @@ export async function resolveRuntimeAgents(
    * same positional reason. Absent means nothing is recorded.
    */
   markAttachmentsSent?: MarkAttachmentsSent,
+  /**
+   * Wrap each built Bot with metering and loop breaking. Appended last for the
+   * positional reason above. Absent means no enforcement.
+   */
+  enforceTurn?: EnforceTurn,
+  /**
+   * After a finished built-in run, with everything the turn said and spent. Appended last for
+   * the positional reason above. Absent means no post-run work.
+   */
+  onAfterRun?: (info: RemiAfterRun) => void,
+  /**
+   * Pre-turn memory recall, bound to the person asking beside `loadTools`.
+   * Appended last. Absent means the model holds `memory_search` itself.
+   */
+  memoryHooks?: RecallHooks,
+  /**
+   * Told how a built-in run ended. See `RemiLoopConfig.onRunOutcome`, which is where it is read.
+   *
+   * A collaborator rather than a field on the agent, because there is no other place a run's ending
+   * becomes visible: the loop reports it, the settlement cannot see it, and the thread lock is told
+   * only that something ended.
+   */
+  onRunEnded?: (outcome: {
+    botId: string;
+    runId: string;
+    threadId: string;
+    outcome: "done" | "stopped" | "failed";
+    reason?: string;
+  }) => void,
 ): Promise<Record<string, AbstractAgent>> {
   const all = await loadAgents();
   if (all.length === 0) {
@@ -1744,8 +2042,24 @@ export async function resolveRuntimeAgents(
     initiator,
     loadAttachment,
     markAttachmentsSent,
+    enforceTurn,
+    onAfterRun,
+    memoryHooks,
+    onRunEnded,
   );
 }
+
+/**
+ * Wrap one built Bot with per-turn metering and loop breaking.
+ *
+ * Absent leaves every Bot unwrapped, which is what every deployment did
+ * before metering existed. Present, both the request path and the routine
+ * path build through here, so one wrap covers both.
+ */
+export type EnforceTurn = (
+  botId: string,
+  inner: AbstractAgent,
+) => AbstractAgent;
 
 /** What one Bot may call, for the person whose request this is. */
 export type LoadToolsForBot = (botId: string) => Promise<GrantedTool[]>;
@@ -1847,12 +2161,50 @@ export function createRequestAgents(
    * nothing is recorded.
    */
   markAttachmentsSentForActor?: (actorId: string) => MarkAttachmentsSent,
+  /**
+   * Wrap each built Bot with metering and loop breaking, resolved per person.
+   * Appended last, positionally. Absent means no enforcement.
+   */
+  enforceTurnForActor?: (actorId: string) => EnforceTurn,
+  /**
+   * After a finished built-in run, resolved per person. Appended last, positionally. Absent
+   * means no post-run work.
+   */
+  onAfterRunForActor?: (
+    actorId: string,
+  ) => ((info: RemiAfterRun) => void) | undefined,
+  /**
+   * Pre-turn memory recall for whoever is asking, resolved per person like
+   * every collaborator above it. Appended last. Absent means the model holds
+   * `memory_search` itself.
+   */
+  memoryForActor?: (actorId: string) => RecallHooks,
+  /**
+   * One person's Remi instance: which model their turns answer on. Resolved per request
+   * beside the roster, because a model choice edited a moment ago applies to the next run
+   * without a restart. Null (or a row with nulls) inherits the deployment model. Appended
+   * last, positionally.
+   */
+  instanceForActor?: (actorId: string) => Promise<RemiInstance | null>,
 ) {
   return async ({ request }: { request: Request }) => {
     const actor = await identifyActor(request);
+    let requestModel = model;
+    try {
+      const instance = await instanceForActor?.(actor.id);
+      if (instance?.modelSlug) {
+        requestModel = {
+          provider: instance.modelProvider ?? model.provider,
+          defaultModel: instance.modelSlug,
+        };
+      }
+    } catch {
+      // A failed instance read costs a paragraph of personalization, not a conversation:
+      // the deployment model answers instead.
+    }
     return resolveRuntimeAgents(
       () => loadAgents(actor),
-      model,
+      requestModel,
       resolveModelApiKey,
       stallGuard,
       loadToolsForActor?.(actor.id),
@@ -1870,6 +2222,9 @@ export function createRequestAgents(
       undefined,
       loadAttachmentForActor?.(actor.id),
       markAttachmentsSentForActor?.(actor.id),
+      enforceTurnForActor?.(actor.id),
+      onAfterRunForActor?.(actor.id),
+      memoryForActor?.(actor.id),
     );
   };
 }
@@ -1929,32 +2284,10 @@ export async function historyOrEmpty<T>(
 }
 
 /**
- * The platform client, with one answer corrected.
- *
- * A subclass rather than a wrapper. The runtime is handed this object and calls many methods on it,
- * and the base class keeps its state in `#private` fields — which a `Proxy` cannot forward, because a
- * method invoked with the proxy as `this` cannot reach them. Extending keeps every other method
- * exactly as it was, on the instance that owns those fields.
- *
- * `getThreadMessages` is the only override. `handleGetThreadMessages` in the runtime calls it and
- * returns `Response.json` of whatever comes back, so an empty history here is the `{ messages: [] }`
- * the browser expects and a 200 instead of a 500.
- */
-class IntelligenceKnowingANewThread extends CopilotKitIntelligence {
-  override getThreadMessages(
-    params: Parameters<CopilotKitIntelligence["getThreadMessages"]>[0],
-  ) {
-    return historyOrEmpty(() => super.getThreadMessages(params), {
-      messages: [],
-    });
-  }
-}
-
-/**
  * How long a conversation's lock is held before it lapses on its own.
  *
- * Matches the platform's own default rather than picking a number: this is renewed while a Bot works,
- * so what it really sets is how long a conversation stays stuck after a process dies mid-run.
+ * Renewed while a Bot works, so what it really sets is how long a
+ * conversation stays stuck after a process dies mid-run.
  */
 const THREAD_LOCK_TTL_SECONDS = 120;
 
@@ -1991,7 +2324,25 @@ export function mountCopilotRuntime(
    * message and navigates away still lights the channel they left. A side effect only: it is never
    * awaited in the lock path and a failure in it never touches whether the lock was taken.
    */
-  onRunBusy?: (input: { threadId: string; busy: boolean }) => void,
+  /**
+   * A run started or ended on a thread. Told here, and not from the loop, because the lock is the one
+   * place that knows a run began and the one place that knows it ended — including when it ended
+   * because a browser went away, which no per-run hook would have seen.
+   *
+   * CARRIES THE RUN'S IDENTITY, not just the thread and a boolean, because the two things built on it
+   * need different amounts of it. The channel's working dot needs only the thread. A durable record
+   * of what was doing what needs the run, the person and the Bot, and widening this call beats adding
+   * a second one beside it that could be emitted at a different moment and disagree.
+   */
+  onRunBusy?: (input: {
+    threadId: string;
+    busy: boolean;
+    /** Absent on release, which is told the run id only — see the release path. */
+    runId?: string;
+    /** The person the run is for. Present on acquire; the row is found by run id on release. */
+    userId?: string;
+    agentId?: string;
+  }) => void,
   /**
    * What the person asking has told every built-in coworker they run, resolved per person.
    *
@@ -2021,8 +2372,61 @@ export function mountCopilotRuntime(
    * write is scoped to rows that person uploaded. Appended last. Absent means nothing is recorded.
    */
   markAttachmentsSentForActor?: (actorId: string) => MarkAttachmentsSent,
+  /**
+   * Wrap each built Bot with metering and loop breaking, resolved per person.
+   *
+   * Given to the request path and to `agentFor` alike, for the reason
+   * `loadAttachmentForActor` is: a hop delivered to a Bot is a turn that
+   * spends model and computer time too, and a seam wired into only one of
+   * them bills half the turns. Appended last. Absent means no enforcement.
+   */
+  enforceTurnForActor?: (actorId: string) => EnforceTurn,
+  /**
+   * After a finished built-in run, resolved per person. Given to the request path and to
+   * `agentFor` alike, for the reason every collaborator above it is: a hop delivered to a Bot
+   * remembers the same way a person's chat turn does. Appended last. Absent means no
+   * post-run work.
+   */
+  onAfterRunForActor?: (
+    actorId: string,
+  ) => ((info: RemiAfterRun) => void) | undefined,
+  /**
+   * One person's Remi instance: which model their turns answer on. Given to the request
+   * path and to `agentFor` alike, for the reason every collaborator above it is: a hop
+   * delivered to a Bot answers on the same model the person's own turn would. Appended
+   * last. Absent means the deployment model answers everyone.
+   */
+  instanceForActor?: (actorId: string) => Promise<RemiInstance | null>,
+  /**
+   * Pre-turn memory recall for whoever is asking, resolved per person like
+   * every collaborator above it: which rows a run may read is decided by the
+   * session, exactly as the grants are. Given to the request path and to
+   * `agentFor` alike, so a hop delivered to a Bot remembers the same way a
+   * person's chat turn does. Appended last. Absent means the model holds
+   * `memory_search` itself.
+   */
+  memoryForActor?: (actorId: string) => RecallHooks,
+  /**
+   * The deployment's own run backend: Postgres threads, a local runner and a
+   * local lock. Built once in `index.ts` and shared by the request path, hops
+   * and routines, so every turn runs and remembers the same way. Optional in
+   * the signature only because every parameter before it is; absent is a boot
+   * error, not a degraded runtime.
+   */
+  local?: {
+    runner: AgentRunner;
+    threads: ThreadStore;
+    lock: ThreadLock;
+  },
 ) {
-  const { intelligence } = config.runtime;
+  if (!local) {
+    throw new Error(
+      "mountCopilotRuntime needs the local run backend (runner, threads, lock).",
+    );
+  }
+  // `config.runtime` carries no Intelligence settings anymore (see config.ts):
+  // threads, runs and locks live in this deployment's Postgres. The rest of
+  // the config below is everything else a run needs.
 
   /**
    * The same Bot a person's run would get, built without a request.
@@ -2048,9 +2452,21 @@ export function mountCopilotRuntime(
     initiator?: AuditInitiator;
   }): Promise<AbstractAgent | null> => {
     const { actor } = input;
+    let requestModel = model;
+    try {
+      const instance = await instanceForActor?.(actor.id);
+      if (instance?.modelSlug) {
+        requestModel = {
+          provider: instance.modelProvider ?? model.provider,
+          defaultModel: instance.modelSlug,
+        };
+      }
+    } catch {
+      // As on the request path: the deployment model answers instead.
+    }
     const agents = await resolveRuntimeAgents(
       () => loadAgents(actor),
-      model,
+      requestModel,
       resolveModelApiKey,
       stallGuard,
       loadToolsForActor?.(actor.id, input.initiator),
@@ -2068,35 +2484,34 @@ export function mountCopilotRuntime(
       input.initiator,
       loadAttachmentForActor?.(actor.id),
       markAttachmentsSentForActor?.(actor.id),
+      enforceTurnForActor?.(actor.id),
+      onAfterRunForActor?.(actor.id),
+      memoryForActor?.(actor.id),
     );
     return agents[input.botId] ?? null;
   };
 
   /*
-   * One client, used by the runtime and by anything reading a thread beside it, so a hop reads the
-   * history a person's run would read rather than a second view of it that could disagree.
+   * One store, used by the runtime and by anything reading a thread beside
+   * it, so a hop reads the history a person's run would read rather than a
+   * second view of it that could disagree.
    */
-  const intelligenceClient = new IntelligenceKnowingANewThread({
-    apiUrl: intelligence.apiUrl,
-    wsUrl: intelligence.gatewayWsUrl,
-    apiKey: intelligence.apiKey,
-  });
+  const { threads: threadStore, lock: threadLockStore, runner } = local;
 
   const runtime = new CopilotRuntime({
-    // `mode` is inferred from the presence of `intelligence`; passing it is a type error.
+    // SSE mode: no `intelligence`, so runs execute on `runner` in this
+    // process and threads live in Postgres. Passing `intelligence` would be
+    // a type error in the other direction.
     //
-    // identifyUser is NOT optional in practice. Threads and memory are scoped to the user it
-    // returns, so omitting it puts every person in the deployment in the same thread space and one
-    // person's conversations become another's.
+    // identifyUser is NOT optional in practice. Threads are scoped to the
+    // user it returns, so omitting it puts every person in the deployment in
+    // the same thread space and one person's conversations become another's.
     identifyUser,
-    // The subclass, not the base: a thread nobody has run yet reads as empty rather than as a 500.
-    // See IntelligenceKnowingANewThread.
-    intelligence: intelligenceClient,
-    licenseToken: intelligence.licenseToken,
-    // Carried on the events the runtime already sends, so OpenBot's traffic is separable from any
+    runner,
+    // Carried on the events the runtime already sends, so Remii's traffic is separable from any
     // other deployment's. Adds no events of its own.
     telemetryProperties: {
-      ...(config.accessibility ? { accessibility_title: "OpenBot" } : {}),
+      ...(config.accessibility ? { accessibility_title: "Remii" } : {}),
       ...desktopTelemetryProperties(),
     },
     /*
@@ -2116,11 +2531,14 @@ export function mountCopilotRuntime(
      * has; see DeploymentConfig.generativeUi.
      */
     ...(config.generativeUi ? { openGenerativeUI: true } : {}),
-    // A browser catalog enables the public A2UI middleware/tool. Explicitly disable it on the
-    // server too, so stale clients cannot reactivate a deployment's generative UI opt-out.
-    a2ui: { enabled: config.generativeUi },
-    // `identifyUser` is the Intelligence projection of the same person `identifyActor` returns:
-    // one resolver decides both whose threads these are and whose coworkers exist.
+    // A browser catalog enables the public A2UI middleware/tool. Explicitly disabled:
+    // the middleware pastes its whole component catalog (~60KB) into every system prompt, which
+    // drowns the question and slows every turn to a crawl. Our own generative UI
+    // (`openGenerativeUI` above) is unaffected and stays on where configured.
+    a2ui: { enabled: false },
+    // `identifyUser` scopes the threads the runtime reads to the person
+    // asking: one resolver decides both whose threads these are and whose
+    // coworkers exist.
     agents: createRequestAgents(
       identifyActor,
       loadAgents,
@@ -2143,34 +2561,56 @@ export function mountCopilotRuntime(
       loadInstructionsForActor,
       loadAttachmentForActor,
       markAttachmentsSentForActor,
+      enforceTurnForActor,
+      onAfterRunForActor,
+      memoryForActor,
     ) as never,
   });
 
   return {
-    handler: createCopilotHonoHandler({ runtime, basePath }),
-    /**
-     * How to reach the platform's runner, exactly as the runtime reaches it.
+    /*
+     * CORS OFF, and that is a security decision rather than a default.
      *
-     * TAKEN FROM THE CLIENT, NOT FROM CONFIGURATION, and this is the whole of a bug that only a real
-     * gateway could show. Built from `gatewayWsUrl` and the deployment's API key, every join was
-     * refused with `active_lock_mismatch`: a thread's active run is a lock the platform issues, and
-     * the token that holds it is not the API key. The runtime asks the client for both, so anything
-     * else driving a run has to ask the same client the same way.
+     * `createCopilotHonoHandler` defaults to `cors: true`, which answers every request with
+     * `Access-Control-Allow-Origin: *`. The runtime is mounted on this deployment's own origin and
+     * its own session cookie is `SameSite=Lax`, so a wildcard on a cookie-authenticated API is the
+     * one combination that turns "any website the person visits" into "may read this person's
+     * conversations": the browser will not attach the cookie cross-site, but it will hand the
+     * response to the page that asked for it.
+     *
+     * The browser does not need it. The app is served from this same origin in every supported
+     * layout, so a same-origin request needs no CORS header at all, and the Vite dev server proxies
+     * `/api` rather than calling the server cross-origin. Turning it off costs the app nothing and
+     * closes the hole.
+     *
+     * An `origin` that resolves to nothing is how "off" is spelled here: the handler's own default
+     * coerces a falsy `cors` back to `true`, and its resolver falls back to `"*"` for any origin it
+     * does not recognise. Returning nothing from the function leaves `Access-Control-Allow-Origin`
+     * unset altogether, which is the state a same-origin API should be in.
      */
-    runnerConnection: () => ({
-      url: intelligenceClient.ɵgetRunnerWsUrl(),
-      authToken: intelligenceClient.ɵgetRunnerAuthToken(),
+    handler: createCopilotHonoHandler({
+      runtime,
+      basePath,
+      cors: { origin: () => undefined, credentials: false },
     }),
+
     /**
-     * The conversation's run lock, as the platform issues it.
+     * How to reach this deployment's runner: the shared local instance, not
+     * a connection to somewhere else.
      *
-     * ONE RUN AT A TIME PER CONVERSATION. Taken before anything is streamed, because the gateway
-     * checks every event against the run the lock names: a run that skips this is claiming to be one
-     * nobody was told about, and every event is refused. That refusal reads like a platform
-     * limitation and is a missing step.
+     * Anything else driving a run (hops, routines) uses this same object, so
+     * a Bot built for a hop is driven exactly the way the runtime drives
+     * one — the structural guarantee `agentFor` exists to protect.
+     */
+    runnerConnection: () => runner,
+    /**
+     * The conversation's run lock, from this deployment's own table.
      *
-     * A conversation somebody else is already running in refuses rather than queues, which is right:
-     * the caller waits and tries again rather than two Bots writing over each other.
+     * ONE RUN AT A TIME PER CONVERSATION. Taken before anything is streamed:
+     * a run that skips this is claiming to be one nobody was told about.
+     * A conversation somebody else is already running in refuses rather than
+     * queues, which is right: the caller waits and tries again rather than
+     * two Bots writing over each other.
      */
     threadLock: {
       acquire: async (input: {
@@ -2180,28 +2620,29 @@ export function mountCopilotRuntime(
         agentId: string;
       }) => {
         try {
-          const held = await intelligenceClient.ɵacquireThreadLock(input);
+          const held = await threadLockStore.acquire(input);
           // A run started on this thread. Side effect only, never awaited: a channel showing it is
           // working is worth nothing next to the lock the run depends on.
           try {
-            onRunBusy?.({ threadId: input.threadId, busy: true });
+            onRunBusy?.({
+              threadId: input.threadId,
+              busy: true,
+              runId: input.runId,
+              userId: input.userId,
+              agentId: input.agentId,
+            });
           } catch {}
-          /*
-           * The run id only. The lock also hands back a join token, which is what a browser presents
-           * to watch the conversation; the runner's socket has its own credential and passing this
-           * one in place of it means a socket that is refused and a run that never starts. See the
-           * note on `runner.run` in handoff-delivery.ts.
-           */
+          // The run id only: the lock names which run holds the thread, and
+          // nothing else here needs naming.
           return { runId: held.runId };
         } catch (error) {
           /*
            * ONLY A CONFLICT MEANS "NOT NOW". Everything else is raised.
            *
            * A conversation somebody is already running in answers 409, and that is ordinary: the hop
-           * waits and is tried again. Anything else is not — a platform that cannot be reached, a
-           * token that stopped working, or one of the underscored APIs below being renamed by a
-           * routine version bump. Returned as `null` those all read as contention: every hop retries
-           * to exhaustion, every person is told their question was never answered, and the only
+           * waits and is tried again. Anything else is not — the database being unreachable, for
+           * example. Returned as `null` those all read as contention: every hop retries to
+           * exhaustion, every person is told their question was never answered, and the only
            * evidence is a warning line that looks like a busy conversation.
            *
            * Raised, the runner writes the real reason onto `agent.handoff_failed`, and the sentence
@@ -2215,46 +2656,46 @@ export function mountCopilotRuntime(
           throw error;
         }
       },
-      renew: async (input: { threadId: string; runId: string }) => {
-        await intelligenceClient.ɵrenewThreadLock({
+      /**
+       * Reports whether this run still holds the thread.
+       *
+       * The store's answer is passed straight through rather than dropped, because a heartbeat that
+       * cannot say "you lost it" is a heartbeat that keeps a run it has been locked out of pushing its
+       * own lease forward — and the caller here is the only thing that can act on the answer.
+       */
+      renew: async (input: { threadId: string; runId: string }) =>
+        threadLockStore.renew({
           ...input,
           ttlSeconds: THREAD_LOCK_TTL_SECONDS,
-        });
-      },
+        }),
       release: async (input: { threadId: string; runId: string }) => {
         // The run on this thread is over. Cleared here rather than trusting a browser: the run may
-        // have outlived the tab that started it, and this is where the platform is told it ended.
+        // have outlived the tab that started it, and this is where waiting callers are told it ended.
         try {
-          onRunBusy?.({ threadId: input.threadId, busy: false });
+          // The run id is here; the person and the Bot are not, because the lock's release API does
+          // not carry them. That is enough: a record of the run is found by its id, and a run nobody
+          // recorded has nothing to finish.
+          onRunBusy?.({
+            threadId: input.threadId,
+            busy: false,
+            runId: input.runId,
+          });
         } catch {}
-        await intelligenceClient.ɵcleanupThreadLock(input);
+        await threadLockStore.release(input);
       },
     },
     agentFor,
     /**
-     * A thread's messages, as the platform holds them.
+     * A thread's messages, as this deployment holds them.
      *
-     * The same client the runtime uses, so a hop reads the history a person's run would read rather
-     * than a second view of it that could disagree.
+     * The same store the runner persists through, so a hop reads the history
+     * a person's run would read rather than a second view of it that could
+     * disagree. Unknown threads read as empty, not as a failure.
      */
     history: async (input: { threadId: string; actorId: string }) => {
-      /*
-       * The platform's own message type rather than AG-UI's, inferred rather than named: the two are
-       * compatible where it matters and naming the wrong one here would mean converting a history
-       * that does not need converting.
-       */
-      type Read = Awaited<
-        ReturnType<CopilotKitIntelligence["getThreadMessages"]>
-      >;
-      const read = await historyOrEmpty<Read>(
-        () =>
-          intelligenceClient.getThreadMessages({
-            threadId: input.threadId,
-            userId: input.actorId,
-          }),
-        { messages: [] } as Read,
-      );
-      return read.messages;
+      return threadStore
+        .getHistory(input.threadId, input.actorId)
+        .catch(() => []);
     },
   };
 }

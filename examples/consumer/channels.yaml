@@ -1,0 +1,6 @@
+channels:
+  - id: remii
+    name: Remii
+    description: Your chief of staff. Ask for anything.
+    permitted_agents: [remii]
+    allowed_groups: [all]

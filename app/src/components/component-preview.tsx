@@ -7,8 +7,11 @@ import {
   sandboxedListQueryOptions,
 } from "@/lib/sandboxed/queries";
 
-/** Sample arguments belong to the administrator's working copy, so only Admin fetches them. */
-export function AdminComponentPreview({
+/**
+ * Sample arguments for a component in the gallery, fetched only for the sandboxed kind
+ * because those live in this person's own list rather than in the deployment's.
+ */
+export function PublishedComponentPreview({
   name,
   kind,
 }: {

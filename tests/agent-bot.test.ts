@@ -19,6 +19,8 @@ async function startBot(environment: Record<string, string>) {
         PATH: process.env.PATH ?? "",
         MANAGED_AGENT_TOKEN: "",
         OPENAI_API_KEY: "",
+        OPENAI_BASE_URL: "",
+        PORT: "4200",
         ...environment,
       },
       stdout: "pipe",

@@ -22,7 +22,7 @@ _LOOPBACK_SOCKET_GUARD_INSTALLED = False
 
 def _openai_response(model, content):
     return {
-        "id": "chatcmpl-openbot-ci",
+        "id": "chatcmpl-remii-ci",
         "object": "chat.completion",
         "created": 0,
         "model": model,
@@ -201,7 +201,7 @@ async def _run_answer_with_httpx2_capture(monkeypatch, response_json, messages=N
 async def test_openai_key_without_compatible_endpoint_uses_sdk_default_boundary(
     monkeypatch, model, request_model,
 ):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openbot-ci")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-remii-ci")
     if model is not None:
         monkeypatch.setenv("BOT_MODEL", model)
     monkeypatch.setenv("OPENAI_BASE_URL", "")
@@ -215,7 +215,7 @@ async def test_openai_key_without_compatible_endpoint_uses_sdk_default_boundary(
     assert os.environ.get("OPENAI_BASE_URL") is None
     assert len(captured) == 1
     assert captured[0]["url"] == "https://api.openai.com/v1/chat/completions"
-    assert captured[0]["headers"]["authorization"] == "Bearer sk-openbot-ci"
+    assert captured[0]["headers"]["authorization"] == "Bearer sk-remii-ci"
     assert captured[0]["body"] == {
         "messages": [{"content": "Say hello.", "role": "user"}],
         "model": request_model,
@@ -313,7 +313,7 @@ async def test_blank_provider_keeps_opaque_model_at_compatible_endpoint(
 async def test_anthropic_selection_reaches_anthropic_boundary_without_openai_key(
     monkeypatch, provider, model, request_model
 ):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-openbot-ci")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-remii-ci")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:4311")
     monkeypatch.setenv("BOT_PROVIDER", provider)
     if model is not None:
@@ -322,7 +322,7 @@ async def test_anthropic_selection_reaches_anthropic_boundary_without_openai_key
     result, captured = await _run_answer_with_httpx2_capture(
         monkeypatch,
         {
-            "id": "msg-openbot-ci",
+            "id": "msg-remii-ci",
             "type": "message",
             "role": "assistant",
             "model": request_model,
@@ -336,7 +336,7 @@ async def test_anthropic_selection_reaches_anthropic_boundary_without_openai_key
     assert result["messages"][0].content == "anthropic proof"
     assert "OPENAI_API_KEY" not in os.environ
     assert captured[0]["url"] == "http://127.0.0.1:4311/v1/messages"
-    assert captured[0]["headers"]["x-api-key"] == "sk-ant-openbot-ci"
+    assert captured[0]["headers"]["x-api-key"] == "sk-ant-remii-ci"
     assert captured[0]["headers"]["anthropic-version"] == "2023-06-01"
     assert captured[0]["body"]["model"] == request_model
     assert captured[0]["body"]["messages"] == [
@@ -362,14 +362,14 @@ async def test_anthropic_answers_a_conversation_in_which_a_skill_was_picked(
 ):
     # Anthropic takes one system prompt, and langchain-anthropic refuses a system message that
     # does not follow the others: "Received multiple non-consecutive system messages."
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-openbot-ci")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-remii-ci")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:4311")
     monkeypatch.setenv("BOT_PROVIDER", "anthropic")
 
     result, captured = await _run_answer_with_httpx2_capture(
         monkeypatch,
         {
-            "id": "msg-openbot-ci",
+            "id": "msg-remii-ci",
             "type": "message",
             "role": "assistant",
             "model": "claude-sonnet-4-5",
@@ -397,7 +397,7 @@ async def test_anthropic_answers_a_conversation_in_which_a_skill_was_picked(
 async def test_openai_keeps_a_skill_turn_beside_the_message_it_was_picked_for(
     monkeypatch,
 ):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openbot-ci")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-remii-ci")
 
     result, captured = await _run_answer_with_httpx2_capture(
         monkeypatch,
@@ -684,7 +684,7 @@ print(json.dumps({
 
 
 def test_chatgpt_token_provider_atomic_writer_survives_directory_mount():
-    root = Path(tempfile.mkdtemp(prefix="openbot-id6-directory-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="remii-id6-directory-", dir="/tmp"))
     try:
         mount_dir = root / "langchain"
         mount_dir.mkdir()
@@ -710,7 +710,7 @@ def test_chatgpt_token_provider_atomic_writer_survives_directory_mount():
 
 
 def test_chatgpt_token_provider_atomic_writer_fails_on_single_file_mount():
-    root = Path(tempfile.mkdtemp(prefix="openbot-id6-file-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="remii-id6-file-", dir="/tmp"))
     try:
         host_file = root / "chatgpt-auth.json"
         host_file.write_text("{}", encoding="utf-8")

@@ -1,4 +1,5 @@
-export const THEME_STORAGE_KEY = "openbot-theme";
+export const THEME_STORAGE_KEY = "remii-theme";
+export const LEGACY_THEME_STORAGE_KEY = "openbot-theme";
 
 export function parseStoredDarkTheme(value: string | null) {
   return value === "dark";

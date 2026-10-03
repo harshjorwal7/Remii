@@ -15,8 +15,9 @@ import { createPluginRoutes } from "../src/plugins/routes";
  * belonging to somebody else: they reset its browser, drive its pages, and fire its granted MCP tools
  * against the deployment's own credential.
  *
- * The rule itself is not new. `canAccessAgent` has always said public, or owner, or administrator,
- * and the store's read path has always filtered on it. These are the callers that never asked.
+ * The rule itself is not new. `canAccessAgent` has always answered from the Bot's owner and its
+ * visibility, and the store's read path has always filtered on it. These are the callers that never
+ * asked. There is no administrator: the question is whether this route consults the answer at all.
  */
 
 /** A signed-in person with the base role, which is the lowest privilege that gets past the guard. */
@@ -25,14 +26,14 @@ function signedIn(
   role: "user" | "admin" = "user",
 ): MiddlewareHandler<{ Variables: AppVariables }> {
   return async (context, next) => {
-    context.set("actor", { id, email: `${id}@openbot.test`, role });
+    context.set("actor", { id, email: `${id}@remii.test`, role });
     await next();
   };
 }
 
 /**
- * Owner sees their own Bot, an administrator sees every Bot, nobody else sees it. Stands in for the
- * store's access filter, which decides the same three ways.
+ * Owner sees their own Bot, and the filter may also say yes for other reasons. Stands in for the
+ * store's access filter, which is what these routes have to ask rather than decide themselves.
  */
 const ownedBy =
   (owner: string) =>
@@ -111,9 +112,10 @@ describe("the computer surface", () => {
     expect(reached).toEqual([]);
   });
 
-  // An administrator already reaches every Bot everywhere else in the product. This must not become
-  // the one surface where they cannot.
-  test("still lets an administrator act on any Bot", async () => {
+  // The stub grants access the way the store's real filter does when it says yes, so this asks the
+  // only question the routes are responsible for: do they consult it at all, or act on the Bot id
+  // alone? The `admin` role here is the stub's third way of saying yes, not a product role.
+  test("acts on the Bot when the access filter has said yes, whoever asked", async () => {
     const { hono, reached } = app("someone-else", "admin");
     const response = await hono.request(
       "http://t/api/computers/sales/computers/reset",
@@ -160,7 +162,11 @@ describe("a path that starts with a deployment route", () => {
         reached.push(`screenshot:${botId}`);
         return { image: "" };
       },
-      computers: async () => [],
+      // The gateway returns an OBJECT holding the list, not the list: `{ isolation, computers }`.
+      // Returning a bare `[]` left `result.computers` undefined and the fleet route threw a TypeError
+      // that the mapped-error catch turned into a 500 — which is what these "the guard did not refuse
+      // it" tests were reporting as a broken route when the guard had behaved perfectly.
+      computers: async () => ({ isolation: "process", computers: [] }),
     } as never;
     const routes = createComputerRoutes(
       gateway,
@@ -272,7 +278,16 @@ describe("calling a tool as a Bot", () => {
       called,
       hono: new Hono().route(
         "/api/plugins",
-        createPluginRoutes(store, signedIn(actorId), ownedBy("owner")),
+        // `canManageBot` is the ownership half of `canUseBot`, and a fourth POSITIONAL argument, not
+        // an option on the bag that follows it. Omitting it left every options field (`connect`, the
+        // broker, ...) reading as `undefined`, which is how an OAuth callback ended up redirecting to
+        // an origin-relative URL with no app URL behind it.
+        createPluginRoutes(
+          store,
+          signedIn(actorId),
+          ownedBy("owner"),
+          ownedBy("owner"),
+        ),
       ),
     };
   }

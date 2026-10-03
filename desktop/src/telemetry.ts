@@ -22,7 +22,6 @@ const HARNESSES = {
   ag2: "ag2",
   langroid: "langroid",
   mastra: "mastra",
-  "byo-url": "byo_url",
 } as const;
 
 type Harness = (typeof HARNESSES)[keyof typeof HARNESSES];
@@ -32,6 +31,14 @@ export type SetupEvent =
   | { kind: "harness_chosen"; harness: Harness }
   | {
       kind: "model_chosen";
+      /*
+       * `anthropic` IS A CLOSED CATEGORY, not an open string.
+       *
+       * The picker can produce `{ provider: "anthropic", login: "plan" | "api-key" }` (see
+       * `recordedModel`), so excluding it made every Claude setup report no telemetry at all —
+       * which is the shape of a bug that hides a second bug: the category was missing from the
+       * union, so nothing type-checked a case that produced one.
+       */
       provider: "openai" | "anthropic" | "compatible" | "none";
       credential_path: "subscription" | "api_key" | "none";
       custom_base_url: boolean;
@@ -57,6 +64,13 @@ export function modelChoiceEvent(
     };
   }
   const { provider, login } = choice;
+  /*
+   * The two subscription providers are handled TOGETHER rather than as one case plus a twin.
+   *
+   * Both produce `login: "plan" | "api-key"` and both mean the same thing to this event, so listing
+   * them separately is how one of them quietly stops being reported the next time the other is
+   * edited.
+   */
   if (
     (provider === "openai" || provider === "anthropic") &&
     (login === "plan" || login === "api-key")

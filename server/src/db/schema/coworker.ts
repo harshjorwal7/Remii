@@ -7,6 +7,7 @@
 import {
   boolean,
   index,
+  integer,
   pgEnum,
   pgTable,
   primaryKey,
@@ -32,11 +33,32 @@ export const agentProfiles = pgTable(
       .primaryKey()
       .references(() => agents.id, { onDelete: "cascade" }),
     ownerUserId: text("owner_user_id").references(() => users.id, {
-      onDelete: "set null",
+      onDelete: "cascade",
     }),
+    isSystemTemplate: boolean("is_system_template").default(false),
     title: text("title").notNull(),
     roleDescription: text("role_description").notNull(),
     avatarSeed: text("avatar_seed").notNull(),
+    /*
+     * The mascot a coworker wears: a body silhouette and a colour.
+     *
+     * Both are nullable, and null is not "unset, fill in a default" — it is "not chosen", and it
+     * is what every row written before this feature says. The client fills a null axis from
+     * `avatar_seed`, so each seeded agent lands on a different mascot out of 96 and the whole
+     * existing roster gains variety without a backfill migration touching a single row.
+     *
+     * Storing two nullable columns rather than one serialised choice is what makes a partial choice
+     * expressible: somebody who has only ever picked a colour should still see their coworkers differ
+     * in shape. The ids come from `shared/mascot-ids.ts`, which the app and the server both read, and
+     * the values are ours in English rather than the engine's French — see that file and
+     * `app/src/mascot/bloub/UPSTREAM.md`.
+     *
+     * There was a third column, `mascot_expression`, and migration 0070 drops it. A face was never a
+     * thing to choose: it is what the coworker is doing, so it is derived from its state in the app
+     * and there is nothing here for it to live in.
+     */
+    mascotShape: text("mascot_shape"),
+    mascotColor: text("mascot_color"),
     visibility: agentVisibility("visibility").notNull(),
     /*
      * The credential this Bot's agent presents when it calls a tool back.
@@ -152,6 +174,7 @@ export const routineRuns = pgTable(
     status: routineRunStatus("status"),
     /** The refusal or the throw, capped like audit payloads. Never shown raw to a person. */
     error: text("error"),
+    creditsConsumed: integer("credits_consumed").notNull().default(0),
   },
   (table) => [
     index("routine_runs_by_routine_idx").on(table.routineId, table.startedAt),

@@ -17,7 +17,15 @@ export type AuthenticatedUser = {
   email: string;
   name?: string | null;
   image?: string | null;
-  role: "admin" | "user";
+  /**
+   * Individual-user SaaS has one role: every signed-in person is a user,
+   * sovereign over their own data. Kept on the shape so screens keep
+   * compiling; it can never be anything else.
+   */
+  role: "user";
+  creditBalance?: number;
+  stripeCustomerId?: string | null;
+  isBanned?: boolean;
   /** Null means this deployment does not track onboarding, which reads as nothing to finish. */
   onboarding: OnboardingStatus | null;
 };
@@ -46,6 +54,9 @@ export type SignInOptions = {
    * use this deployment, before they have signed in.
    */
   sso: boolean;
+  /** Whether email/username plus password sign-in is on (draws a form, not a button). */
+  emailPassword: boolean;
+  authMode: "session" | "single-user";
 };
 
 async function signInOptions(): Promise<SignInOptions> {
@@ -54,11 +65,18 @@ async function signInOptions(): Promise<SignInOptions> {
   // while the server was saying it has one.
   const body = (await (
     await client("/api/capabilities", { fallback: "Could not load sign-in" })
-  ).json()) as { authProviders?: AuthProviderId[]; ssoConfigured?: boolean };
+  ).json()) as {
+    authProviders?: AuthProviderId[];
+    ssoConfigured?: boolean;
+    emailPassword?: boolean;
+    authMode?: "session" | "single-user";
+  };
 
   return {
     providers: body.authProviders ?? [],
     sso: body.ssoConfigured === true,
+    emailPassword: body.emailPassword === true,
+    authMode: body.authMode === "session" ? "session" : "single-user",
   };
 }
 

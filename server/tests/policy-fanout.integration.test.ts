@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { eq } from "drizzle-orm";
 import { startPolicyListener } from "../src/computer/policy-listener";
 import {
   createPolicyStore,
@@ -12,7 +11,7 @@ import { TEST_POOL, testDatabaseUrl } from "./support/database";
 /**
  * A boundary an administrator changes has to reach every server, not the one that served the request.
  *
- * OpenBot runs several servers behind a load balancer. The policy is read from memory on every single
+ * Remii runs several servers behind a load balancer. The policy is read from memory on every single
  * action, which is right: a query per keystroke would be absurd. What was wrong is that memory was
  * only ever filled at boot, so a new deny rule applied on the one server that happened to receive it
  * and nowhere else. The admin screen reported success, because the row really was saved, and the
@@ -51,7 +50,22 @@ async function until(
 }
 
 afterEach(async () => {
-  await database.delete(actionPolicy).where(eq(actionPolicy.id, "current"));
+  /*
+   * EVERY row, and on `userId` rather than an `id`.
+   *
+   * `action_policy`'s primary key is the owner column itself — there is no separate `id` — so
+   * `actionPolicy.id` was `undefined` and the `where` rendered as an empty clause. Postgres rejected it
+   * with `syntax error at or near "="`, which reads as a database fault rather than as a column that
+   * does not exist.
+   *
+   * The whole table is cleared rather than one named row, because `set` writes to whichever owner it
+   * was handed — `"default"` with no `by`, or the caller's address with one — so a sweep of one row
+   * left the others behind. A leftover row is not a cosmetic problem here: `load()` answers "the
+   * database" whenever the table is non-empty, so the next test's "a deployment that never set one gets
+   * its configured default" fails on somebody else's boundary. That is what these tests were reporting
+   * before the sweep was widened.
+   */
+  await database.delete(actionPolicy);
 });
 
 describe("a rule added on one server", () => {

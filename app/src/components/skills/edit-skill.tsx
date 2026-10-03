@@ -65,6 +65,17 @@ export function EditSkill({ slug }: { slug: string }) {
           // Defaulted, so a skill written before this field existed opens with nothing ticked rather
           // than with an undefined the form would refuse to submit.
           tools: skill.tools ?? [],
+          /*
+           * The stored address as one string, branch and folder included, which is what the server
+           * builds it to be: `PluginSkill.repo.url` is the same shape the field takes, so the round trip
+           * is the identity rather than a reconstruction. Rebuilding it here from four fields would be
+           * the one place that could forget the branch — and the failure would be invisible, since the
+           * skill would simply stop following the branch it was pinned to.
+           *
+           * Null rather than empty for a skill with no repository, because null is the value that means
+           * "clear it on save" to this form and to the server.
+           */
+          repo: skill.repo?.url ?? null,
         }}
         error={saveSkill.error}
         /*

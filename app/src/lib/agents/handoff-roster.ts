@@ -29,7 +29,7 @@
  */
 
 /** The little a roster row has to carry for this to place it. */
-type Placeable = { id: string; hidden: boolean };
+type Placeable = { id: string; hidden: boolean; isSystemTemplate?: boolean };
 
 export type HandoffRoster<T> = {
   /** The rows to draw, in order: your roster first, then anything granted that you have hidden. */
@@ -60,10 +60,12 @@ export function handoffRoster<T extends Placeable>(input: {
 }): HandoffRoster<T> {
   const held = new Set(input.reachable);
   const isSelf = (candidate: T) => candidate.id === input.agentId;
+  const isEligible = (candidate: T) =>
+    !isSelf(candidate) && !candidate.isSystemTemplate;
 
   const offered = input.roster.filter(
     (candidate) =>
-      !isSelf(candidate) && (input.grantable || held.has(candidate.id)),
+      isEligible(candidate) && (input.grantable || held.has(candidate.id)),
   );
 
   /*
@@ -76,7 +78,9 @@ export function handoffRoster<T extends Placeable>(input: {
   const shown = new Set(offered.map((candidate) => candidate.id));
   const strays = input.hidden.filter(
     (candidate) =>
-      !isSelf(candidate) && held.has(candidate.id) && !shown.has(candidate.id),
+      isEligible(candidate) &&
+      held.has(candidate.id) &&
+      !shown.has(candidate.id),
   );
 
   const candidates = [...offered, ...strays];

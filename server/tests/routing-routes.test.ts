@@ -28,7 +28,7 @@ import {
  * model is never asked a question the person already answered.
  */
 
-const ACTOR = { id: "u1", email: "person@openbot.test", role: "user" } as const;
+const ACTOR = { id: "u1", email: "person@remii.test", role: "user" } as const;
 
 const ROSTER = [
   {
@@ -39,7 +39,7 @@ const ROSTER = [
   },
   {
     id: "picked-harness",
-    name: "OpenBot",
+    name: "Remii",
     roleDescription: "the package-selected harness",
     visibility: "public",
   },
@@ -67,8 +67,7 @@ function profile(input: {
     avatarSeed: input.id,
     deletedAt: null,
     endpoint: input.id === "picked-harness" ? "http://127.0.0.1:4201" : null,
-    hasAuth: false,
-    hasCallbackToken: false,
+    
     hidden: false,
     id: input.id,
     name: input.name,
@@ -156,7 +155,7 @@ describe("choosing the default route target", () => {
         }),
         profile({
           id: "picked-harness",
-          name: "OpenBot",
+          name: "Remii",
           roleDescription: "the package-selected harness",
           visibility: "public",
         }),
@@ -164,7 +163,17 @@ describe("choosing the default route target", () => {
     ).toBe("picked-harness");
   });
 
-  test("keeps the existing public then first fallback when no package pick exists", () => {
+  /*
+   * WAS "...public then first fallback...", giving the roster a private Bot and a public one and
+   * expecting the public one to win.
+   *
+   * There is no public fallback. `defaultRoutingProfile` takes the picked harness if the roster has
+   * one and otherwise the FIRST entry, and the roster it is handed is already scoped to this person
+   * — their own Bots plus system templates — so there is nothing shared to fall back to. The `public`
+   * row in the fixture is kept precisely because it is the case that used to decide the answer, and
+   * carrying the column is not enough to make it win.
+   */
+  test("takes the first entry when no package pick exists, public or not", () => {
     expect(
       defaultRoutingProfile([
         profile({
@@ -180,7 +189,7 @@ describe("choosing the default route target", () => {
           visibility: "public",
         }),
       ])?.id,
-    ).toBe("shared-bot");
+    ).toBe("private-bot");
   });
 
   test("the route endpoint passes the package pick as the router default", async () => {

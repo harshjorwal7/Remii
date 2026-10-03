@@ -1,9 +1,12 @@
+import { eq } from "drizzle-orm";
 import type { Context, MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import type { BotAccessCheck } from "../agents/profile-policy";
 import type { AuditReader } from "../audit";
 import type { AppVariables } from "../auth/guards";
-import { requireAdmin } from "../auth/guards";
+import type { Database } from "../db/client";
+import { subscriptions } from "../db/schema/billing";
+import { users } from "../db/schema/core";
 import { DEPLOYMENT_ROUTES } from "./deployment-routes";
 import {
   type ActionActor,
@@ -20,6 +23,163 @@ import {
 import type { PageFrameStore } from "./page-frames";
 import { dryRunAgainstHistory, REPLAYABLE_EVENT_TYPES } from "./policy-dry-run";
 import { type PolicyStore, parseActionPolicy } from "./policy-store";
+
+function attachPolicyRoutes(
+  routes: Hono<{ Variables: AppVariables }>,
+  policyStore: PolicyStore,
+  requireUser: MiddlewareHandler<{ Variables: AppVariables }>,
+  auditReader: AuditReader | undefined,
+  database: Database | undefined,
+) {
+  /**
+   * The person's own policy.
+   *
+   * Here rather than in the settings routes file, because this directory owns the computer and
+   * `app.ts` takes one appended line per mount. The storage underneath is durable, so a person's
+   * rules remain active after a restart. One user reads exactly their own: there is no role that
+   * reads another's.
+   */
+  routes.get("/policy", requireUser, (context) => {
+    return context.json({ policy: policyStore.get(context.var.actor.id) });
+  });
+
+  routes.put("/policy", requireUser, async (context) => {
+    const user = context.var.actor;
+    // Custom boundaries are a paid-tier feature, decided per person: there is
+    // no administrator whose own policy this would bypass.
+    let tier = "free";
+    if (database) {
+      const [sub] = await database
+        .select({ tier: subscriptions.tier })
+        .from(subscriptions)
+        .where(eq(subscriptions.userId, user.id));
+      if (sub) {
+        tier = sub.tier;
+      }
+    }
+    if (tier !== "pro" && tier !== "power" && tier !== "starter") {
+      return context.json(
+        {
+          error:
+            "Custom action policies require a paid subscription. Free tiers follow the platform default policy.",
+        },
+        403,
+      );
+    }
+
+    const parsed = parseActionPolicy(
+      await context.req.json().catch(() => null),
+    );
+    if (!parsed.ok) {
+      return context.json({ error: parsed.error }, 400);
+    }
+    try {
+      await policyStore.set(
+        parsed.policy,
+        context.var.actor.email,
+        context.var.actor.id,
+      );
+    } catch {
+      /*
+       * Saved, or said so. A boundary that is enforced now and gone after the next restart is worse
+       * than one that was never set, so a policy that could not be written is reported as a failure
+       * rather than quietly held in memory. Nothing changes: the previous policy is still in force.
+       */
+      return context.json(
+        {
+          error:
+            "That rule could not be saved, so it has not been applied. The previous boundary is still in force.",
+        },
+        503,
+      );
+    }
+    // Echoed back so a caller can see exactly what is now in force rather than assuming its request
+    // was stored verbatim.
+    return context.json({ policy: policyStore.get(context.var.actor.id) });
+  });
+
+  /**
+   * What would this policy have decided, about actions already on the trail?
+   *
+   * A rule is otherwise written blind: saved first, understood later, from the refusals it produces
+   * in production. This answers before the save — the candidate is validated exactly as PUT
+   * validates it, replayed over recent judged actions, and the reply names each action it would have
+   * decided differently and the rule that would have decided it.
+   *
+   * A POST that writes nothing: not the policy, and no audit row either. Nothing is decided here —
+   * no action is permitted or refused, nothing runs or is stopped — and a trail row for every
+   * what-if would bury the rows that record what actually happened. Replayed over the asking
+   * person's own history only: one user's trail is not another's to test against.
+   */
+  routes.post("/policy-dry-run", requireUser, async (context) => {
+    if (!auditReader) {
+      return context.json(
+        {
+          error:
+            "This deployment records no readable trail, so there is no history to test against.",
+        },
+        501,
+      );
+    }
+
+    const body = (await context.req.json().catch(() => null)) as {
+      policy?: unknown;
+      limit?: unknown;
+    } | null;
+    const parsed = parseActionPolicy(body?.policy);
+    if (!parsed.ok) {
+      return context.json({ error: parsed.error }, 400);
+    }
+
+    // Bounded, and biased to recency: the question is what this rule does to the traffic the
+    // deployment actually has, and last week's traffic answers that better than a full scan.
+    //
+    // Strict on purpose. This used to read `typeof limit === "number" ? limit : 200` and clamp,
+    // so `"abc"`, `null` and `true` silently became 200, `Infinity` silently became 500, and
+    // `NaN` became `NaN` and travelled into `auditReader.list` as one. A what-if answered from
+    // the wrong slice of history is worse than no answer, because it is believed.
+    const rawLimit = body?.limit;
+    let limit = 200;
+    if (rawLimit !== undefined) {
+      if (
+        typeof rawLimit !== "number" ||
+        !Number.isInteger(rawLimit) ||
+        rawLimit < 1 ||
+        rawLimit > 500
+      ) {
+        return context.json(
+          { error: "limit must be a whole number between 1 and 500." },
+          400,
+        );
+      }
+      limit = rawLimit;
+    }
+
+    const { events } = await auditReader.list({
+      limit,
+      eventType: REPLAYABLE_EVENT_TYPES.join(","),
+      targetType: "computer",
+      // This person's history only: the dry run answers what a rule would do
+      // to their own traffic, never what it would do to somebody else's.
+      actorUserId: context.var.actor.id,
+    });
+
+    return context.json({
+      report: dryRunAgainstHistory(parsed.policy, events),
+    });
+  });
+}
+
+export function createPolicyRoutes(
+  policyStore: PolicyStore,
+  requireUser: MiddlewareHandler<{ Variables: AppVariables }>,
+  auditReader: AuditReader | undefined,
+  database: Database | undefined,
+) {
+  const routes = new Hono<{ Variables: AppVariables }>();
+  attachPolicyRoutes(routes, policyStore, requireUser, auditReader, database);
+  return routes;
+}
 
 /**
  * The Bot computer's surface, behind the same session guard as every other API route.
@@ -49,6 +209,17 @@ export function createComputerRoutes(
    * endpoint says it cannot answer rather than answering from nothing.
    */
   auditReader?: AuditReader,
+  database?: Database,
+  /**
+   * Whether a verified email can actually be demanded.
+   *
+   * True when this deployment can deliver verification codes (a mail provider is configured).
+   * False means nobody can ever complete verification, so demanding it would refuse every
+   * computer use forever rather than anyone's abuse: sign-in already treats mail the same way
+   * (see `requireEmailVerification` in auth/index.ts). Absent means enforced, the safe
+   * direction for a caller that predates the flag.
+   */
+  emailVerificationEnforced?: boolean,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
 
@@ -86,17 +257,58 @@ export function createComputerRoutes(
     if (botId && !(await canUseBot(context.var.actor, botId))) {
       return context.json({ error: "There is no such Bot." }, 404);
     }
+    /*
+     * No verified email, no computer. Provisioning a sandbox (or waking one)
+     * costs real money and hands out a browser, so anonymous-but-signed-in
+     * trials must verify first. Status stays open so the UI can explain why
+     * instead of spinning: it never provisions, it only reads provider state.
+     * Absent database, there is nothing to check against and the gate stays
+     * open, the way every optional store in this file degrades.
+     *
+     * Unenforced when this deployment cannot deliver verification codes at all: with no mail
+     * provider there is no code to type, and the gate would refuse every computer use forever
+     * rather than anyone's abuse. Sign-in already draws this exact line.
+     */
+    if (
+      database &&
+      botId &&
+      emailVerificationEnforced !== false &&
+      !context.req.path.endsWith(`/${botId}/status`)
+    ) {
+      const actor = context.var.actor;
+      const verified =
+        actor.emailVerified ??
+        (
+          await database
+            .select({ emailVerified: users.emailVerified })
+            .from(users)
+            .where(eq(users.id, actor.id))
+            .limit(1)
+            .catch(() => [])
+        )[0]?.emailVerified;
+      if (!verified) {
+        return context.json(
+          { error: "Verify your email address before using a computer." },
+          403,
+        );
+      }
+    }
     await next();
   });
 
   routes.get("/:botId/status", async (context) => {
     const botId = context.req.param("botId");
-    return context.json(await gateway.status(botId));
+    return context.json(await gateway.status(botId, context.var.actor.id));
   });
 
   routes.get("/:botId/screenshot", async (context) => {
     try {
-      return context.json(await gateway.screenshot(context.req.param("botId")));
+      return context.json(
+        await gateway.screenshot(
+          context.req.param("botId"),
+          context.var.actor.id,
+        ),
+      );
     } catch (error) {
       return context.json(errorBody(error), statusFor(error));
     }
@@ -104,7 +316,9 @@ export function createComputerRoutes(
 
   routes.get("/:botId/read", async (context) => {
     try {
-      return context.json(await gateway.read(context.req.param("botId")));
+      return context.json(
+        await gateway.read(context.req.param("botId"), context.var.actor.id),
+      );
     } catch (error) {
       return context.json(errorBody(error), statusFor(error));
     }
@@ -180,6 +394,7 @@ export function createComputerRoutes(
    */
   async function keepFrameOf(
     botId: string,
+    actorId: string,
     toolCallId: string,
     url: string,
     title: string,
@@ -197,14 +412,14 @@ export function createComputerRoutes(
        * suspended computer, so a convenience picture could wake a machine the culler had just put to
        * sleep and hold a navigation open for the length of a pod schedule while it did.
        */
-      const status = await gateway.status(botId);
+      const status = await gateway.status(botId, actorId);
       if (status.state !== "ready") {
         console.warn(
           `[computer] not keeping a frame for ${toolCallId}: the computer is ${status.state}, and photographing it would wake it.`,
         );
         return;
       }
-      const shot = await gateway.screenshot(botId);
+      const shot = await gateway.screenshot(botId, actorId);
       const verdict = frameIsOfThisPage(shot.url, url);
       if (!verdict.ok) {
         console.warn(
@@ -212,8 +427,13 @@ export function createComputerRoutes(
         );
         return;
       }
+      /*
+       * Filed under the (user, Bot) computer key, not the bare Bot id. The frame is a screenshot
+       * of a signed-in page, so a row one user could read because they use the same coworker is
+       * that user's data in the other's row.
+       */
       await pageFrames.save({
-        computerId: botId,
+        computerId: await gateway.keyOf(botId, actorId),
         toolCallId,
         url,
         title,
@@ -254,7 +474,13 @@ export function createComputerRoutes(
         },
         body.url.trim(),
       );
-      await keepFrameOf(botId, toolCallId, result.url, result.title);
+      await keepFrameOf(
+        botId,
+        context.var.actor.id,
+        toolCallId,
+        result.url,
+        result.title,
+      );
       return context.json(result);
     } catch (error) {
       if (error instanceof ActionRefusedError) {
@@ -272,7 +498,12 @@ export function createComputerRoutes(
 
   routes.post("/:botId/snapshot", async (context) => {
     try {
-      return context.json(await gateway.snapshot(context.req.param("botId")));
+      return context.json(
+        await gateway.snapshot(
+          context.req.param("botId"),
+          context.var.actor.id,
+        ),
+      );
     } catch (error) {
       return context.json(errorBody(error), statusFor(error));
     }
@@ -345,7 +576,9 @@ export function createComputerRoutes(
    */
   routes.get("/:botId/control", async (context) => {
     try {
-      return context.json(await gateway.control(context.req.param("botId")));
+      return context.json(
+        await gateway.control(context.req.param("botId"), context.var.actor.id),
+      );
     } catch (error) {
       return context.json(errorBody(error), statusFor(error));
     }
@@ -364,27 +597,30 @@ export function createComputerRoutes(
   );
 
   /**
-   * The computers, for the admin surface.
+   * This person's computers, and only theirs.
    *
-   * Not per-Bot in the path the way the acting routes are: this asks the computer what it holds, and
-   * it holds a list. `:botId` is still there because every route under this router has it. The
-   * list itself is every computer, so a signed-in user is not enough; an administrator has to ask.
-   */
-  /**
-   * Every computer in the deployment.
-   *
-   * Its own route rather than `/:botId/computers`, which is what Admin used to call with a
+   * Its own route rather than `/:botId/computers`, which the admin surface used to call with a
    * placeholder id. That worked until the bot-access middleware arrived: the placeholder is not a
    * Bot, `canUseBot` said so, and the screen 404d for everybody including an administrator, showing
-   * an empty page rather than the fleet. The list is deployment-wide, so it is addressed
-   * deployment-wide and named in DEPLOYMENT_ROUTES beside `/policy`.
+   * an empty page rather than the fleet. It lives in DEPLOYMENT_ROUTES beside `/policy` so the
+   * middleware exempts it from the Bot-in-the-path check.
+   *
+   * WHICH IS WHY IT IS FILTERED RATHER THAN DEPLOYMENT-WIDE, and the two doc blocks this replaces
+   * each said the opposite. There is no administrator in individual-user SaaS, so "an administrator
+   * has to ask" named a role nobody has and described a gate that does not exist — the route
+   * answered every signed-in person with the whole fleet, which is how a coworker could be listed
+   * for somebody who had never been granted one. Every row is now kept or dropped on `owner`, which
+   * is the same column the acting routes resolve a computer key from.
    */
   routes.get("/fleet", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) return denied;
-
     try {
-      return context.json(await gateway.computers());
+      const result = await gateway.computers();
+      return context.json({
+        ...result,
+        computers: result.computers.filter(
+          (computer) => computer.owner === context.var.actor.id,
+        ),
+      });
     } catch (error) {
       return context.json(errorBody(error), statusFor(error));
     }
@@ -394,11 +630,15 @@ export function createComputerRoutes(
     // The session guard and the question of whether this person may act as the Bot in the path are
     // both applied by the middleware above. Neither is the question here: the answer is the whole
     // fleet whatever `:botId` says, so it takes administering the deployment.
-    const denied = requireAdmin(context);
-    if (denied) return denied;
 
     try {
-      return context.json(await gateway.computers());
+      const result = await gateway.computers();
+      return context.json({
+        ...result,
+        computers: result.computers.filter(
+          (computer) => computer.owner === context.var.actor.id,
+        ),
+      });
     } catch (error) {
       return context.json(errorBody(error), statusFor(error));
     }
@@ -525,13 +765,19 @@ export function createComputerRoutes(
     }
     try {
       return context.json(
-        await gateway.humanInput(context.req.param("botId"), {
-          ...(body ?? {}),
-          // Last, so the checked value wins. Spread over it, a body carrying its own `kind` replaced
-          // the one this route had just checked, and the gateway puts that value into the path it
-          // calls on the computer.
-          kind,
-        } as Parameters<typeof gateway.humanInput>[1]),
+        await gateway.humanInput(
+          context.req.param("botId"),
+          {
+            ...(body ?? {}),
+            // Last, so the checked value wins. Spread over it, a body carrying its own `kind`
+            // replaced the one this route had just checked, and the gateway puts that value into
+            // the path it calls on the computer.
+            kind,
+          } as Parameters<typeof gateway.humanInput>[1],
+          // The acting user, because this drives the (user, Bot) pair's own
+          // browser: two users of one template never share a takeover.
+          context.var.actor.id,
+        ),
       );
     } catch (error) {
       return context.json(errorBody(error), statusFor(error));
@@ -559,7 +805,10 @@ export function createComputerRoutes(
     if (botId.length > 200 || toolCallId.length > 200) {
       return context.json({ error: "A Bot and a turn are required." }, 400);
     }
-    const stored = await pageFrames.load(botId, toolCallId);
+    const stored = await pageFrames.load(
+      await gateway.keyOf(botId, context.var.actor.id),
+      toolCallId,
+    );
     return context.json({ frame: stored });
   });
 
@@ -586,7 +835,7 @@ export function createComputerRoutes(
    * A command on the Bot's computer.
    *
    * Same shape as every other acting route: the gateway decides and records, this only shapes the
-   * request. `timeoutMs` is validated here against the shell's own bounds (1s floor, 600s ceiling),
+   * request. `timeoutMs` is validated here against the shell's own bounds (1s floor, 60s ceiling),
    * so a NaN, an Infinity, a negative, or a ten-hour value answers 400 instead of travelling to the
    * computer as a RangeError 500 or a run that outlasts the transport backstop.
    */
@@ -600,11 +849,11 @@ export function createComputerRoutes(
           typeof body.timeoutMs !== "number" ||
           !Number.isInteger(body.timeoutMs) ||
           body.timeoutMs < 1_000 ||
-          body.timeoutMs > 600_000
+          body.timeoutMs > 60_000
         ) {
           return {
             error:
-              "timeoutMs must be a whole number of milliseconds between 1000 and 600000.",
+              "timeoutMs must be a whole number of milliseconds between 1000 and 60000.",
           };
         }
       }
@@ -641,120 +890,7 @@ export function createComputerRoutes(
     }),
   );
 
-  /**
-   * The policy, readable and writable by an administrator.
-   *
-   * Here rather than in the admin routes file, because this directory owns the computer and `app.ts`
-   * takes one appended line per mount. The storage underneath is durable, so administrator rules
-   * remain active after a restart.
-   */
-  routes.get("/policy", requireUser, (context) => {
-    const denied = requireAdmin(context);
-    return denied ?? context.json({ policy: policyStore.get() });
-  });
-
-  routes.put("/policy", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) return denied;
-
-    const parsed = parseActionPolicy(
-      await context.req.json().catch(() => null),
-    );
-    if (!parsed.ok) {
-      return context.json({ error: parsed.error }, 400);
-    }
-    try {
-      await policyStore.set(parsed.policy, context.var.actor.email);
-    } catch {
-      /*
-       * Saved, or said so. A boundary that is enforced now and gone after the next restart is worse
-       * than one that was never set, so a policy that could not be written is reported as a failure
-       * rather than quietly held in memory. Nothing changes: the previous policy is still in force.
-       */
-      return context.json(
-        {
-          error:
-            "That rule could not be saved, so it has not been applied. The previous boundary is still in force.",
-        },
-        503,
-      );
-    }
-    // Echoed back so a caller can see exactly what is now in force rather than assuming its request
-    // was stored verbatim.
-    return context.json({ policy: policyStore.get() });
-  });
-
-  /**
-   * What would this policy have decided, about actions already on the trail?
-   *
-   * A rule is otherwise written blind: saved first, understood later, from the refusals it produces
-   * in production. This answers before the save — the candidate is validated exactly as PUT
-   * validates it, replayed over recent judged actions, and the reply names each action it would have
-   * decided differently and the rule that would have decided it.
-   *
-   * A POST that writes nothing: not the policy, and no audit row either. Nothing is decided here —
-   * no action is permitted or refused, nothing runs or is stopped — and a trail row for every
-   * what-if would bury the rows that record what actually happened. Deployment-wide and named in
-   * DEPLOYMENT_ROUTES beside `/policy`, and admin-gated the same way, because history is the
-   * administrator's view.
-   */
-  routes.post("/policy-dry-run", requireUser, async (context) => {
-    const denied = requireAdmin(context);
-    if (denied) return denied;
-
-    if (!auditReader) {
-      return context.json(
-        {
-          error:
-            "This deployment records no readable trail, so there is no history to test against.",
-        },
-        501,
-      );
-    }
-
-    const body = (await context.req.json().catch(() => null)) as {
-      policy?: unknown;
-      limit?: unknown;
-    } | null;
-    const parsed = parseActionPolicy(body?.policy);
-    if (!parsed.ok) {
-      return context.json({ error: parsed.error }, 400);
-    }
-
-    // Bounded, and biased to recency: the question is what this rule does to the traffic the
-    // deployment actually has, and last week's traffic answers that better than a full scan.
-    //
-    // Strict on purpose. This used to read `typeof limit === "number" ? limit : 200` and clamp,
-    // so `"abc"`, `null` and `true` silently became 200, `Infinity` silently became 500, and
-    // `NaN` became `NaN` and travelled into `auditReader.list` as one. A what-if answered from
-    // the wrong slice of history is worse than no answer, because it is believed.
-    const rawLimit = body?.limit;
-    let limit = 200;
-    if (rawLimit !== undefined) {
-      if (
-        typeof rawLimit !== "number" ||
-        !Number.isInteger(rawLimit) ||
-        rawLimit < 1 ||
-        rawLimit > 500
-      ) {
-        return context.json(
-          { error: "limit must be a whole number between 1 and 500." },
-          400,
-        );
-      }
-      limit = rawLimit;
-    }
-
-    const { events } = await auditReader.list({
-      limit,
-      eventType: REPLAYABLE_EVENT_TYPES.join(","),
-      targetType: "computer",
-    });
-
-    return context.json({
-      report: dryRunAgainstHistory(parsed.policy, events),
-    });
-  });
+  attachPolicyRoutes(routes, policyStore, requireUser, auditReader, database);
 
   return routes;
 }
@@ -865,7 +1001,7 @@ async function act(
  * Compared against rather than imported from `auth/dev-actor` because the computer must not depend on the
  * authentication module's internals; this is the one fact about it that matters here.
  */
-const DEV_ACTOR_EMAIL = "dev@openbot.local";
+const DEV_ACTOR_EMAIL = "dev@remii.local";
 
 function isBadRequest(value: unknown): value is BadRequest {
   return (

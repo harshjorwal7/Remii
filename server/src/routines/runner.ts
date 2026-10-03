@@ -22,6 +22,7 @@
  * within a firing never sees the routine that fails cleanly, once, every single night.
  */
 import type { AgentActor } from "../agents/profile-types";
+import { MAX_ROUTINE_DAILY_CREDITS } from "../billing/metering";
 import type { ChannelStore } from "../channels/routes";
 import type { RoutineStore } from "./store";
 
@@ -32,7 +33,7 @@ export type TurnRunner = (input: {
   agentId: string;
   threadId: string; // the owner's thread for the routine's channel
   instruction: string; // the user message of this turn
-}) => Promise<{ replyText: string }>;
+}) => Promise<{ replyText: string; creditsDeducted?: number }>;
 
 export type RoutineRunner = { run(routineRunId: string): Promise<void> };
 
@@ -51,6 +52,9 @@ const FATIGUE_LIMIT = 10;
 
 const SWITCHED_OFF =
   "This routine has failed ten times in a row, so I have switched it off. Ask me to turn it back on when whatever it needs is working.";
+
+const CIRCUIT_BREAKER_OFF =
+  "This routine consumed more than 30 credits today, so I have switched it off to prevent runaway usage. Ask me to turn it back on when whatever it needs is working.";
 
 /** Measured in code points, like every other cap in this area, so nothing is cut mid-pair. */
 function shorten(reason: string): string {
@@ -127,18 +131,50 @@ export function createRoutineRunner(options: {
       return;
     }
 
-    let replyText: string;
+    /*
+     * ROUTINE CIRCUIT BREAKER: Halt routine if it has consumed more than 30 credits in a single day.
+     */
     try {
-      ({ replyText } = await runTurn({
+      const dailyCredits = await routineStore.dailyCreditsConsumed(routineId);
+      if (dailyCredits >= MAX_ROUTINE_DAILY_CREDITS) {
+        await routineStore.setEnabled(ownerUserId, routineId, false);
+        await routineStore.finishRun(
+          routineRunId,
+          "skipped",
+          "daily credit limit exceeded",
+          0,
+        );
+        await say(CIRCUIT_BREAKER_OFF);
+        return;
+      }
+    } catch (circuitError) {
+      console.error(
+        JSON.stringify({
+          type: "routine-circuit-breaker-precheck-failed",
+          routineId,
+          routineRunId,
+          reason: reasonOf(circuitError),
+        }),
+      );
+    }
+
+    let replyText: string;
+    let turnCredits = 1;
+    try {
+      const turnResult = await runTurn({
         ownerUserId,
         routineId,
         agentId,
         threadId: channel.threadId,
         instruction,
-      }));
+      });
+      replyText = turnResult.replyText;
+      if (turnResult.creditsDeducted !== undefined) {
+        turnCredits = turnResult.creditsDeducted;
+      }
     } catch (error) {
       const reason = reasonOf(error);
-      await routineStore.finishRun(routineRunId, "failed", reason);
+      await routineStore.finishRun(routineRunId, "failed", reason, turnCredits);
 
       /*
        * THE FATIGUE RULE, read after the failure is recorded — the count has to include this
@@ -161,7 +197,6 @@ export function createRoutineRunner(options: {
           await routineStore.setEnabled(ownerUserId, routineId, false);
           await say(SWITCHED_OFF);
         }
-        // In between, nothing is said. The run rows carry it, and the routines page reads them.
       } catch (fatigueError) {
         console.error(
           JSON.stringify({
@@ -172,6 +207,15 @@ export function createRoutineRunner(options: {
           }),
         );
       }
+
+      try {
+        const dailyCredits = await routineStore.dailyCreditsConsumed(routineId);
+        if (dailyCredits >= MAX_ROUTINE_DAILY_CREDITS) {
+          await routineStore.setEnabled(ownerUserId, routineId, false);
+          await say(CIRCUIT_BREAKER_OFF);
+        }
+      } catch {}
+
       return;
     }
 
@@ -181,7 +225,29 @@ export function createRoutineRunner(options: {
      * channel, and then the firing is closed.
      */
     await say(replyText);
-    await routineStore.finishRun(routineRunId, "succeeded");
+    await routineStore.finishRun(
+      routineRunId,
+      "succeeded",
+      undefined,
+      turnCredits,
+    );
+
+    try {
+      const dailyCredits = await routineStore.dailyCreditsConsumed(routineId);
+      if (dailyCredits >= MAX_ROUTINE_DAILY_CREDITS) {
+        await routineStore.setEnabled(ownerUserId, routineId, false);
+        await say(CIRCUIT_BREAKER_OFF);
+      }
+    } catch (circuitError) {
+      console.error(
+        JSON.stringify({
+          type: "routine-circuit-breaker-postcheck-failed",
+          routineId,
+          routineRunId,
+          reason: reasonOf(circuitError),
+        }),
+      );
+    }
   }
 
   return {

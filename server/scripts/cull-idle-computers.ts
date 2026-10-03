@@ -1,89 +1,38 @@
 /**
- * One sweep: notice which computers have gone idle, and suspend whatever this pod can claim.
+ * The idle-sweep, retired.
  *
- * Run from a CronJob rather than from a timer inside the API. Every replica would fire its own timer
- * and each would decide, independently, to suspend the same computer. Deleting old audit rows twice
- * is harmless, which is why the retention sweep may work that way; taking a browser away from
- * somebody who has just come back is not.
+ * It used to notice which computers had gone idle and suspend whatever the pod could claim, driven by
+ * a CronJob rather than a timer in the API so that replicas could not each decide to suspend the same
+ * computer. All of that was written for the per-Bot sandbox provider.
  *
- * Exits non-zero only when the sweep itself could not run. A computer that refused to suspend is
- * reported and left for the next sweep, because a computer still running costs money rather than
- * losing anything, and a failing CronJob that pages somebody at 3am should mean something worse.
+ * That provider is gone, and with it every provider behind `createComputerProvider` — the function now
+ * throws by design, because the only computer this deployment has is an E2B desktop per Bot. So
+ * there is nothing left for this script to suspend: `offerIdleComputers` and `suspendClaimedComputers`
+ * both need a `ComputerProvider` that no longer has an implementation to construct.
+ *
+ * A E2B desktop stops itself instead. `E2B_AUTOSTOP_MINUTES` reaches the sandbox as
+ * `autoStopInterval`, the disk survives the stop, and the next request starts it again — so idle
+ * machines are already being reclaimed, and this sweep was the second mechanism doing the same job
+ * with a lease queue around it.
+ *
+ * KEPT AS AN EXPLANATION, NOT AS A NO-OP. A CronJob left pointing at this path would fail on every
+ * tick, and the failure is the only thing that will ever tell whoever deployed it that it is no longer
+ * needed. Exiting non-zero with that sentence is the useful behaviour; exiting 0 would leave a job
+ * that does nothing and looks healthy.
  */
-import { createComputerProvider } from "../src/computer/provider";
 import { loadConfig } from "../src/config";
-import { createDatabase } from "../src/db/client";
-import {
-  CULL_KIND,
-  offerIdleComputers,
-  suspendClaimedComputers,
-} from "../src/work/culler";
-import { createWorkQueue } from "../src/work/queue";
-import { workOwner } from "../../shared/work-owner";
 
 const config = loadConfig(process.env);
-if (!config.computer) {
-  throw new Error(
-    "No computer provider is configured, so there are no computers to suspend.",
-  );
-}
-if (config.computer.provider !== "sandbox") {
-  throw new Error(
-    `The culler only has something to do where each Bot has its own computer, and this deployment uses the "${config.computer.provider}" provider.`,
-  );
-}
 
-const database = createDatabase(config.databaseUrl);
-const queue = createWorkQueue(database);
-const provider = createComputerProvider(config.computer);
+const provider = config.computer?.provider ?? "none";
 
-// A name for the lease, so a stuck claim can be traced back to the pod that took it.
-const owner = workOwner("culler");
-
-try {
-  const options = {
-    database,
-    queue,
+console.error(
+  JSON.stringify({
+    type: "computer-cull-retired",
     provider,
-    idleAfterMs: config.computer.idleAfterMs,
-    owner,
-  };
-  const { offered } = await offerIdleComputers(options);
-  const report = await suspendClaimedComputers(options);
-  /*
-   * Sweep what has been done for a day.
-   *
-   * A finished row is what stops the same key being run twice, so it has to outlive the run by long
-   * enough for any late replica to collide with it. It does not have to outlive that by a week: a
-   * queue is not an archive, and the audit trail is where "what happened" lives.
-   */
-  const purged = await queue.purge({
-    kind: CULL_KIND,
-    olderThanMs: 24 * 60 * 60 * 1000,
-    /*
-     * A FINISHED SUSPENSION IS KEPT FOR THE IDLE WINDOW, NOT FOR A DAY.
-     *
-     * The key is the Bot id, so the row left behind by a suspension is what the next one collides
-     * with: a computer resumed, used, and left alone again was offered every sweep and swallowed
-     * every time, and stayed awake until the row aged out a day later. Nobody saw it, because a
-     * sweep that offers work and suspends nothing looks exactly like a fleet that is busy.
-     *
-     * The idle window is the right length because it is the same clock the offer runs on: a Bot
-     * cannot qualify as idle again until this long after its last action, by which point its row has
-     * gone. A day is still right for the other half, where the window is the backoff before a
-     * suspension that keeps failing is tried again.
-     */
-    finishedOlderThanMs: config.computer.idleAfterMs,
-  });
-  console.info(
-    JSON.stringify({
-      type: "computer-cull",
-      offered,
-      suspended: report.suspended,
-      skipped: report.skipped,
-      purged,
-    }),
-  );
-} finally {
-  await database.$client.end({ timeout: 5 });
-}
+    error:
+      "This sweep suspended per-Bot sandbox computers, and every provider it could suspend has been removed. A E2B desktop stops itself after E2B_AUTOSTOP_MINUTES, so this CronJob can be deleted from the deployment.",
+  }),
+);
+
+process.exit(1);

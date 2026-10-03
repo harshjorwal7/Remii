@@ -77,11 +77,13 @@ export const proposedSkillSchema = z.object({
     ),
   title: z
     .string()
+    .max(120, "Title must be 120 characters or fewer.")
     .describe(
       "What the skill is called in the menu, in a few words of sentence case: `Check a claim against a source`. Up to 120 characters.",
     ),
   summary: z
     .string()
+    .max(200, "The one-liner must be 200 characters or fewer.")
     .optional()
     .describe(
       "One line under the title, saying what invoking it will do. Up to 200 characters. Omit only if the title already says everything.",
@@ -96,6 +98,12 @@ export const proposedSkillSchema = z.object({
     .optional()
     .describe(
       "The tools the skill needs, as `serverId/toolName` refs from list_skill_tools. This is a declaration, not a grant: naming a tool cannot make it callable, and a skill naming a tool its Bot does not hold simply loads nothing. Omit for a skill that is only prose.",
+    ),
+  repo: z
+    .string()
+    .optional()
+    .describe(
+      "A public GitHub repository this skill is about, as a full address: `https://github.com/owner/repo`, optionally with a branch or folder as `https://github.com/owner/repo/tree/main/packages/api`. Give one when the skill is about how a particular codebase does something, and say in the instructions what to look for — the Bot gets the repository's file list, a search and one file at a time, and nothing else. Private repositories cannot be read here. Omit for a skill that is only instructions.",
     ),
 });
 
@@ -123,6 +131,7 @@ export function checkProposal(args: {
   summary?: unknown;
   instructions?: unknown;
   tools?: unknown;
+  repo?: unknown;
 }): CheckedProposal {
   const parsed = skillFormSchema.safeParse({
     slug: typeof args.slug === "string" ? args.slug : "",
@@ -137,12 +146,38 @@ export function checkProposal(args: {
      * to redo the whole proposal over a comma. Declaring nothing is always a valid skill.
      */
     tools: toolRefsIn(args.tools),
+    /*
+     * Null when the model named no repository, rather than omitted, because `skillFormSchema` requires
+     * the field and a proposal that did not think about it must not fail the whole skill over it.
+     *
+     * Read with the same leniency as `tools`: anything that is not a non-empty string is no repository.
+     * A model that answered `repo: 42` meant none, and refusing the whole proposal over it would send
+     * it back to write the instruction again.
+     */
+    repo:
+      typeof args.repo === "string" && args.repo.trim()
+        ? args.repo.trim()
+        : null,
   });
   if (parsed.success) return { ok: true, values: parsed.data };
   return {
     ok: false,
     problems: parsed.error.issues.map((issue) => {
       const field = issue.path.join(".");
+      if (field === "title" && typeof args.title === "string") {
+        const len = args.title.trim().length;
+        if (len > 120) {
+          const excess = len - 120;
+          return `title: Title was ${len} characters, but must be 120 characters or fewer. Trim at least ${excess} character${excess === 1 ? "" : "s"} and propose it again.`;
+        }
+      }
+      if (field === "summary" && typeof args.summary === "string") {
+        const len = args.summary.trim().length;
+        if (len > 200) {
+          const excess = len - 200;
+          return `summary: Summary was ${len} characters, but must be 200 characters or fewer. Trim at least ${excess} character${excess === 1 ? "" : "s"} and propose it again.`;
+        }
+      }
       return field ? `${field}: ${issue.message}` : issue.message;
     }),
   };
@@ -196,6 +231,12 @@ export function describeSkills(
     ];
     if (skill.summary) parts.push(skill.summary);
     if (skill.tools.length > 0) parts.push(`needs ${skill.tools.join(", ")}`);
+    /*
+     * The repository on the same line, because it is the other half of what a skill needs and a Bot
+     * improving a skill has to be able to see that it has one — otherwise the improvement drops the
+     * repository and the skill silently loses the ability this field exists for.
+     */
+    if (skill.repo) parts.push(`reads ${skill.repo.url}`);
     return `- ${parts.join(" · ")}`;
   });
   return [
@@ -217,6 +258,7 @@ export function describeSkill(skill: PluginSkill): string {
     skill.tools.length > 0
       ? `Declared tools: ${skill.tools.join(", ")}`
       : "Declared tools: (none)",
+    skill.repo ? `Repository: ${skill.repo.url}` : "Repository: (none)",
     "Instructions:",
     skill.instructions,
   ].join("\n");

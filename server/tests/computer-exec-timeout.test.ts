@@ -26,7 +26,7 @@ function appWith(calls: { timeoutMs?: number }[]) {
   ) => {
     context.set("actor", {
       id: "user-1",
-      email: "user@openbot.test",
+      email: "user@remii.test",
       role: "admin",
     });
     await next();
@@ -43,7 +43,7 @@ async function postExec(
   app: ReturnType<typeof createComputerRoutes>,
   body: unknown,
 ) {
-  return app.request("http://openbot.test/bot-1/exec", {
+  return app.request("http://remii.test/bot-1/exec", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -93,8 +93,10 @@ describe("POST /:botId/exec timeoutMs", () => {
       expect(response.status).toBe(400);
       await expect(response.json()).resolves.toEqual({
         error:
-          "timeoutMs must be a whole number of milliseconds between 1000 and 600000.",
+          "timeoutMs must be a whole number of milliseconds between 1000 and 60000.",
       });
+      // Never reaches the computer, which is the point: a NaN or a ten-hour value there is a RangeError
+      // 500 or a run that outlasts the transport backstop, rather than a refusal the caller can read.
       expect(calls).toEqual([]);
     },
   );

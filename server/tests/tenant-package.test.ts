@@ -27,6 +27,7 @@ import {
   validateThemeCss,
 } from "../src/tenant-package";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
+import { REMII_AGENT_ID } from "../../shared/remii";
 
 const database = createDatabase(testDatabaseUrl(), TEST_POOL);
 const createdAgentIds: string[] = [];
@@ -216,12 +217,12 @@ describe("a seeded Mastra Bot", () => {
 
   test("is seeded as its own kind, carrying the agent it names", () => {
     const [agent] = withAgent(
-      "{ id: research, name: Research, title: Research, role_description: Look things up., type: remote-mastra, endpoint: http://mastra.internal, remote_agent_id: openbot }",
+      "{ id: research, name: Research, title: Research, role_description: Look things up., type: remote-mastra, endpoint: http://mastra.internal, remote_agent_id: remii }",
     ).agents;
     expect(agent?.type).toBe("remote_mastra");
     expect(agent?.configuration).toEqual({
       endpoint: "http://mastra.internal",
-      remoteAgentId: "openbot",
+      remoteAgentId: "remii",
     });
   });
 
@@ -402,31 +403,54 @@ describe("tenant YAML validation", () => {
       fileURLToPath(new URL("../../examples/fintech", import.meta.url)),
     );
 
-    expect(tenantPackage.tenantId).toBe("openbot");
+    expect(tenantPackage.tenantId).toBe("remii");
     expect(tenantPackage.stylesheet).toBeNull();
     expect(tenantPackage.themeCss).toBe("");
     expect(tenantPackage.checksum).toMatch(/^[a-f0-9]{64}$/);
-    expect(tenantPackage.agents).toContainEqual({
-      id: "general-assistant",
-      name: "General Assistant",
-      title: "Everyday Work",
-      roleDescription:
-        "Help with everyday work using clear, concise, and accurate answers.",
-      avatarSeed: "general-assistant",
+    /*
+     * The entry, by its shape and its SKILLS, rather than by restating the whole prompt.
+     *
+     * WAS `toContainEqual({ ... })` naming "General Assistant" / "Everyday Work" and pasting both
+     * paragraphs of its prompt. That package entry was rewritten into Remii, the chief of staff, and
+     * every edit to it would have meant editing a thousand-word string here as well — which is how a
+     * fixture stops being about loading and starts being a second copy of the YAML.
+     *
+     * What the loader has to get right is checked instead: the id, the type, the seed derived from
+     * the id, and the skill list. The skills are gates rather than preferences — `bot-creator` is what
+     * makes the app offer `list_bots`, `read_bot`, `list_bot_skills` and `save_bot`, and
+     * `skill-creator` the four tools that turn an interview into a saved skill. Dropped from the
+     * package, either feature stops working with nothing on any screen to say why, which is why the
+     * pairing is asserted here rather than left to whoever edits the YAML next.
+     */
+    const remii = tenantPackage.agents.find(
+      (agent) => agent.id === REMII_AGENT_ID,
+    );
+    expect(remii).toBeDefined();
+    expect(remii).toMatchObject({
+      id: REMII_AGENT_ID,
       type: "built_in",
-      configuration: {
-        systemPrompt:
-          "You are a helpful general assistant. Give clear, concise, and accurate answers.",
-      },
-      /*
-       * One skill each, and both are gates rather than preferences. `bot-creator` is what makes the
-       * app offer `list_bots`, `read_bot`, `list_bot_skills` and `save_bot`; `skill-creator` is what
-       * makes it offer the four tools that turn an interview into a saved skill. Dropped from the
-       * package, either feature stops working with nothing on any screen to say why, which is why the
-       * pairing is asserted here rather than left to whoever edits the YAML next.
-       */
+      avatarSeed: REMII_AGENT_ID,
       skills: ["bot-creator", "skill-creator"],
     });
+    // The loader must join the YAML block scalar rather than handing back the `>-` as a literal,
+    // which is the failure a `toMatchObject` on a hand-written prompt used to make impossible to see.
+    // Asserted on the ROLE, not the title: this is what the prompt is built to match, and a test pinned to
+    // the heading is one that fails when the wording is improved rather than when the wiring breaks.
+    expect(remii?.roleDescription).toContain("chief of staff");
+    expect(
+      (remii?.configuration as { systemPrompt?: string } | undefined)
+        ?.systemPrompt,
+    ).toContain("You are Remii");
+    // AND THE IDENTITY ITSELF, which is the thing this rename was for. Before it, this Bot was named
+    // "General Assistant" with a system prompt saying it was "a helpful general assistant" — which is
+    // not what it does. It holds the computer and hands work to the other coworkers here, and a prompt
+    // that says so is what makes it behave like the chief of staff rather than an also-ran.
+    expect(remii?.roleDescription).toContain("holds the computer");
+    expect(
+      (remii?.configuration as { systemPrompt?: string } | undefined)
+        ?.systemPrompt,
+    ).toContain("chief of staff");
+    expect(remii?.roleDescription).not.toContain("everyday work");
     // The pairing the shipped package makes, which is the whole reason Knowledge narrows to document
     // tools rather than being offered everything its grants hold.
     expect(
@@ -450,13 +474,25 @@ describe("tenant YAML validation", () => {
     // The instruction is the whole feature, so pin the two ends of the loop it prescribes.
     expect(creator?.instructions).toContain("Interview first");
     expect(creator?.instructions).toContain("save_skill");
-    expect(tenantPackage.channels).toContainEqual({
-      id: "general-assistant",
-      name: "General Assistant",
-      description: "Ask for help with everyday work.",
-      permittedAgents: ["general-assistant"],
-      allowedGroups: ["all"],
-    });
+    /*
+     * The channel, by its routing rather than by its prose. WAS `toContainEqual` naming
+     * "General Assistant" and "Ask for help with everyday work." — both rewritten when the package
+     * entry became Remii. The routing is what the loader has to get right and what a person depends
+     * on: this channel reaches the chief of staff and nobody else.
+     */
+    // `some` + `toMatchObject` rather than `toContainEqual`: the latter is a deep EQUALITY against
+    // every field, so pinning the routing meant also pinning the name and description — which is how
+    // this fixture came to carry a copy of the package's prose at all.
+    expect(
+      tenantPackage.channels.some(
+        (channel) =>
+          channel.id === REMII_AGENT_ID &&
+          channel.name.length > 0 &&
+          channel.description.length > 0 &&
+          channel.permittedAgents.includes(REMII_AGENT_ID) &&
+          channel.allowedGroups.includes("all"),
+      ),
+    ).toBe(true);
   });
 
   test("accepts the complete fintech package and normalizes agent types", () => {
@@ -556,7 +592,13 @@ describe("tenant package agent profile synchronization", () => {
       title: agent.title,
       roleDescription: agent.roleDescription,
       avatarSeed: agent.id,
-      visibility: "public",
+      /*
+       * `private` in the COLUMN. A package profile is ownerless — `ownerUserId: null` above — and
+       * ownerless is what `accessFilter` admits for everybody, so the visibility column is not what
+       * makes it reachable. It still has to hold the only value this deployment honours: a `public`
+       * row here would be a claim about sharing that nothing implements.
+       */
+      visibility: "private",
       deletedAt: null,
     });
   });
@@ -661,7 +703,11 @@ describe("tenant package agent profile synchronization", () => {
       title: updatedAgent.title,
       roleDescription: updatedAgent.roleDescription,
       avatarSeed: updatedAgent.avatarSeed,
-      visibility: "public",
+      // Private, as everywhere else in this deployment: a resync normalises the column rather than
+      // leaving whatever an older package left on it.
+      visibility: "private",
+      // Un-deleted by the resync, which is the half this case is actually about — a corrected
+      // package has to bring a Bot back.
       deletedAt: null,
     });
     expect(profile?.updatedAt.getTime()).toBeGreaterThan(
@@ -1468,7 +1514,7 @@ describe("pairing a package's coworkers with its skills", () => {
     expect((await grantsFor(agentB)).map((row) => row.ref)).toEqual([slugB]);
   });
 
-  test("a grant an administrator made by hand survives a redeploy", async () => {
+  test("a grant made by hand survives a redeploy", async () => {
     const slug = `pkg-${randomUUID().slice(0, 8)}`;
     const loaded = packageGiving([slug]);
     createdPackageIds.push(
@@ -1585,8 +1631,23 @@ test("blank package endpoint disables only its owned agent and restores it when 
     await database
       .insert(users)
       .values({ id: actor.id, email: `${suffix}@example.test` });
-    const target = rename("risk-analyst");
+    /*
+     * `picked-harness`, and only once.
+     *
+     * WAS `rename("risk-analyst")` alongside `rename("picked-harness")` — two remote agents, one
+     * managed and one picked, so that blanking `MANAGED_AGENT_AG_UI_URL` could disable exactly one of
+     * them. The fintech package no longer declares `risk-analyst` at all: it ships
+     * `general-assistant`, `knowledge` and `picked-harness`, and only the last is a remote agent. So
+     * `target` named a row that was never created and the `channel_agents` insert below failed on its
+     * foreign key — a fixture error that reads as a synchronisation fault.
+     *
+     * The case still works with one remote agent, and is arguably sharper for it: blanking
+     * `MANAGED_AGENT_AG_UI_URL` drops `picked-harness` out of the package even though
+     * `PICKED_HARNESS_URL` is still set, which is the whole of "this deployment has nowhere to run a
+     * managed Bot".
+     */
     const picked = rename("picked-harness");
+    const target = picked;
     await database.insert(channels).values({
       id: historyId,
       name: "Historical conversation",
@@ -1640,7 +1701,21 @@ test("blank package endpoint disables only its owned agent and restores it when 
         ownerUserId: control.ownerUserId,
       });
     }
-    process.env.MANAGED_AGENT_AG_UI_URL = "";
+    /*
+     * Blank `PICKED_HARNESS_URL`, not `MANAGED_AGENT_AG_UI_URL`.
+     *
+     * WAS blanking the managed URL, on the assumption that some package agent's endpoint came from
+     * it. None does any more: the fintech package interpolates `PICKED_HARNESS_URL` into the one
+     * remote agent it ships, and `MANAGED_AGENT_AG_UI_URL` is read by the profile store when it
+     * configures a `built_in` Bot — after synchronisation, not by the package loader. So blanking it
+     * changed nothing about which agents the package declared, and the omission this case is about
+     * never happened.
+     *
+     * `PICKED_HARNESS_URL` is the endpoint that really is interpolated, and blanking it takes the row
+     * out of the package rather than registering a Bot with nowhere to run — which is the property
+     * worth testing, and the reason it is a blank rather than a refusal.
+     */
+    process.env.PICKED_HARNESS_URL = "";
     const omitted = isolate(await loadTenantPackage(source));
     expect(omitted.agents.some((agent) => agent.id === target)).toBe(false);
     // Explicitly omitted foreign/user-owned IDs must not acquire package ownership.
@@ -1667,7 +1742,9 @@ test("blank package endpoint disables only its owned agent and restores it when 
       (await database.select().from(agents).where(eq(agents.id, target)))
         .length,
     ).toBe(1);
-    expect((await profiles.get(actor, picked))?.deletedAt).toBeNull();
+    // `target` and `picked` are the same row now, so it is restored and then asserted ONCE rather
+    // than twice. The two names used to be two different agents — a managed one and a picked one —
+    // and the point of the case was that blanking one setting took the first and left the second.
     for (const control of controls)
       expect((await profiles.get(actor, control.id))?.deletedAt).toBeNull();
     await synchronizeTenantPackage(database, enabled);

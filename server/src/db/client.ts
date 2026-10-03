@@ -5,7 +5,7 @@ import * as schema from "./schema";
 /**
  * One percent-decoded part of the address, or a refusal that names it.
  *
- * A password is where this bites. `postgres://openbot:100%pure@host:5432/openbot` is a string
+ * A password is where this bites. `postgres://remii:100%pure@host:5432/remii` is a string
  * `new URL` accepts without complaint, and `decodeURIComponent` then rejects with `URIError: URI
  * error` -- a message that names neither `DATABASE_URL` nor which part of it was wrong, thrown out
  * of the one function whose whole job is to make a connection failure legible. A `%` that starts no
@@ -25,8 +25,8 @@ function decodePart(value: string, part: string): string {
 /**
  * The address, taken apart, because Bun will not take it whole on every platform.
  *
- * `new SQL("postgres://user:pass@host:5432/openbot")` works on macOS and Linux and cannot work on
- * Windows: Bun reads the URL's path, `/openbot`, as the path of a unix socket, ignores the host and
+ * `new SQL("postgres://user:pass@host:5432/remii")` works on macOS and Linux and cannot work on
+ * Windows: Bun reads the URL's path, `/remii`, as the path of a unix socket, ignores the host and
  * the port, and fails to open a socket that Windows does not have (oven-sh/bun#27713). The server
  * then cannot reach Postgres at all there, while `psql` inside the container and a plain TCP
  * connection from the same machine both succeed, which is what makes it look like a network fault
@@ -67,7 +67,10 @@ function addressOf(databaseUrl: string) {
    * test into a three second timeout with nothing to say why. Anything else Postgres accepts on a
    * URL, `sslmode` and the rest, travels the same way.
    */
+  const sslmode = url.searchParams.get("sslmode");
   const connection = Object.fromEntries(url.searchParams);
+  delete connection.sslmode;
+  delete connection.ssl;
 
   /*
    * A port that is not a port is refused before a socket is ever opened.
@@ -94,6 +97,17 @@ function addressOf(databaseUrl: string) {
     username: decodePart(url.username, "username"),
     password: decodePart(url.password, "password"),
     database,
+    /*
+     * The server name rides explicitly, not just inside the hostname.
+     *
+     * Hosted Postgres behind a proxy (Neon) routes by TLS SNI, and the
+     * options form of `new SQL` sends none: connections land on a default
+     * endpoint whose schema is not ours, and every query fails with a
+     * missing table that is plainly there. `serverName` restores the name
+     * the URL form sends on its own. Without `sslmode=require` there is no
+     * TLS and therefore nothing to name.
+     */
+    tls: sslmode === "require" ? { serverName: url.hostname } : false,
     ...(Object.keys(connection).length > 0 ? { connection } : {}),
   };
 }
@@ -137,9 +151,18 @@ export function createDatabase(
    */
   delete process.env.DATABASE_URL;
 
+  const configuredMax =
+    options.max ??
+    (() => {
+      const value = Number(
+        process.env.REMII_DATABASE_POOL_MAX ??
+          process.env.OPENBOT_DATABASE_POOL_MAX,
+      );
+      return Number.isInteger(value) && value > 0 ? value : undefined;
+    })();
   const client = new SQL({
     ...addressOf(databaseUrl),
-    ...(options.max === undefined ? {} : { max: options.max }),
+    ...(configuredMax === undefined ? {} : { max: configuredMax }),
   });
 
   return drizzle({ client, schema });

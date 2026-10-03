@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Start the local OpenBot stack and verify each service answers as OpenBot.
+# Start the local Remii stack and verify each service answers as Remii.
 # Safe to rerun: matching services are left running, and unrelated port holders are reported.
 
 # Before anything else, and before the `set` line below, which is itself bash-only: this file is
@@ -48,11 +48,8 @@ COMPUTER_PORT="$(setting COMPUTER_PORT 4100)"
 BOT_PORT="$(setting BOT_PORT 4200)"
 LANGGRAPH_PORT="$(setting LANGGRAPH_PORT 4201)"
 BOT_PROVIDER="$(setting BOT_PROVIDER openai | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-SUPERVISOR_PORT="$(setting SUPERVISOR_PORT 4500)"
-ONE_COMPUTER_EACH="${OPENBOT_ONE_COMPUTER_EACH:-true}"
 export APP_PORT SERVER_PORT
-SUPERVISOR_TOKEN="$(setting SUPERVISOR_TOKEN openbot-dev-supervisor-token)"
-COMPUTER_TOKEN="$(setting COMPUTER_TOKEN openbot-dev-computer-token)"
+COMPUTER_TOKEN="$(setting COMPUTER_TOKEN remii-dev-computer-token)"
 # A fixed default is fine here, unlike `AGENT_TOOL_TOKEN` below, but not because of where the server
 # listens — it binds no hostname, so this port is reachable from the network like any other. It is
 # fine because this is a dev-only default on a machine's own dev stack, and the endpoint it guards
@@ -61,7 +58,7 @@ COMPUTER_TOKEN="$(setting COMPUTER_TOKEN openbot-dev-computer-token)"
 # the fixed default gates nothing sensitive here. That is also why it is generated fresh and
 # persisted for AGENT_TOOL_TOKEN (see the SECRETS_ROTATED block) but not for this one — production
 # must set a real WORKER_SHARED_SECRET.
-WORKER_SHARED_SECRET="$(setting WORKER_SHARED_SECRET openbot-dev-worker-secret)"
+WORKER_SHARED_SECRET="$(setting WORKER_SHARED_SECRET remii-dev-worker-secret)"
 
 # The secret the server sends to a managed Bot, generated and written back on first run.
 #
@@ -108,8 +105,8 @@ export MANAGED_AGENT_TOKEN
 #
 # Generated here for the same reason, and it has to be. `.env.example` ships it empty, which is the
 # right default for a deployment: absent, no Bot may call tools back and it is told so rather than
-# quietly allowed. On a laptop that default meant every MCP tool was dead on arrival. An
-# administrator could enable Google Drive, grant `search_files` to a Bot, read "May call this tool"
+# quietly allowed. On a laptop that default meant every MCP tool was dead on arrival. A person could
+# enable Google Drive, grant `search_files` to a Bot, read "May call this tool"
 # on the grant screen, and get "This Bot has no credential for calling tools back through its
 # deployment" on every single call, with no audit row, because the call never reached the server to
 # be recorded.
@@ -138,7 +135,7 @@ holder() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fcn 2>/dev/null | awk '/^c/{c=substr($0,2)} /^n/{print c" ("substr($0,2)")"; exit}' || true
 }
 
-# Does whatever holds this port answer as OpenBot, rather than merely answer?
+# Does whatever holds this port answer as Remii, rather than merely answer?
 #
 # `curl -f` proves something is listening and returned 2xx. That is not the same claim, and the gap
 # between them is not academic: any single-page app serves its own index.html for every path it does
@@ -151,18 +148,20 @@ holder() {
 # a JSON parse error standing in for "that port belongs to something else".
 #
 # So each surface is asked for something only it can produce.
-identifies_as_openbot() {
+identifies_as_remii() {
   local port="$1" name="$2"
   case "$name" in
     # A field of this server's own payload. A stray 200 does not carry it.
+    # (`"agents"`, not `"licenseStatus"`: the local runtime issues no licence,
+    # so its info names the mode and the Bots and nothing else.)
     server)
-      curl -fsS --max-time 3 "http://localhost:$port/api/copilotkit/info" 2>/dev/null \
-        | grep -q '"licenseStatus"'
+      curl -fsS --max-time 10 "http://localhost:$port/api/copilotkit/info" 2>/dev/null \
+        | grep -q '"agents"'
       ;;
     # The app is static HTML with nothing to interrogate, so its title is the identity available.
     app)
       curl -fsS --max-time 3 "http://localhost:$port/" 2>/dev/null \
-        | grep -qi '<title>[^<]*OpenBot'
+        | grep -qi '<title>[^<]*Remii'
       ;;
     # Compose services on dedicated loopback ports, answering a route named for this stack.
     *)
@@ -175,23 +174,23 @@ require_free_or_ours() {
   local port="$1" name="$2" who
   who="$(holder "$port")"
   [ -z "$who" ] && return 0
-  if identifies_as_openbot "$port" "$name"; then
+  if identifies_as_remii "$port" "$name"; then
     info "  $name: already up on $port ($who)"
     return 0
   fi
-  red "  $name: port $port is held by something that is not OpenBot: $who"
+  red "  $name: port $port is held by something that is not Remii: $who"
   red "  Re-run with ${name^^}_PORT=<free port>, or stop that process yourself."
   exit 1
 }
 
-# As wait_for, but satisfied only by OpenBot answering, not by anything answering.
-wait_for_openbot() {
+# As wait_for, but satisfied only by Remii answering, not by anything answering.
+wait_for_remii() {
   local port="$1" name="$2" tries="${3:-40}"
   for _ in $(seq 1 "$tries"); do
-    identifies_as_openbot "$port" "$name" && { green "  $name ready"; return 0; }
+    identifies_as_remii "$port" "$name" && { green "  $name ready"; return 0; }
     sleep 1
   done
-  red "  $name never answered as OpenBot on port $port"
+  red "  $name never answered as Remii on port $port"
   red "  Either it failed to start, or that port belongs to another process."
   red "  Log: $LOGS/${name}.log"
   exit 1
@@ -214,14 +213,19 @@ stop_server_processes_for_restart() {
 }
 
 echo
-echo "OpenBot"
+echo "Remii"
 echo "======="
 
 info "1/4  Docker services"
+#
+# No computer service, and nothing gates the stack on one.
+#
+# There used to be a `supervisor` and an `agent-computer` here, started only when
+# `REMII_ONE_COMPUTER_EACH=true`, and both are gone: a person's computer is an E2B desktop
+# reached over the E2B API, not a container on this host. The switch went with them, because
+# there is nothing left for it to switch on — leaving it would mean a local stack silently starting
+# no computer and reading as a configuration mistake the operator could not fix.
 SERVICES=(postgres)
-if [ "$ONE_COMPUTER_EACH" = "true" ]; then
-  SERVICES+=(supervisor)
-fi
 #
 # Every selected Bot service, every run, whether or not it is already answering.
 #
@@ -238,7 +242,6 @@ fi
 # `docker compose up -d` is declarative and does nothing for a service whose configuration has not
 # changed, so naming them all costs a comparison and buys the guarantee that what is running is what
 # this run configured.
-SERVICES+=(agent-computer)
 # The managed coworker uses LangGraph. The separate legacy sample only accepts OpenAI keys,
 # so requiring it would prevent an Anthropic-only deployment from reaching its managed Bot.
 if [ "$BOT_PROVIDER" = "anthropic" ]; then
@@ -248,15 +251,16 @@ else
 fi
 SERVICES+=(agent-langgraph)
 
-export SUPERVISOR_TOKEN COMPUTER_TOKEN WORKER_SHARED_SECRET
-export COMPUTER_PORT BOT_PORT LANGGRAPH_PORT SUPERVISOR_PORT
+# COMPUTER_TOKEN is still real: it is the secret every E2B sandbox receives as its service
+# secret, and the server refuses to boot without it.
+export COMPUTER_TOKEN WORKER_SHARED_SECRET
+export COMPUTER_PORT BOT_PORT LANGGRAPH_PORT
 docker compose up -d --build "${SERVICES[@]}" >/dev/null
 if ! docker compose run --rm --build migrate >"$LOGS/migrate.log" 2>&1; then
   red "  Migrations did not apply. The database is not the schema this server expects."
   red "  Log: $LOGS/migrate.log"
   exit 1
 fi
-wait_for "http://localhost:$COMPUTER_PORT/health" "agent-computer"
 if [ "$BOT_PROVIDER" != "anthropic" ]; then
   wait_for "http://localhost:$BOT_PORT/health" "agent-bot"
 fi
@@ -264,7 +268,7 @@ wait_for "http://localhost:$LANGGRAPH_PORT/health" "agent-langgraph"
 
 for table in agent_profiles agent_preferences; do
   if ! docker compose exec -T postgres \
-       psql -U openbot -d openbot -tAc "select to_regclass('public.$table')" 2>/dev/null \
+       psql -U remii -d remii -tAc "select to_regclass('public.$table')" 2>/dev/null \
        | grep -q "^$table$"; then
     red "  $table is missing. Run: bun run --cwd server db:migrate"
     exit 1
@@ -299,7 +303,7 @@ if [ "$SECRETS_ROTATED" = "true" ]; then
   sleep 1
 fi
 #
-# A server that answers as OpenBot can still be one no worker can hand a routine to. The worker
+# A server that answers as Remii can still be one no worker can hand a routine to. The worker
 # below is started unconditionally with this run's WORKER_SHARED_SECRET, and every dispatch it makes
 # is one POST to this server's /internal/routines/run — a door that a server started from an older
 # checkout does not have (404), and that a server started before this secret existed in its
@@ -313,7 +317,7 @@ fi
 # predates the route. Both are cured by a restart into this run's environment, so fall through to
 # the launch below. Anything else — including a probe that could not connect at all — keeps the
 # philosophy of leaving an answering server alone.
-if identifies_as_openbot "$SERVER_PORT" server; then
+if identifies_as_remii "$SERVER_PORT" server; then
   HANDOFF_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \
     -X POST "http://localhost:$SERVER_PORT/internal/routines/run" \
     -H "Authorization: Bearer $WORKER_SHARED_SECRET" \
@@ -331,21 +335,20 @@ if identifies_as_openbot "$SERVER_PORT" server; then
       ;;
   esac
 fi
-if ! identifies_as_openbot "$SERVER_PORT" server; then
-  if [ "$ONE_COMPUTER_EACH" = "true" ]; then
-    (cd server && PORT="$SERVER_PORT" \
-      COMPUTER_SUPERVISOR_URL="http://localhost:$SUPERVISOR_PORT" \
-      SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" \
-      COMPUTER_TOKEN="$COMPUTER_TOKEN" \
-      WORKER_SHARED_SECRET="$WORKER_SHARED_SECRET" \
-      bun --env-file=../.env src/production-entry.ts >"$LOGS/server.log" 2>&1 &)
-  else
-    (cd server && PORT="$SERVER_PORT" \
-      WORKER_SHARED_SECRET="$WORKER_SHARED_SECRET" \
-      bun --env-file=../.env src/production-entry.ts >"$LOGS/server.log" 2>&1 &)
-  fi
+if ! identifies_as_remii "$SERVER_PORT" server; then
+  # COMPUTER_TOKEN unconditionally.
+  #
+  # This used to be passed only when `REMII_ONE_COMPUTER_EACH=true`, because the browser beside it
+  # was the only consumer and there was none otherwise. That is inverted now: `config.ts` refuses to
+  # boot an E2B deployment without it, since every sandbox receives it as its service secret. So
+  # passing it always is not tidiness — it is the difference between a server that starts and one that
+  # exits without its computer token set".
+  (cd server && PORT="$SERVER_PORT" \
+    COMPUTER_TOKEN="$COMPUTER_TOKEN" \
+    WORKER_SHARED_SECRET="$WORKER_SHARED_SECRET" \
+    nohup bun --env-file=../.env src/production-entry.ts >"$LOGS/server.log" 2>&1 &)
 fi
-wait_for_openbot "$SERVER_PORT" server
+wait_for_remii "$SERVER_PORT" server
 
 # The worker: a local stand-in for the routines CronJob, looping the same sweep
 # (`offerDueRoutines`/`dispatchClaimedRoutines`) a cluster would run on a schedule instead. Started
@@ -364,12 +367,12 @@ wait_for_openbot "$SERVER_PORT" server
 # started. `bun worker/src/index.ts` matches nothing else in the repo. Running from `$ROOT` is safe:
 # relative imports resolve from the importing file, not from the process's cwd.
 if ! pgrep -f "bun worker/src/index.ts" >/dev/null 2>&1; then
-  WORKER_DATABASE_URL="$(setting DATABASE_URL postgres://openbot:openbot@localhost:5432/openbot)"
+  WORKER_DATABASE_URL="$(setting DATABASE_URL postgres://remii:remii@localhost:5432/remii)"
   (cd "$ROOT" && \
     DATABASE_URL="$WORKER_DATABASE_URL" \
     SERVER_INTERNAL_URL="http://localhost:$SERVER_PORT" \
     WORKER_SHARED_SECRET="$WORKER_SHARED_SECRET" \
-    bun worker/src/index.ts >"$LOGS/worker.log" 2>&1 &)
+    nohup bun worker/src/index.ts >"$LOGS/worker.log" 2>&1 &)
   info "  worker: started (routine sweep loop)"
   sleep 1
   if ! pgrep -f "bun worker/src/index.ts" >/dev/null 2>&1; then
@@ -381,27 +384,39 @@ fi
 
 info "3/4  Runtime health"
 INFO="$(curl -fsS --max-time 8 "http://localhost:$SERVER_PORT/api/copilotkit/info")"
-python3 - "$INFO" <<'PY'
-import json, sys
-info = json.loads(sys.argv[1])
+python3 - "$SERVER_PORT" <<'PY'
+import json, sys, time, urllib.request
+port = sys.argv[1]
+url = f"http://localhost:{port}/api/copilotkit/info"
+info = {}
+for _ in range(10):
+    try:
+        req = urllib.request.urlopen(url)
+        info = json.loads(req.read().decode())
+        if info.get("agents"):
+            break
+    except Exception:
+        pass
+    time.sleep(1)
+
+# Local runtime: threads live in this deployment's Postgres, so there is no
+# licence to validate. Health is "the runtime answers and names its Bots".
 status, agents = info.get("licenseStatus"), list(info.get("agents", {}))
-if status != "valid":
+if status is not None and status != "valid":
     print(f"\033[31m  licence is '{status}', not 'valid'.\033[0m")
-    print("\033[31m  Check INTELLIGENCE_API_KEY: npx copilotkit@latest login && npx copilotkit@latest project select\033[0m")
-    print("\033[31m  See README.md for Intelligence setup.\033[0m")
     raise SystemExit(1)
 if not agents:
     print("\033[31m  No Bots registered.\033[0m")
     raise SystemExit(1)
-print(f"\033[32m  licence valid · mode {info.get('mode')} · Bots: {', '.join(agents)}\033[0m")
+print(f"\033[32m  runtime ready · mode {info.get('mode')} · Bots: {', '.join(agents)}\033[0m")
 PY
 
 info "4/4  App"
 require_free_or_ours "$APP_PORT" app
-if ! identifies_as_openbot "$APP_PORT" app; then
-  (cd app && bun run dev --port "$APP_PORT" --strictPort >"$LOGS/app.log" 2>&1 &)
+if ! identifies_as_remii "$APP_PORT" app; then
+  (cd app && nohup bun run dev --port "$APP_PORT" --strictPort >"$LOGS/app.log" 2>&1 &)
 fi
-wait_for_openbot "$APP_PORT" app
+wait_for_remii "$APP_PORT" app
 
 cat <<EOF
 
@@ -411,8 +426,8 @@ Next steps:
 
   - Direct Bot chat:       http://localhost:$APP_PORT/bot
   - Coworkers:             http://localhost:$APP_PORT/agents
-  - Audit trail:           http://localhost:$APP_PORT/admin/audit
-  - Boundaries/policy:     http://localhost:$APP_PORT/admin/boundaries
+  - Connected accounts:    http://localhost:$APP_PORT/settings/connected-accounts
+  - Boundaries/policy:     http://localhost:$APP_PORT/settings/boundaries
   - Setup docs:            README.md
   - Configuration docs:    docs/configuration.md
 
@@ -420,14 +435,15 @@ Try:
 
   1. Open /bot and ask: Open news.ycombinator.com and tell me the top story.
   2. Create a coworker in /agents and start a channel with it.
-  3. Review browser/file actions in /admin/audit.
-  4. Add a deny rule in /admin/boundaries, then retry the same action.
+  3. Review what a Bot ran beside its screen in the channel.
+  4. Add a deny rule in /settings/boundaries, then retry the same action.
 
 Logs: $LOGS
   Routine sweep worker: $LOGS/worker.log
 
 Stop all of it: bash scripts/stop.sh
-  The app, the worker, the API server, the Docker services, and each Bot's computer, which compose
-  does not own because the supervisor makes it. Pass --keep-computers to leave the browsers signed
-  in. Nothing is deleted either way: the database, the files and the browser profiles are volumes.
+  The app, the worker, the API server and the Docker services. Nobody's computer is stopped, because
+  nobody's computer is here: an E2B desktop is stopped by the API server's idle sweep, or from the
+  Settings page, or by the opencode-style rules already in force. Nothing is deleted either way: the
+  database is a volume, and each person's files live on the shared E2B volume.
 EOF

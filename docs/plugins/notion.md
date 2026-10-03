@@ -9,37 +9,39 @@ plugin tool.
 
 Setting it up takes two people, and neither can do the other's half:
 
-| Who               | Does                                       | Where                        |
-| ----------------- | ------------------------------------------- | ----------------------------- |
-| An administrator  | Enables the connector                       | `/admin/plugins/notion`        |
-| Each person       | Consents with their own Notion account      | `/settings/connected-accounts` |
+| Who             | Does                                   | Where                                 |
+| --------------- | -------------------------------------- | ------------------------------------- |
+| Whoever deploys | Adds the connector                     | `/settings/connected-accounts/notion` |
+| Each person     | Consents with their own Notion account | `/settings/connected-accounts`        |
+There is deliberately no endpoint for one person to connect an account on somebody else's behalf.
 
-There is deliberately no endpoint for an administrator to connect an account on somebody's behalf.
+## What the person deploying it does
 
-## What an administrator does
+### 1. Add the connector
 
-### 1. Enable the connector in OpenBot
-
-At `/admin/plugins/notion`, turn on **Enable for this deployment**. There is no client to register
+`POST /api/plugins/servers` with the catalogue key `notion` writes the row, and it is an ordinary
+per-user call: every signed-in person is treated alike, and there is no role that could authorize one
+over another. There is no client to register
 and no secret to paste: this deployment introduces itself to Notion on first connect, over RFC 7591
 dynamic client registration. The prerequisite is a public URL the redirect URI can be derived from —
-`OPENBOT_PUBLIC_URL` if it is set, or the auth base URL it falls back to otherwise — nothing needs to
+`REMII_PUBLIC_URL` if it is set, or the auth base URL it falls back to otherwise — nothing needs to
 be registered at Notion ahead of time.
 
 ### 2. Connect your own account
 
-On the same page, use **Your account** to connect your own Notion account before doing anything
-else here. Unlike Google Drive's tool list, which is OpenBot's own code and needs no credential to
+Connect your own Notion account before doing anything else here. Unlike Google Drive's tool list,
+which is Remii's own code and needs no credential to
 read, this connector's tool list is an answer from Notion's hosted server: refreshing it takes a
 credential, and the refresh in the next step mints one from the connection belonging to whoever
 presses the button — not whichever account happens to be connected here. That is a personal grant
 like anybody else's, reaching only what your own account can see — not deployment configuration —
-but it has to come first, because an administrator who presses Refresh tools without having
-connected their own account is refused, not lent someone else's.
+but it has to come first, because refreshing the tool list without having
+connected your own account is refused, not lent someone else's.
 
-### 3. Press Refresh tools
+### 3. Refresh the tool list
 
-This records the tool list Notion's hosted server advertises today, both reads and writes.
+`POST /api/plugins/servers/notion/refresh` records the tool list Notion's hosted server advertises
+today, both reads and writes.
 
 Notion has **no read-only scope**. Access is granted per page, at the moment somebody consents, not
 by a scope string the way Google's `drive.readonly` is — so there is nothing at the vendor standing
@@ -56,24 +58,25 @@ refresh exists to catch.
 
 ### 4. Grant tools to a Bot
 
-Enabling the connector does not give any Bot access to it. Each tool is granted per Bot, the same as
-every other plugin tool. Every call then checks the grant, evaluates the action policy, and writes an
-audit row.
+Adding the connector does not give any Bot access to it. Each tool is granted per Bot, the same as
+every other plugin tool, and the grant is made on the coworker's own screen: open it from `/agents`
+and use its **Connection** tab. Every call then checks the grant, evaluates the action policy, and
+writes an audit row.
 
 ## What each person does
 
-At `/settings/connected-accounts`, Notion appears once an administrator has enabled it. Open it and
-press **Connect**. That leaves OpenBot for Notion's own consent screen — the arrow on the button says
+At `/settings/connected-accounts`, Notion appears once the connector has been added. Open it and
+press **Connect**. That leaves Remii for Notion's own consent screen — the arrow on the button says
 so — where the pages and databases to share are chosen, and returns to the same page, which then
 reads **Connected**.
 
-Nothing is cached. OpenBot stores the refresh token and mints a short-lived access token for each
+Nothing is cached. Remii stores the refresh token and mints a short-lived access token for each
 call, so withdrawing access at Notion takes effect on the next call rather than whenever a cache
 expires.
 
 ## See also
 
 - [Architecture](../architecture.md) — where plugins, grants, policy and audit sit.
-- [Configuration](../configuration.md) — `OPENBOT_PUBLIC_URL`, `OPENBOT_APP_URL`, `KEY_ENCRYPTION_KEY`.
+- [Configuration](../configuration.md) — `REMII_PUBLIC_URL`, `REMII_APP_URL`, `KEY_ENCRYPTION_KEY`.
 - [Notion's own guide](https://developers.notion.com/guides/mcp/build-mcp-client) to building an MCP
   client against its hosted server.

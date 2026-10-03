@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { socketUrl } from "../src/lib/socket-url";
 import { relativeTime } from "../src/lib/relative-time";
+import { socketUrl } from "../src/lib/socket-url";
 
 const at = (protocol: string, hostname: string, host: string) => ({
   protocol,
@@ -9,7 +9,7 @@ const at = (protocol: string, hostname: string, host: string) => ({
 });
 
 /**
- * `__OPENBOT_WS_PORT__` was interpolated into the WebSocket authority unchecked, so `"   "`,
+ * `__REMII_WS_PORT__` was interpolated into the WebSocket authority unchecked, so `"   "`,
  * `"abc"` or `"99999"` produced `ws://host:abc/path` and `new WebSocket()` threw synchronously
  * inside the effects that open it. Only whole digits in range override same-origin now.
  */

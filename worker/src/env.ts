@@ -73,3 +73,11 @@ export function loadWorkerEnv(
 export function routineRunUrl(serverInternalUrl: string): string {
   return `${serverInternalUrl}/internal/routines/run`;
 }
+
+export function cronTickUrl(serverInternalUrl: string): string {
+  return `${serverInternalUrl}/internal/cron/tick`;
+}
+
+export function memoryConsolidateUrl(serverInternalUrl: string): string {
+  return `${serverInternalUrl}/internal/memory/consolidate`;
+}

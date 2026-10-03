@@ -100,7 +100,7 @@ function GrantedTool({
       if (!isHeld) {
         return (
           <RefusedCard
-            reason={`${spec.title} is not available to this Bot at the moment. An administrator grants components per Bot, and can unpublish one for every Bot at once.`}
+            reason={`${spec.title} is not available to this Bot at the moment.`}
             title={spec.title}
           />
         );
@@ -194,7 +194,7 @@ function RefusedDecision({
   title: string;
   respond?: (result: unknown) => Promise<void>;
 }) {
-  const reason = `${title} is not available to this Bot at the moment, so the person was not asked. An administrator grants components per Bot, and can unpublish one for every Bot at once.`;
+  const reason = `${title} is not available to this Bot at the moment, so the person was not asked.`;
 
   useEffect(() => {
     if (!respond) return;

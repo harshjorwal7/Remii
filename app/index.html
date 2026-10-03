@@ -3,12 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenBot</title>
+    <title>Remii</title>
     <!-- Sets the theme before the first paint. Must stay inline and classic: `defer` or `type="module"` runs too late. -->
     <script>
       // localStorage throws in some privacy modes; a theme is not worth taking the app down for.
       try {
-        const dark = window.localStorage.getItem("openbot-theme") === "dark";
+        // `remii-theme` is the current key; `openbot-theme` is what every build before the
+        // rebrand wrote, read once so an upgrade does not reset the person's own setting.
+        // The parentheses matter: `??` binds looser than `===`, so comparing before falling
+        // back would hand `toggle` the string "light" and read as true.
+        const stored =
+          localStorage.getItem("remii-theme") ??
+          localStorage.getItem("openbot-theme");
+        const dark = stored === "dark";
         document.documentElement.classList.toggle("dark", dark);
         document.documentElement.style.colorScheme = dark ? "dark" : "light";
       } catch {}

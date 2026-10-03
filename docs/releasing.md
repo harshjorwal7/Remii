@@ -38,7 +38,7 @@ APPLE_SIGNING_IDENTITY=- bun run tauri build --config src-tauri/tauri.build-vers
 
 Use `release` instead of `internal` to prepare the plain release version. This only builds an
 artifact; it does not publish a release. macOS keeps numeric system version fields and stores
-the full internal identifier in `OpenBotBuildVersion` inside the app's `Info.plist`. Windows
+the full internal identifier in `RemiiBuildVersion` inside the app's `Info.plist`. Windows
 retains the full identifier in `ProductVersion` and `FileVersion`; its fixed numeric fields
 contain the release number. The protected signing job checks both embedded string versions.
 
@@ -57,10 +57,10 @@ Then, in order:
 
 - the version in the tree is checked against the branch that is publishing it, and the changelog is
   checked for a section with that number
-- one image is built and pushed to `ghcr.io/copilotkit/openbot`, tagged with the version, the commit
+- one image is built and pushed to `ghcr.io/copilotkit/remii`, tagged with the version, the commit
   and `latest`
 - the services `docker-compose.yml` can build are published too, one image each, at
-  `ghcr.io/copilotkit/openbot-<service>`. Those are `linux/amd64` and `linux/arm64`, built on native
+  `ghcr.io/copilotkit/remii-<service>`. Those are `linux/amd64` and `linux/arm64`, built on native
   runners of each architecture and joined into one manifest list, because the machines pulling them
   are laptops as well as servers. `.github/published-images.json` is the list, and CI fails if it
   stops matching the Dockerfiles in the tree
@@ -76,15 +76,13 @@ Then, in order:
 ```sh
 gh release download v0.1.0 --pattern container-images.json
 docker run -p 3001:3001 --env-file .env \
-  "$(jq -r .images.openbot.reference container-images.json)"
+  "$(jq -r .images.remii.reference container-images.json)"
 ```
 
 The same file is how a machine runs the stack without building any of it. Each key under `images`
 is a service, so the references can be read straight out of it:
 
 ```sh
-export COMPUTER_IMAGE="$(jq -r '.images["agent-computer"].reference' container-images.json)"
-export SUPERVISOR_IMAGE="$(jq -r .images.supervisor.reference container-images.json)"
 export BOT_IMAGE="$(jq -r '.images["agent-bot"].reference' container-images.json)"
 export LANGGRAPH_IMAGE="$(jq -r '.images["agent-langgraph"].reference' container-images.json)"
 export SERVER_IMAGE="$(jq -r .images.server.reference container-images.json)"
@@ -104,8 +102,8 @@ Before deploying, you can check an image is the one this repository built. Every
 carries its own attestation:
 
 ```sh
-gh attestation verify oci://ghcr.io/copilotkit/openbot:v0.1.0 -R CopilotKit/OpenBot
-gh attestation verify oci://ghcr.io/copilotkit/openbot-supervisor:v0.1.0 -R CopilotKit/OpenBot
+gh attestation verify oci://ghcr.io/copilotkit/remii:v0.1.0 -R CopilotKit/OpenBot
+gh attestation verify oci://ghcr.io/copilotkit/remii-agent-bot:v0.1.0 -R CopilotKit/OpenBot
 ```
 
 ## What has to be green
@@ -115,7 +113,7 @@ A job added to `ci.yml` is covered by it without anybody updating a list.
 
 | check | what it would catch |
 | --- | --- |
-| `format, lint, types` | the ordinary things, across every workspace including `agent-computer` and the supervisor |
+| `format, lint, types` | the ordinary things, across every workspace |
 | `tests` | a decision made wrongly, in isolation |
 | `chart` | a Helm values file that renders a server which cannot start, across the EKS, GKE, AKS and self-hosted targets |
 | `python harness regressions` | a provider-boundary regression in the Python Bot harnesses |
@@ -138,21 +136,24 @@ not matter: a pull request opened by a workflow does not trigger them.
 ## The one thing CI cannot do
 
 The smoke journey in `tests/smoke` is the only check that proves the parts are wired to each other:
-the server reaches the supervisor, the supervisor builds a computer, the gateway decides before the
-browser acts, and the trail records it. It cannot run in CI, and this is not a gap to be closed
+the server reaches a real computer, the gateway decides before the browser acts, and the trail
+records it.
+
+A computer is an E2B sandbox, so this needs credentials and it costs money. That is the honest
+reason it cannot run in CI, rather than a gap waiting to be closed: there is no local stand-in, and a
+stub would prove the wiring without ever having opened a browser. It cannot run in CI, and this is not a gap to be closed
 later.
 
-OpenBot only runs in Intelligence mode, and `loadConfig` refuses to start without the project's
-Intelligence values, which a hosted runner has no business holding. The `image` check gets around
-this with placeholder values, because nothing is contacted at start-up, but the journey asserts
-`licenseStatus` is `valid`, and no placeholder can make that true.
+Remii runs with its threads in Postgres, and `loadConfig` needs no cloud
+credentials, which a hosted runner has no business holding. The journey asserts
+the runtime answers and names its Bots, and no placeholder can fake that.
 
-So it is a step a person takes, on a machine with real Intelligence credentials, before merging
+So it is a step a person takes, on a machine with real model credentials, before merging
 the release PR:
 
 ```sh
 bash scripts/start.sh
-export OPENBOT_SMOKE_COOKIE='better-auth.session_token=...'   # from a signed-in browser
+export REMII_SMOKE_COOKIE='better-auth.session_token=...'   # from a signed-in browser
 bun run test:smoke
 ```
 

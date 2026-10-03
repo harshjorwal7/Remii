@@ -1,6 +1,11 @@
-import { IconPlus } from "@tabler/icons-react";
+import {
+  IconChevronLeft,
+  IconChevronRight,
+  IconPlus,
+} from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useRef } from "react";
 import { z } from "zod";
 import { AgentCard } from "@/components/agents/agent-card";
 import { AgentDialog } from "@/components/agents/agent-dialog";
@@ -10,7 +15,7 @@ import { StaggerItem } from "@/components/layout/stagger";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
-import { agentListQueryOptions, isSharedWithYou } from "@/lib/agents/queries";
+import { agentListQueryOptions } from "@/lib/agents/queries";
 
 /**
  * Creating and inspecting a coworker are search-parameter states so the roster remains mounted and
@@ -27,28 +32,34 @@ export const Route = createFileRoute("/_authed/_app/agents/")({
 });
 
 /*
- * The roster wraps on the width it actually has, not on the window's.
+ * Two different rosters, laid out two different ways, and the reason is what each one contains.
  *
- * A card is a fixed 144px, so four fixed columns overlap the moment the column they sit in is
- * narrower than the card. That is not a narrow-window case: opening the detail pane takes the width
- * out of this column at any window size, so the cards behind an open Bot overlapped each other on a
- * perfectly ordinary screen. `auto-fill` tracks the container instead, which is the thing that
- * actually changed.
+ * "Your agents" is `grid-cols-2 sm:grid-cols-4` of full-width cards that fill their track. A fixed
+ * column count is safe here precisely because the card is fluid: a card is never wider than the
+ * track it is in, so nothing can overlap however narrow this column gets — including when opening
+ * the detail pane takes the width out of it at any window size. (This used to be fixed-width cards
+ * in `auto-fill` tracks, and that combination overlapped behind an open Bot.)
  *
- * The tracks are the card's own width, not `minmax(144px,1fr)`. A `1fr` track stretches to share
- * the container while the card inside it stays 144px, and the difference reads as a gap: at prose
- * width that was three 190px columns holding 144px cards, so the 15px gutter looked like 61px.
+ * "Explore agents" is the opposite: a `flex` row of cards at a fixed `w-[170px]` that scrolls
+ * sideways. Those are template previews in a strip, not a grid to be read across, so they keep
+ * their size and the row scrolls rather than reflowing to two columns.
  *
- * Both grids are block children of their section, and they have to be. `auto-fill` needs a definite
- * width to divide into tracks; a grid placed inside a `flex flex-row` is a flex item sized
- * shrink-to-fit, so `auto-fill` has nothing to fill and resolves to a single column. That is what
- * put "Your agents" in a one-card column while "Explore agents", whose grid was never wrapped,
- * flowed correctly three across on the very same page. Do not reintroduce a flex wrapper here to
- * position the roster.
+ * Both are block children of their section and must stay that way. A grid placed inside a
+ * `flex flex-row` is a flex item sized shrink-to-fit, which is what put "Your agents" into a
+ * one-card column while "Explore agents" flowed correctly three across on the very same page. Do
+ * not reintroduce a flex wrapper to position either roster.
  */
 function AgentsScreen() {
   const { new: isCreating, agent: selectedAgentId } = Route.useSearch();
   const navigate = Route.useNavigate();
+  const templatesScrollRef = useRef<HTMLDivElement>(null);
+
+  const scrollTemplates = (direction: "left" | "right") => {
+    templatesScrollRef.current?.scrollBy({
+      left: direction === "left" ? -360 : 360,
+      behavior: "smooth",
+    });
+  };
   /*
    * The two empty states below must not fire while the list is still arriving. `skills.tsx` learned
    * this first: an empty state standing there saying somebody has created nothing is a claim the
@@ -65,8 +76,11 @@ function AgentsScreen() {
     isPending: loading,
     isError: failed,
   } = useQuery(agentListQueryOptions());
-  const mine = agents?.filter((a) => a.mine);
-  const explore = agents?.filter(isSharedWithYou);
+  const templates = agents?.filter((a) => Boolean(a.isSystemTemplate));
+  const mine = agents?.filter((a) => !a.isSystemTemplate && a.mine);
+  // Strict per-user SaaS sandbox: public sharing is removed, so there is no
+  // "shared with you" roster. Templates are deployment definitions (no user
+  // data); everything else is the user's own private agents.
 
   // Creating wins if both are somehow set: it is the more recent intent.
   const showCreate = isCreating === true;
@@ -76,8 +90,8 @@ function AgentsScreen() {
   return (
     <>
       <SidebarToggleBar />
-      <div className="max-w-2xl px-4 w-full mx-auto">
-        <div className="mt-12 w-full max-w-2xl">
+      <div className="max-w-3xl px-4 w-full mx-auto pb-12">
+        <div className="mt-12 w-full max-w-3xl">
           <div className="flex flex-row w-full items-center justify-between">
             <h2 className="font-bold text-lg">Your agents</h2>
             <Button
@@ -101,7 +115,7 @@ function AgentsScreen() {
             // never clears `data`), so `isError` and a still-populated roster are an ordinary
             // combination, not a contradiction. A stale roster beats an error card claiming
             // there is nothing, which would be false here.
-            <div className="mt-4 grid grid-cols-[repeat(auto-fill,144px)] gap-4">
+            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-4 w-full">
               {mine.map((agent, index) => {
                 return (
                   <StaggerItem index={index} key={agent.id}>
@@ -138,60 +152,70 @@ function AgentsScreen() {
                 <EmptyTitle className="text-muted-foreground">
                   You don't have any agents created.
                 </EmptyTitle>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  render={(props) => (
+                    <Link to="/agents" search={{ new: true }} {...props} />
+                  )}
+                >
+                  <IconPlus />
+                  New agent
+                </Button>
               </EmptyHeader>
             </Empty>
           )}
         </div>
-        <div className="mt-8 w-full max-w-2xl">
-          <h2 className="font-bold text-lg">Explore agents</h2>
-          {loading ? (
-            // Reserves the same 180px the settled arms below occupy, so this section holds its
-            // own height and the page beneath it does not jump when the query settles.
-            <Skeleton className="mt-4 h-[180px]" />
-          ) : explore?.length ? (
-            // Wins over `failed` for the same reason the "Your agents" section above does: a
-            // failed background refetch does not clear TanStack Query's cached `data`.
-            <div className="mt-4 grid grid-cols-[repeat(auto-fill,144px)] gap-4">
-              {explore.map((agent, index) => {
-                return (
-                  <StaggerItem index={index} key={agent.id}>
-                    <Link to="/agents" search={{ agent: agent.id }}>
-                      <AgentCard agent={agent} />
-                    </Link>
-                  </StaggerItem>
-                );
-              })}
+
+        {Boolean(templates?.length) && (
+          <div className="mt-8 w-full max-w-3xl">
+            <div className="flex flex-row w-full items-center justify-between gap-4">
+              <div>
+                <h2 className="font-bold text-lg">Templates</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Pre-configured agents for common workflows like research,
+                  coding, and job hunting. Starting one makes your own private
+                  copy — your data never mixes with anyone else's.
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  onClick={() => scrollTemplates("left")}
+                  aria-label="Scroll left"
+                >
+                  <IconChevronLeft className="size-4" />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  onClick={() => scrollTemplates("right")}
+                  aria-label="Scroll right"
+                >
+                  <IconChevronRight className="size-4" />
+                </Button>
+              </div>
             </div>
-          ) : failed && agents === undefined ? (
-            // `agents === undefined` narrows this to "the query has never once returned
-            // successfully" — not merely "the last request errored". `?.length` alone can't
-            // tell that apart from a slice that loaded and is genuinely empty: TanStack Query
-            // never clears `data` on a failed background refetch, so once the query has
-            // resolved even one response, `agents` stays defined and `explore`'s emptiness is a
-            // fact about that response, not a symptom of the failure. Rendering the destructive
-            // card there would say the opposite of what "Your agents" beside it (or this
-            // section itself, on a different roster) proves by rendering real cards from the
-            // same query.
-            <Empty className="mt-4 h-[180px] border border-dashed border-destructive">
-              <EmptyHeader>
-                <EmptyTitle className="text-destructive">
-                  Agents shared with you couldn't be loaded.
-                </EmptyTitle>
-              </EmptyHeader>
-            </Empty>
-          ) : (
-            // Reached both when the query never failed and `explore` is genuinely empty, and
-            // when it failed but `agents` is defined — a loaded, empty slice either way. Same
-            // plain copy for both: an empty roster is a fact, not an error.
-            <Empty className="mt-4 h-[180px] border border-dashed">
-              <EmptyHeader>
-                <EmptyTitle className="text-muted-foreground">
-                  Nobody has shared an agent with you yet.
-                </EmptyTitle>
-              </EmptyHeader>
-            </Empty>
-          )}
-        </div>
+            <div
+              ref={templatesScrollRef}
+              className="mt-4 flex gap-4 overflow-x-auto pb-4 pt-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+            >
+              {templates?.map((agent, index) => (
+                <StaggerItem
+                  className="w-[170px] shrink-0"
+                  index={index}
+                  key={agent.id}
+                >
+                  <Link to="/agents" search={{ agent: agent.id }}>
+                    <AgentCard agent={agent} />
+                  </Link>
+                </StaggerItem>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <CreateAgentDialog
         onClose={close}

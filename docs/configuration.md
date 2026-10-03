@@ -1,6 +1,6 @@
 # Configuration
 
-OpenBot is configured with environment variables and a tenant package. The API server validates both at startup.
+Remii is configured with environment variables and a tenant package. The API server validates both at startup.
 
 ## Environment setup
 
@@ -16,20 +16,12 @@ bash scripts/start.sh
 
 ## Required API server variables
 
-| Variable                      | Meaning                                                                                               |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                | PostgreSQL connection string.                                                                         |
-| `KEY_ENCRYPTION_KEY`          | Base64-encoded 32-byte key for encrypted stored credentials. Generate with `openssl rand -base64 32`. |
-| `INTELLIGENCE_API_URL`        | CopilotKit Intelligence API URL.                                                                      |
-| `INTELLIGENCE_GATEWAY_WS_URL` | CopilotKit Intelligence realtime gateway URL.                                                         |
-| `INTELLIGENCE_API_KEY`        | Runtime key for the Intelligence project.                                                             |
+| Variable               | Meaning                                                                                               |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`         | PostgreSQL connection string. Threads, messages, runs and locks live here; nothing cloud is needed.  |
+| `KEY_ENCRYPTION_KEY`   | Base64-encoded 32-byte key for encrypted stored credentials. Generate with `openssl rand -base64 32`. |
 
-All five above stop server startup if missing. The three `INTELLIGENCE_` values are additionally
-checked as a set, so a partial set is refused as a misconfiguration rather than treated as
-unconfigured.
-
-`COPILOTKIT_LICENSE_TOKEN` is optional: managed Intelligence issues no licence token, and a
-self-hosted Intelligence that has one sets this and has it forwarded to the runtime.
+Both above stop server startup if missing. Legacy `INTELLIGENCE_*` variables are ignored when present.
 
 `MANAGED_AGENT_AG_UI_URL` names the Bot in the box: the default endpoint for coworkers created in
 the product. It needs `MANAGED_AGENT_TOKEN` beside it, or the server refuses to start. Unset, the
@@ -43,7 +35,7 @@ at `agent-langgraph` on a laptop.
 | Variable             | Default                            | Meaning                                                             |
 | -------------------- | ---------------------------------- | ------------------------------------------------------------------- |
 | `PORT`               | `3001`                             | API server port.                                                    |
-| `NODE_ENV`           | unset                              | `production` refuses the example `KEY_ENCRYPTION_KEY`. It does not decide whether sign-in is required; see `OPENBOT_SINGLE_USER`. |
+| `NODE_ENV`           | unset                              | `production` refuses the example `KEY_ENCRYPTION_KEY`. It does not decide whether sign-in is required; see `REMII_SINGLE_USER`. |
 | `TENANT_PACKAGE_DIR` | `../examples/fintech`              | Tenant package directory, resolved from `server/`.                  |
 | `DEPLOYMENT_ID`      | the tenant package's id            | Names this deployment inside a shared Intelligence project.          |
 | `OPENAI_API_KEY`     | unset                              | Default model key for built-in agents and both shipped Bots.        |
@@ -62,21 +54,21 @@ at `agent-langgraph` on a laptop.
 | `APP_DIST_DIR`       | unset                              | Where the built app is, when this process serves it. Set inside the container image; unset in development, where Vite serves the app. |
 | `AUDIT_RETENTION_DAYS` | unset                            | Whole number of days to keep audit rows; older ones are removed. Unset keeps the trail forever. |
 | `WORKER_SHARED_SECRET` | unset; `start.sh` uses a fixed local default | The secret the routines worker presents to fire a due routine. Without it the server refuses every handoff, whether or not a worker exists to send one. |
-| `OPENBOT_GENERATIVE_UI` | unset (capability on)               | Set `false` or `0` to stop Bots from answering with generated interfaces. |
-| `COMPOSIO_API_KEY`   | unset                              | One key for the whole deployment, for the broker that holds people's accounts for a few hundred apps. Unset, there is nothing to connect, nothing to grant and no Composio tool for a Bot to call; what remains is one row that goes nowhere, under **More apps** on the admin Plugins page, naming this variable. See [Composio](plugins/composio.md). |
+| `REMII_GENERATIVE_UI` | unset (capability on)               | Set `false` or `0` to stop Bots from answering with generated interfaces. |
+| `COMPOSIO_API_KEY`   | unset                              | One key for the whole deployment, for the broker that holds people's accounts for a few hundred apps. Unset, there is nothing to connect, nothing to grant and no Composio tool for a Bot to call, and the directory under Settings → App connections is not drawn at all. See [Composio](plugins/composio.md). |
 
-**`OPENBOT_GENERATIVE_UI`** enables generated interfaces by default: streamed HTML/CSS/JavaScript
+**`REMII_GENERATIVE_UI`** enables generated interfaces by default: streamed HTML/CSS/JavaScript
 in a sandboxed iframe, and A2UI interfaces built from the SDK's declarative components. A2UI buttons
 send their named action and selected values back to the current conversation's Bot.
-Set `OPENBOT_GENERATIVE_UI=false` or `0` to disable both. `true`, `1`, an empty value, or an unset
+Set `REMII_GENERATIVE_UI=false` or `0` to disable both. `true`, `1`, an empty value, or an unset
 value leave the capability on. The server configures both runtime renderers and reports the same
 setting through `/api/capabilities` to the browser.
 
 The component catalogue has separate per-Bot grants. Its sortable data table (`showTable`),
-interactive form (`askForm`), and other compiled or playground-authored components remain governed
-by those grants. In Admin → Playground, edit a draft and its sample arguments, preview it, then
-publish it for Bots to use. Only published code renders in conversations and the administrator's
-gallery; invalid JSON blocks saving and publishing.
+interactive form (`askForm`), and other compiled or generated components remain governed
+by those grants. A component written in the browser is saved as a draft and becomes usable only
+after publish; only published code renders in conversations, and the Components gallery under
+Settings lists what is published and nothing else.
 
 Generated HTML runs without the app's session or same-origin access to its data. It can load
 libraries from a CDN; deployments that prohibit that browser traffic can disable generated UI.
@@ -110,7 +102,7 @@ all. See [routines.md](routines.md) for what a deployment with no worker at all 
 Routines page says so when nothing has swept.
 
 Unlike `AGENT_TOOL_TOKEN`, `start.sh` does not generate and persist this one. It supplies a fixed
-local default, `openbot-dev-worker-secret`, the same value every clone of this repository gets. That
+local default, `remii-dev-worker-secret`, the same value every clone of this repository gets. That
 is fine here not because of where the server listens — it binds no hostname, so the port itself is
 reachable like any other — but because this is a dev-only default on a machine's own dev stack, and
 the endpoint it guards accepts nothing but an unguessable `routine_run_<uuid>` id: the server
@@ -164,7 +156,7 @@ Two things are worth knowing before pointing a deployment at any gateway. Not ev
 
 | Variable                     | Meaning                                                                                |
 | ---------------------------- | -------------------------------------------------------------------------------------- |
-| `OPENBOT_SINGLE_USER`        | One fixed administrator and no sign-in. **Required** when no identity provider is configured, or the deployment refuses to start. Ignored when one is. |
+| `REMII_SINGLE_USER`        | One fixed local user and no sign-in. **Required** when no identity provider is configured, or the deployment refuses to start. Ignored when one is. |
 | `GOOGLE_OAUTH_CLIENT_ID`     | Google OAuth client id.                                                                |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | Google OAuth client secret.                                                            |
 | `MICROSOFT_OAUTH_CLIENT_ID`  | Microsoft Entra ID application id.                                                     |
@@ -175,191 +167,276 @@ Two things are worth knowing before pointing a deployment at any gateway. Not ev
 | `OKTA_OAUTH_ISSUER`          | Which Okta, for example `https://example.okta.com/oauth2/default`.                     |
 | `BETTER_AUTH_SECRET`         | At least 32 characters. Required with any provider.                                    |
 | `BETTER_AUTH_URL`            | Public API server base URL, where OAuth callbacks return. Required with any provider.  |
-| `TRUSTED_ORIGINS`            | Comma-separated app origins accepted by the API, plus every host in a registered OIDC provider's discovery document. |
-| `INITIAL_ADMIN_EMAILS`       | Comma-separated administrators. **Required** with any provider.                        |
-| `OPENBOT_PUBLIC_URL`         | Public address of this API. Defaults to `BETTER_AUTH_URL`.                              |
-| `OPENBOT_APP_URL`            | Where the browser app is served. Defaults to the first `TRUSTED_ORIGINS` entry.          |
+| `TRUSTED_ORIGINS`            | Comma-separated app origins accepted by the API.                                       |
+| `INITIAL_ADMIN_EMAILS`       | Retired. No administrators exist; if set, it is ignored with a warning.                |
+| `REMII_PUBLIC_URL`         | Public address of this API. Defaults to `BETTER_AUTH_URL`.                              |
+| `REMII_APP_URL`            | Where the browser app is served. Defaults to the first `TRUSTED_ORIGINS` entry.          |
 
-**With no provider at all, `OPENBOT_SINGLE_USER=true` is required.** A deployment that configures
+**With no provider at all, `REMII_SINGLE_USER=true` is required.** A deployment that configures
 nothing to sign anybody in and does not say that was deliberate refuses to start, naming what to
-configure, because a public URL where every visitor is an administrator fails silently. `NODE_ENV`
-does not enter into it. `.env.example` ships the line switched on, so a clone runs with no
+configure, because a public URL where every visitor gets an account of their own fails silently.
+`NODE_ENV` does not enter into it. `.env.example` ships the line switched on, so a clone runs with no
 configuration at all.
 
 **Any one provider turns sign-in on**, and several may be configured at once. Each provider's id and
 secret must be set together, Okta additionally needs its issuer, and any of them requires
-`BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` and `INITIAL_ADMIN_EMAILS`. Every incomplete combination is
+`BETTER_AUTH_SECRET` and `BETTER_AUTH_URL`. Every incomplete combination is
 refused at start-up rather than at somebody's first attempt to sign in.
 
-`INITIAL_ADMIN_EMAILS` is required because nothing else grants the administrator role at first: an
-address it names becomes an administrator at every sign-in and cannot be demoted from the People
-screen, which is what guarantees a way back in. Everybody else's role is decided there instead.
+`INITIAL_ADMIN_EMAILS` is retired. It was the only way to name somebody as an administrator, and with
+no administrator role it would silently grant one address power over every other user's data, so a
+value left in the environment is logged and ignored rather than honoured. Remove it.
 
-SAML and OpenID Connect providers are not configured here. They are registered while the deployment
-runs, under Admin → Identity providers, and routed by email domain.
-
-**Registering an OpenID Connect provider needs its endpoints in `TRUSTED_ORIGINS`.** Better Auth
-fetches the discovery document and refuses any endpoint inside it that is not a trusted origin, which
-is what stops a registration pointing the deployment at an address of somebody else's choosing. It is
-every host in the document and not only the issuer, so a Google issuer also needs
-`oauth2.googleapis.com` and `openidconnect.googleapis.com`; a typical Okta tenant serves all of them
-from one host and needs only that. A registration refused this way names the host it objected to.
-
-What is registered belongs to the deployment rather than to whoever registered it. Every
-administrator sees the same list and can remove any of it, and a provider outlives the person who
-added it. The client secret and any SAML signing material are encrypted at rest with
-`KEY_ENCRYPTION_KEY`.
+**SAML and OpenID Connect cannot be registered at runtime.** The three Better Auth SSO mutation routes
+are closed outright, because the only thing standing behind them is a session, and in a product with
+no administrator that would let any signed-in person register a provider for a domain and mint
+themselves colleagues. A deployment that needs company SSO puts the identity provider in front of
+Remii rather than inside it.
 
 The redirect URI to register with each provider is `<BETTER_AUTH_URL>/api/auth/callback/<provider>`,
 where `<provider>` is `google`, `microsoft` or `okta`.
 
-`OPENBOT_PUBLIC_URL` and `OPENBOT_APP_URL` matter only for a connector each person connects their own account to, such as Google Drive.
+`REMII_PUBLIC_URL` and `REMII_APP_URL` matter only for a connector each person connects their own account to, such as Google Drive.
 
-`OPENBOT_PUBLIC_URL` builds the redirect URI the vendor sends somebody back to after they consent, which has to match what an administrator registered with that vendor character for character — so it comes from configuration rather than from the incoming request. Most deployments never set it, because `BETTER_AUTH_URL` is already the same public address. With neither, the Plugins page says the deployment cannot complete a consent flow, and no account can be connected.
+`REMII_PUBLIC_URL` builds the redirect URI the vendor sends somebody back to after they consent, which has to match what you registered with that vendor character for character — so it comes from configuration rather than from the incoming request. Most deployments never set it, because `BETTER_AUTH_URL` is already the same public address. With neither, the app's own page says the deployment cannot complete a consent flow, and no account can be connected.
 
-`OPENBOT_APP_URL` is where the callback sends the person afterwards. It is a separate setting because the app and the API are separate addresses: locally the app is Vite on `3010` and the API is `3001`, so a relative redirect would land on the API, which serves no pages. A deployment serving both from one origin can leave it unset.
+`REMII_APP_URL` is where the callback sends the person afterwards. It is a separate setting because the app and the API are separate addresses: locally the app is Vite on `3010` and the API is `3001`, so a relative redirect would land on the API, which serves no pages. A deployment serving both from one origin can leave it unset.
 
-A [Composio](plugins/composio.md) app needs `OPENBOT_APP_URL` and nothing else of the two: the consent lives at the broker, so no redirect URI of ours is registered anywhere, but the address Composio returns somebody to has to be absolute and this is where it comes from. Connecting a brokered account refuses where it resolves to nothing, rather than sending somebody to a consent screen with no way back.
+A [Composio](plugins/composio.md) app needs `REMII_APP_URL` and nothing else of the two: the consent lives at the broker, so no redirect URI of ours is registered anywhere, but the address Composio returns somebody to has to be absolute and this is where it comes from. Connecting a brokered account refuses where it resolves to nothing, rather than sending somebody to a consent screen with no way back.
 
 ## One Bot handing work to another
 
 | Variable                   | Meaning                                                                                     |
 | -------------------------- | ------------------------------------------------------------------------------------------- |
-| `BOT_HANDOFF_MAX_DEPTH`    | How many Bots deep a chain may go. `0` switches the capability off entirely. Default `1`.    |
+| `BOT_HANDOFF_MAX_DEPTH`    | How many Bots deep a chain may go. `1` is two Bots, `2` is three. `0` switches the capability off entirely. Default `2`.    |
 | `BOT_HANDOFF_MAX_PER_RUN`  | How many other Bots one run may address. Default `3`.                                        |
 
 Both refuse rather than truncate, and both are refused at start-up if they are not whole numbers of
 zero or more: a deployment that typed `two` and silently got the default would believe it had set a
 cap.
 
+## How Bots act
+
+| Variable                | Meaning                                                                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BOT_EXECUTION_MODE`    | Deployment default: `direct` (do what was asked, immediately) or `ask-first` (external actions wait for the person's word first). Default `direct`. |
+| `WEB_SEARCH_API`        | Bearer key for the live web-search endpoint behind the Remi `web_search`/`web_open` tools. Unset, the tools are not offered.                        |
+| `WEB_SEARCH_URL`        | Search endpoint base URL. Default `https://web.freeapi.space`.                                                                                      |
+
+`BOT_EXECUTION_MODE` refuses anything outside the closed set at start-up. A person overrides the
+default for themselves on **Settings → General → Execution mode**: direct, ask-first, or inherit
+the deployment default. Internal work (reading, organizing, remembering, answering) is never gated
+either way; the switch is about effects on the world.
+
+## The Remi engine
+
+Built-in Bots run the ported Remi ReAct loop (up to 40 tool steps a turn, parallel calls, model
+fallback, truncated tool results) over OpenAI-compatible chat completions, emitting the same
+AG-UI events the previous runtime did — transcript, persistence, metering and handoff are
+unchanged. What the loop is told (role, instructions, grants, computer prose) is unchanged too.
+
+| Variable                 | Meaning                                                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `DEEPSEEK_API_KEY`       | DeepSeek fallback link (`deepseek-chat`).                                                                                |
+| `OPENROUTER_API_KEY`     | OpenRouter fallback link (`OPENROUTER_MODEL`, default `openai/gpt-4o-mini`).                                             |
+| `NOVITA_API_KEY`         | Novita fallback link (`NOVITA_MODEL`, default `deepseek/deepseek-v3-0324`).                                              |
+| `GEMINI_API_KEY`         | Telegram voice transcription and photo description. Unset, media arrives as captions with a note.                        |
+| `COMPOSIO_TRIGGER_SECRET`| Shared secret Composio trigger webhooks must carry. Unset, events are accepted when they resolve to a local user.       |
+
+Model fallback covers an outage, never a missing configuration: with no key for the deployment's
+own model the turn fails fast naming the variable. The loop speaks OpenAI-compatible chat
+completions, so `BOT_PROVIDER=anthropic` resolves only through `ANTHROPIC_BASE_URL` pointed at a
+compatible endpoint. Composio app events arrive at
+`POST /api/webhooks/composio` and resolve to a local user (metadata id, connected account,
+payload email), fire a matching automation first, and otherwise file a todo through the junk
+filter and a model triage. Redelivered events file nothing twice.
+
+## Voice, screen and local Google
+
+| Variable                 | Meaning                                                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `ELEVENLABS_API_KEY`     | Spoken Telegram replies (voice notes earn voice answers). Unset, everything stays text.                                  |
+| `ELEVENLABS_VOICE_ID`    | Which voice answers. Unset, the default voice.                                                                           |
+| `GOG_BINARY`             | Path to the `gog` CLI for Google Workspace tools. Unset, resolved off PATH; missing means the tools stay home.          |
+| `GOG_BINARY`               | Path to the `gog` CLI for Google Workspace tools. Unset, resolved off PATH; missing means the tools stay home.          |
+
+`Settings → Voice & Google` reports both live: voice configuration plus a test line, and
+the gog binary with its auth state. Google auth itself happens once on the machine
+(`gog auth add …`), never in the product.
+
+## Browser computer
+
+There is one. It is an E2B sandbox per person — see [The computer](#the-computer) below.
+`REMII_ONE_COMPUTER_EACH` used to park it (`false` meant no routes and no `computer_*` tools)
+and both it and the E2B addresses it gated are gone; the switch described a container layout that
+no longer exists, and leaving it in a reference document was worse than deleting the section.
+Workspace files were never the computer's — `artifact_*` covers them.
+
 Which Bots may address which is a grant, not a variable, and no Bot may address any other until one
 is made. It is made on the Bot's own screen: open it from **Agents**, and switch on each Bot under
 **Bots it may ask**. The pair is directional: that list is who this Bot may ask, not who may ask it,
-so letting them ask each other is two switches. Only an administrator may change it; anyone who can
+so letting them ask each other is two switches. Only the Bot's owner may change it; anyone who can
 see the Bot can read it.
 
 With both caps above at zero the screen says the capability is switched off, because a grant made
 then is a row nothing will read.
 
-## Computer and supervisor
+## The computer
+
+A computer is an **E2B sandbox**, one per person. There is no computer container in this deployment and
+no port to reach one on. The API server drives the desktop through E2B's own API, and the live screen
+is **noVNC talking RFB straight to the sandbox** — the browser connects to the desktop and the server is
+not in the data path at all.
 
 | Variable                             | Meaning                                                                                   |
 | ------------------------------------ | ----------------------------------------------------------------------------------------- |
-| `AGENT_COMPUTER_URL`                 | Shared computer URL. If absent, computer routes are not mounted.                          |
-| `COMPUTER_TOKEN`                     | Secret every computer request must present. The computer refuses to start without it.     |
-| `COMPUTER_MAX_BROWSERS`              | How many Bots may hold a running browser at once. `8` by default; the least recently used is closed past it. |
-| `COMPUTER_BROWSER_IDLE_MS`           | How long an untouched browser is kept. 30 minutes by default; `0` keeps them resident.    |
-| `COMPUTER_BROWSER_MODE`              | `headless` by default; set to `headed` to run full Chromium on a private virtual display for human takeover. |
-| `COMPUTER_SUPERVISOR_URL`            | Supervisor URL for per-Bot computers. If absent, Bots share `AGENT_COMPUTER_URL`.         |
-| `SUPERVISOR_TOKEN`                   | Bearer token required by the supervisor.                                                  |
+| `E2B_API_KEY`                        | **The whole trigger.** Present means the computer exists; absent means the server mounts no computer routes. Server-side, never reaches React. |
+| `E2B_API_URL`                        | E2B API base. Only for a self-hosted control plane; E2B's own default is right for the hosted product. |
+| `COMPUTER_TOKEN`                     | **Required** once `E2B_API_KEY` is set. The server refuses to boot without it.              |
+| `E2B_TEMPLATE`                       | The template every desktop is built from. `desktop`, which is E2B's own.                      |
+| `E2B_AUTOSTOP_MINUTES`               | Idle minutes before a desktop is **paused**, as a backstop for this process dying. Never shorter than the idle sweep, whatever it says. `10`. |
+| `E2B_SANDBOX_TIMEOUT_MS`             | E2B's own kill-clock. A sandbox reaching `timeoutMs` is **deleted**. The server pushes it forward while a computer is in use, so it is a backstop. |
+| `E2B_MAX_DESKTOPS_PER_USER`         | How many of one person's computers may run at once.                                           |
+| `E2B_VOLUMES`                        | Whether each person's files live on their own E2B volume. On by default; only the literal string `false` turns it off. |
+| `E2B_WORKSPACE_MOUNT`                | Where that volume appears inside the sandbox. `/workspace`. Also what a tool's relative paths resolve against, which is why the two live in one place in the code. |
 | `AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS` | Local-only private-host browsing when `true`. A deployment running with `NODE_ENV=production` refuses to start while it is set. Cloud metadata addresses are refused either way. |
 | `AGENT_ENDPOINT_ALLOWED_HOSTS`       | Private addresses an agent may be registered at, comma separated; unset (none) by default. Host, optionally with a port. Exact match; no wildcards. Never-allowed addresses cannot be named. |
 | `AGENT_COMPUTER_POLICY`              | JSON action policy: `{"mode":"enforce","deny":[...],"allow":[...]}`.                      |
-| `COMPUTER_RUNTIME`                   | Set to `runsc` to run supervised computers under gVisor.                                  |
-| `COMPUTER_SANDBOX`                   | Set to `on` to enable Chromium's own sandbox where the host permits user namespaces. Which way it went is printed at start-up. |
 
-`COMPUTER_SANDBOX` is not the cluster sandbox provider. A Kubernetes deployment can instead run each
-computer as a sandboxed pod, selected by `COMPUTER_SANDBOX_NAMESPACE` with `COMPUTER_SANDBOX_IDLE_AFTER`
-and `COMPUTER_SANDBOX_TEMPLATE_FILE` beside it; those are set by the Helm chart, not by Compose, and
-are covered in [charts/openbot/README.md](../../charts/openbot/README.md). The similarly named
-`COMPUTER_SANDBOX` above only toggles Chromium's own process sandbox on a Docker computer.
+### The live screen is noVNC, and that is why it is not laggy
 
-Changing `COMPUTER_BROWSER_MODE` affects new supervised computers. A computer that already exists is
-left running until its image changes or its container is recreated. To apply a mode-only change to
-all computers while preserving their browser profiles and workspaces, apply the new supervisor
-environment and remove only the owned containers (do not remove their volumes):
+The screen used to be a frame sampler. The server called a remote screenshot API once per frame,
+base64'd the JPEG and pushed it down a websocket; the browser decoded it, and every mouse move the
+person made went back up the same socket and out through another round trip. The frame rate was
+therefore the platform's latency and never more than 8fps, and a click landed a frame and a half after
+the hand stopped moving — so somebody who took the wheel clicked, saw nothing happen, and clicked
+again.
 
-```sh
-docker ps -aq --filter "label=openbot.namespace=openbot" | xargs -r docker rm -f
+E2B exposes the sandbox's own port, so the browser now speaks RFB directly to the desktop. Only the
+rectangles that changed are sent, input never passes through the server, and latency is a property of
+the network rather than of how many API calls a picture costs.
+
+`GET /api/computers/desktop/stream` returns a **URL and a per-session password, separately**:
+
+```json
+{ "url": "https://6080-<id>.e2b.app/vnc.html?autoconnect=true", "authKey": "…", "width": 1920, "height": 1080 }
 ```
 
-The supervisor recreates each computer with the same named volumes on its next request.
+The password is returned beside the URL rather than inside it because a URL is what ends up in a proxy
+log, in browser history and in a `Referer` header. It is a 16-character string minted by x11vnc when
+the stream starts and dead when it stops — knowing it buys control of that one desktop until it is
+restarted, and nothing else. The `E2B_API_KEY` never leaves the server process.
 
-`agent-computer` also reads:
+`requireAuth: true` is not configurable and is not optional. `@e2b/desktop` starts x11vnc with `-nopw`
+unless told otherwise and the noVNC host is a public hostname, so the default is an unprotected desktop
+with a person's files mounted on it.
 
-- `ACTION_TIMEOUT_MS`
-- `NAVIGATION_TIMEOUT_MS`
-- `WORKSPACE_DIR`
-- `PROFILES_DIR`
-- `COMPUTER_BOT_ID`
-- `EGRESS_PROXY_DEFAULT` (in `egress.env`, see below)
-- `EGRESS_PROXY_<BOT_ID>` (in `egress.env`, see below)
-- `COMPUTER_SHELL_ENV`
+### Paused is not the same as gone, and it is cheap
 
-A command on the computer inherits PATH, locale and terminal names, and the proxy variables, not
-the rest of the process environment. Userinfo is stripped from a proxy URL, so a password in
-`HTTP_PROXY` is not in `env`. `COMPUTER_SHELL_ENV` is a comma-separated list of extra names to
-pass. Naming a secret or a credentialed proxy there is an operator's decision; the default does not.
+`daytona.get` answering happily for a stopped sandbox is a bug this file is named after: "the row names
+a sandbox" and "the sandbox will accept a command" are two different facts, and conflating them produced
 
-### Per-Bot egress
-
-The two egress variables live in `egress.env` at the repository root, not in `.env`. `EGRESS_PROXY_<BOT_ID>`
-is derived from a Bot's id, so there is no fixed set of names for Compose to list the way it lists
-every other variable, and Compose passes a container only the names it is given. A file of its own
-rather than `.env` because that one holds the deployment's secrets and neither the browser container
-nor the supervisor is given those.
-
-```sh
-# egress.env
-EGRESS_PROXY_DEFAULT=http://user:password@proxy.internal:8080
-EGRESS_PROXY_SALES_BOT=http://sales.proxy.internal:8080
+```
+Bad request: failed to resolve container IP after 3 attempts: no IP address found.
 ```
 
-The file is optional and gitignored. Without it every Bot's browser goes out directly, which is the
-default. Both the shared computer and the supervisor are given it: the computer resolves its own
-proxy from these names, and the supervisor forwards them into each computer it creates.
+on every screen, shell and file call made minutes after anyone last touched a computer. On E2B the same
+confusion has a different face — `Sandbox.connect` **resumes** a paused sandbox as a side effect, so
+using it to ask whether a machine is up would mean the idle pause is defeated by a status page being
+polled. `Sandbox.getInfo` is the check that wakes nothing, and the provisioner uses it for exactly that.
 
-The supervisor also reads:
+A pause is also the right idle policy, where a stop was not. E2B's memory pause restores the desktop
+with its windows, its browser session and its running programs, and returns in seconds. `kill` is never
+called: a person's disk is their data, and a platform deciding to throw a machine away on a schedule is
+not a persistence story anybody can rely on.
 
-- `COMPUTER_IMAGE`
-- `COMPUTER_NAMESPACE`
-- `COMPUTER_NETWORK`
-- `COMPUTER_MEMORY_BYTES`
-- `DOCKER_SOCKET`
+### The kill-clock is a hard ceiling, and the server pushes it forward
 
-`ENGINE_SOCKET` is separate from those, because it is read by Compose rather than by the supervisor:
-it is the host path mounted into the supervisor as `/var/run/docker.sock`. Unset, it is
-`/var/run/docker.sock`, which is right for Docker and for Podman on macOS, where `podman machine`
-symlinks that path to the rootless socket. Rootless Podman on Linux needs
-`ENGINE_SOCKET=$XDG_RUNTIME_DIR/podman/podman.sock`: there the default path is either missing or a
-symlink to the rootful socket, which is not the one running, and the supervisor reports that it
-cannot reach Docker.
+E2B deletes a sandbox at `timeoutMs` — one hour on Hobby, 24 on Pro. A person watching a long-running
+task would otherwise lose their machine at the one-hour mark and find out from a dead screen, so the
+provisioner's `heartbeat` pushes the clock forward for as long as somebody is using the computer.
+`E2B_SANDBOX_TIMEOUT_MS` is a backstop under that, not the thing that does it.
 
-`COMPUTER_NAMESPACE` defaults to `openbot` and names the deployment a computer belongs to. It is part
-of every container and volume name the supervisor derives, and the supervisor acts only on computers
-carrying it, so two deployments on one Docker host never adopt each other's.
+### One volume per person, and why that changed
 
-Per-Bot computers belong to the supervisor rather than to Compose, so `docker compose down -v` does
-not remove them: their containers keep running and their profile volumes, which hold whatever the
-Bots are signed in to, survive. Remove them by the label the supervisor sets:
+Daytona mounted **one shared volume** at a per-user subpath and relied on the FUSE mount being scoped
+to that prefix for isolation. E2B mounts a volume whole, at a path, with no equivalent scoping — so a
+shared volume would put every person's desktop on one directory, and there is no subpath trick available
+to fix that afterwards. Hence a volume each, named from an opaque hash of the user id: it leaks nothing
+into an operator's volume list, and a database row lost by mistake still finds its disk.
 
-```sh
-docker ps -aq --filter "label=openbot.namespace=openbot" | xargs -r docker rm -f
-docker volume ls -q --filter "label=openbot.namespace=openbot" | xargs -r docker volume rm
+`E2B_VOLUMES=false` is the only value that turns this off. A typo leaves it on, because losing somebody's
+files is the worse direction to be wrong in.
+
+### Egress, and the two allow-lists that no longer exist
+
+`DAYTONA_NETWORK_ALLOW_LIST` and `DAYTONA_DOMAIN_ALLOW_LIST` were parsed and documented and **never read
+by anything** — they were not passed to the create call and referenced nowhere else. They are gone rather
+than left as variables that do nothing.
+
+Egress is no longer the question it was. Free-tier Daytona sandboxes had none, which is why a Bot's
+browser could not load a page from the desktop; E2B sandboxes have it, and `allowInternetAccess: true`
+is passed explicitly on create rather than left to a default. Restricting it is now E2B's own network
+configuration, or the `network` field on the sandbox — not a variable in this repository.
+
+### Stopped is not the same as gone
+
+`daytona.get` answers perfectly happily for a **stopped** sandbox, because a stopped machine is still
+there and still costs nothing to keep. So "the row names a sandbox" and "the sandbox will accept a
+command" are two different facts, and conflating them produced:
+
+```
+Bad request: failed to resolve container IP after 3 attempts: no IP address found.
 ```
 
-Proxy credentials may appear in proxy URLs, but the computer strips them before reporting proxy status.
+on every screen, shell and file tool call made minutes after anyone last touched a computer. There is
+no container to resolve an IP for, the request dies in the proxy before any handler can explain
+itself, and the only symptom is a desktop that is unreachable. The provisioner therefore confirms
+`state === "started"` and wakes the machine when it is not —
+`server/tests/e2b-resume.test.ts` covers it.
+
+### Egress
+
+There is no egress variable here, and there is no longer a question. Free-tier Daytona sandboxes had
+**no internet egress**, so a Bot's browser could not load a page from the desktop at all — the reason
+this deployment is on E2B now. E2B sandboxes have it, `allowInternetAccess: true` is passed explicitly
+on create, and `computer_navigate` works.
+
+Restricting egress is E2B's own network configuration, or the `network` field on the sandbox. The old
+`DAYTONA_NETWORK_ALLOW_LIST` and `DAYTONA_DOMAIN_ALLOW_LIST` were parsed and documented here and
+**never read by anything** — they were not passed to the create call and referenced nowhere else — so
+they are gone rather than left as variables that do nothing.
+
+`egress.env` and `EGRESS_PROXY_<BOT_ID>` are gone for the same reason they went before: they were
+named after a Bot's id because the supervisor created a container per Bot. A sandbox belongs to a
+**person**, so a per-Bot proxy is the wrong shape whatever platform it is for.
+
+A person who wants their machine and their files gone removes their computer from
+**Settings → Computer**, which stops and deletes the sandbox. The volume it mounted is not removed
+with it: it is the shared tree every computer of that person uses, and `docker volume ls` still shows
+it. Nothing above needs running on the host to do this.
 
 ## Attested identity
 
 When optional SPIRE services are used:
 
-- the supervisor reads `SPIRE_SOCKET`, `SPIRE_AGENT_ID`, `SPIRE_TRUST_DOMAIN`, and `SPIRE_AGENT_SOCKET_VOLUME`;
-- computers read `SPIFFE_ENDPOINT_SOCKET`;
+- the `agent-bot` service reads `SPIRE_SOCKET`, `SPIRE_AGENT_ID`, `SPIRE_TRUST_DOMAIN`, and `SPIRE_AGENT_SOCKET_VOLUME`;
 - Compose also uses `SPIRE_JOIN_TOKEN` and `COMPOSE_PROJECT_NAME`.
+
+A computer used to be listed here too, reading `SPIFFE_ENDPOINT_SOCKET` from inside a container. It is
+an E2B sandbox now, which is outside this deployment and outside its network — nothing here attests
+it, and nothing here should.
 
 ## Images
 
 Every service `docker-compose.yml` can build is published by a release, so a machine can run the
-stack without a toolchain and without waiting for Chromium to build.
+stack without a toolchain.
 
 | Service           | Setting             | Published image                            |
 | ----------------- | ------------------- | ------------------------------------------ |
-| `agent-computer`  | `COMPUTER_IMAGE`    | `ghcr.io/copilotkit/openbot-agent-computer` |
-| `supervisor`      | `SUPERVISOR_IMAGE`  | `ghcr.io/copilotkit/openbot-supervisor`     |
-| `agent-bot`       | `BOT_IMAGE`         | `ghcr.io/copilotkit/openbot-agent-bot`      |
-| `agent-langgraph` | `LANGGRAPH_IMAGE`   | `ghcr.io/copilotkit/openbot-agent-langgraph`|
-| `migrate`         | `SERVER_IMAGE`      | `ghcr.io/copilotkit/openbot-server`         |
+| `agent-bot`       | `BOT_IMAGE`         | `ghcr.io/copilotkit/remii-agent-bot`      |
+| `agent-langgraph` | `LANGGRAPH_IMAGE`   | `ghcr.io/copilotkit/remii-agent-langgraph`|
+| `migrate`         | `SERVER_IMAGE`      | `ghcr.io/copilotkit/remii-server`         |
 
 Unset, each names a local tag and Compose builds it, which is what a checkout of this repository
 does. Set to a published reference, pinned by digest, together with `IMAGE_PULL_POLICY=missing`,
@@ -380,27 +457,44 @@ useful answer is that the image could not be fetched. Somewhere that must never 
 | ----------------- | -------------------------- | ----------------- |
 | `app`             | 3010                       | `APP_PORT`        |
 | `server`          | 3001                       | `SERVER_PORT`     |
-| `agent-computer`  | 4100                       | `COMPUTER_PORT`   |
 | `agent-bot`       | 4200                       | `BOT_PORT`        |
 | `agent-langgraph` | 4201                       | `LANGGRAPH_PORT`  |
-| `supervisor`      | 4500 host / 4300 container | `SUPERVISOR_PORT` |
 | PostgreSQL        | 5432                       | `POSTGRES_PORT`   |
+
+A computer has no port here. It is an E2B sandbox, reached over E2B's API rather than over a socket of
+ours, so there is nothing to publish and nothing for an attacker to reach by guessing a number. The
+live screen is the one exception and it is deliberate: the browser connects to the sandbox's own noVNC
+port, protected by a per-session password this server mints, rather than through a port published here. `COMPUTER_PORT` and `SUPERVISOR_PORT` remain only so a stale `.env` naming them does not
+become a startup failure; nothing reads them.
 
 Set these in `.env` or in the environment. `docker-compose.yml` publishes on them and
 `scripts/start.sh` reads the same names to decide where to look, so one setting moves a service and
 everything that talks to it. The addresses built from them are separate settings, so a moved service
-also needs its URL changed: `DATABASE_URL`, `AGENT_COMPUTER_URL` and `MANAGED_AGENT_AG_UI_URL`.
+also needs its URL changed: `DATABASE_URL` and `MANAGED_AGENT_AG_UI_URL`.
 
-To run two deployments on one Docker host, give the second one its own `COMPOSE_PROJECT_NAME`,
-`COMPUTER_NAMESPACE` and `COMPUTER_IMAGE`. Container and volume names are global to a host, and the
-namespace is what keeps each deployment's per-Bot computers its own.
+To run two deployments on one Docker host, give the second one its own `COMPOSE_PROJECT_NAME`.
+Container and volume names are global to a host, and the project name is what keeps each
+deployment's services its own.
+
+Two deployments **cannot** share one E2B account without care, and for a different reason than they could
+not share one Daytona account. Daytona's memory was drawn from an organization-wide pool, so the second
+deployment found it exhausted and every user got a quota error naming nobody. E2B has no such pool —
+the limits are concurrency (20 on Hobby, 100 on Pro), disk (10 GiB on Hobby, 20 on Pro) and continuous
+runtime — so the shared failure is a **concurrency ceiling** instead, and it is reached by two
+deployments' desktops adding up rather than by either being large.
+
+Split them across accounts, raise the tier, or share one account deliberately and treat the concurrency
+number as a budget to divide rather than a limit to discover.
 
 Give it its own `DEPLOYMENT_ID` as well when it shares an Intelligence project, which a copy made
 from the same `.env` does. Threads are listed per Bot and carry nothing else that says where a
 conversation came from, so the name goes into every thread id a deployment mints and is how its own
 conversations stay tellable from the other's.
 
-Set `OPENBOT_ONE_COMPUTER_EACH=false` when using `start.sh` to run all Bots against one shared computer.
+Each person gets one computer, not one per Bot, and not one shared by everybody: each has its own
+browser, its own `/workspace` and its own volume subpath, so no user can see or reach another
+user's. Two Bots of the same person share that one machine and are arbitrated when both would drive
+it at once.
 
 ## Tenant package
 
@@ -422,8 +516,8 @@ examples/fintech/
 
 ```yaml
 tenant:
-  id: openbot
-  product_name: OpenBot
+  id: remii
+  product_name: Remii
 ```
 
 Optional theme:
@@ -470,6 +564,11 @@ The two types are told different amounts, which is easy to miss. A `built-in` ag
 `system_prompt`; a `remote-ag-ui` agent has none, and its `role_description` is the only instruction
 it ever receives from the package. Write that sentence as the whole brief for the Bot, not as a
 label for a list.
+
+A `remote-ag-ui` agent is not something a person adds. Every address in a package comes from the
+deployment's own configuration — the Bot it ships in the box, or the framework picked during setup —
+and both are reached over AG-UI on this machine or this network. A coworker created in the product
+always runs on that same engine; there is no field anywhere for pointing one somewhere else.
 
 Both kinds are also told, by the deployment rather than by the package, to say where an answer came
 from: cite what a tool returned, and say plainly when the answer is from the model's own knowledge
@@ -527,8 +626,8 @@ Each channel requires `id`, `name`, `description`, `permitted_agents`, and `allo
 
 `allowed_groups` is validated and stored, and nothing reads it. It decides nothing today, and a
 deployment that writes one must not treat it as an access control. Both halves of that control are
-missing, not one: `users.groups` exists as a column and no sign-in path, claim mapping or admin
-screen ever populates it, so there is nothing for a channel's list to be compared against. Channel
+missing, not one: `users.groups` exists as a column and no sign-in path or claim mapping ever
+populates it, so there is nothing for a channel's list to be compared against. Channel
 access is decided by membership alone — every channel route resolves the caller's row in
 `channel_memberships` and refuses without it.
 
@@ -572,9 +671,19 @@ skills:
     tools:
       - google-drive/search_files
       - google-drive/read_file_content
+  - slug: how-we-deploy
+    title: How we deploy
+    summary: Answer deployment questions from the platform repository.
+    instructions: >-
+      Read the deployment guide before answering, and name the file you took it from.
+    repo: https://github.com/acme/platform/tree/main/docs
 ```
 
-Each skill becomes a deployment skill on boot: everybody sees it in the `/` menu, and which Bots carry it is decided in Admin like any other.
+Each skill becomes a deployment skill on boot: everybody sees it in the `/` menu, and which Bots carry it is decided by a grant like any other.
+
+`repo` is optional and is the same field the Skills page takes: a **public** GitHub address, optionally with a branch and a folder inside it. A Bot carrying such a skill is offered three tools that read that repository — an overview, a search, and one file at a time — and nothing else. Only `github.com` addresses are readable and no token is stored, so a private repository cannot be pointed at; `skill.repo` that is not readable stops the package loading, naming the key.
+
+Like `tools`, `repo` grants nothing: a Bot reads the repository because it was granted the skill, and the grant is what decides that. A redeploy rewrites the pointer and drops the cached reading of the old one, so the first run after a deploy re-reads it.
 
 `tools` is why this file matters beyond the instructions. A Bot holding more than twelve tools is offered, per run, only the tools of the skills that match the message, so the matching needs skills to match against. Shipping the declaration with the skill is what makes connecting a connector the only step; without it a deployment has no skills, nothing matches, and the narrowing never switches on.
 

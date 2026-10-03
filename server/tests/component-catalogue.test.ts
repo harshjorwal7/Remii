@@ -18,7 +18,7 @@ const asSignedIn: MiddlewareHandler<{ Variables: AppVariables }> = async (
   context,
   next,
 ) => {
-  context.set("actor", { id: "u1", email: "someone@openbot.test" });
+  context.set("actor", { id: "u1", email: "someone@remii.test" });
   return next();
 };
 
@@ -39,7 +39,7 @@ function harness() {
   return {
     published,
     announce: (components: unknown[]) =>
-      app.request("http://openbot.local/components/catalogue", {
+      app.request("http://remii.local/components/catalogue", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ components }),

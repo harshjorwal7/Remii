@@ -5,19 +5,22 @@ import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
 import { a2uiProviderOptions } from "./a2ui";
 import "./a2ui.css";
 import { ActiveBotProvider } from "./active-bot";
+import { BotAdminTools } from "./bot-admin-tools";
 import { BotTools } from "./bot-tools";
 import { ComputerTools } from "./computer-tools";
+import { ConnectionTool } from "./connection-tool";
 import { EscalationTool } from "./escalation-tool";
 import { GalleryTools } from "./gallery-tools";
 import { GENERATIVE_UI_DESIGN_SKILL } from "./generative-ui";
 import { HandoffTool } from "./handoff-tool";
+import { RepoTools } from "./repo-tools";
 import { SandboxedTools } from "./sandboxed-tools";
 import { SkillTools } from "./skill-tools";
 
 /**
  * The CopilotKit client, wrapped once for the whole authenticated app.
  *
- * `credentials: "include"` is the load-bearing part. OpenBot authenticates with a Better Auth
+ * `credentials: "include"` is the load-bearing part. Remii authenticates with a Better Auth
  * session cookie, and the runtime endpoint sits behind the same guard as every other API route, so
  * without it every run is rejected as anonymous while the rest of the app looks signed in.
  *
@@ -33,6 +36,8 @@ export function CopilotProvider({ children }: { children: ReactNode }) {
 
   return (
     <CopilotKitProvider
+      enableInspector={false}
+      showDevConsole={false}
       runtimeUrl="/api/copilotkit"
       credentials="include"
       {...a2uiProviderOptions(capabilities?.generativeUi)}
@@ -48,7 +53,7 @@ export function CopilotProvider({ children }: { children: ReactNode }) {
        * while this query is still in flight.
        *
        * The object carries guidance only. It does not turn anything on that the server has not
-       * already turned on; it replaces the SDK's shadcn-flavoured house style with OpenBot's.
+       * already turned on; it replaces the SDK's shadcn-flavoured house style with Remii's.
        */
       {...(capabilities?.generativeUi
         ? { openGenerativeUI: { designSkill: GENERATIVE_UI_DESIGN_SKILL } }
@@ -63,6 +68,7 @@ export function CopilotProvider({ children }: { children: ReactNode }) {
         */}
         <HandoffTool />
         <EscalationTool />
+        <ConnectionTool />
         {/* Gallery tools are registered once; their handlers re-read the active Bot to avoid shadowing renderers. */}
         <GalleryTools />
         {/* Browser-authored components use the same component grants as the compiled gallery. */}
@@ -70,10 +76,21 @@ export function CopilotProvider({ children }: { children: ReactNode }) {
         {/* Offered only on a Bot holding the skill-creator skill; see skill-tools.tsx. */}
         <SkillTools />
         {/*
+          Offered only on a Bot holding a skill that names a public repository, and bound to exactly
+          those repositories — so this registers nothing on most runs. See repo-tools.tsx for why a
+          repository is not a connector and why the grant, not the address, is the gate.
+        */}
+        <RepoTools />
+        {/*
           Making a coworker from a conversation. Registers nothing unless the declared Bot holds the
           `bot-creator` skill, so most runs are not offered these four tools at all.
         */}
         <BotTools />
+        {/*
+          Remii's workspace administration, drawn. These run on the server; what registers here is
+          the transcript line per call, plus roster and sidebar refetches on roster-changing ones.
+        */}
+        <BotAdminTools />
         {children}
       </ActiveBotProvider>
     </CopilotKitProvider>

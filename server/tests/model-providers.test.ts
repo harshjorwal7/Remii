@@ -7,10 +7,7 @@ import {
   runtimeModelForEnvironment,
 } from "../src/copilot";
 import { encryptSecret, resolveModelApiKey } from "../src/credentials";
-import {
-  anthropicMessagesUrl,
-  createModelCompleter,
-} from "../src/routing/model";
+import { createModelCompleter } from "../src/routing/model";
 import { validateTenantPackage } from "../src/tenant-package";
 
 const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -36,83 +33,113 @@ const anthropicModel = {
 
 describe("deployment API-key provider selection", () => {
   test("normalizes optional SDK base URLs and native selector URLs", () => {
-    const environment = { OPENAI_BASE_URL: "", ANTHROPIC_BASE_URL: "  " };
+    const environment = { OPENAI_BASE_URL: "" };
     normalizeModelBaseUrls(environment);
     expect(environment).toEqual({});
     const custom = {
       OPENAI_BASE_URL: " https://openai.example/v1 ",
+      // Untouched, and asserted as untouched. `ANTHROPIC_BASE_URL` used to be normalized here and
+      // had its version segment added; OpenAI is the only provider now, so this function neither
+      // reads it nor removes it — an env file written for a deployment that had one still boots, and
+      // nothing in this codebase acts on the value.
       ANTHROPIC_BASE_URL: " https://anthropic.example/v1 ",
     };
     normalizeModelBaseUrls(custom);
     expect(custom).toEqual({
       OPENAI_BASE_URL: "https://openai.example/v1",
-      ANTHROPIC_BASE_URL: "https://anthropic.example/v1",
+      ANTHROPIC_BASE_URL: " https://anthropic.example/v1 ",
     });
-    for (const [base, expected] of [
-      ["https://gateway.example", "https://gateway.example/v1"],
-      ["https://gateway.example/proxy", "https://gateway.example/proxy/v1"],
-      [" https://gateway.example/proxy/ ", "https://gateway.example/proxy/v1"],
-      ["https://gateway.example/proxy/v1/", "https://gateway.example/proxy/v1"],
-      ["https://gateway.example/v2/", "https://gateway.example/v2"],
-    ]) {
-      const environment = { ANTHROPIC_BASE_URL: base };
-      normalizeModelBaseUrls(environment);
-      expect(environment.ANTHROPIC_BASE_URL).toBe(expected);
-      expect(anthropicMessagesUrl(environment)).toBe(`${expected}/messages`);
-      normalizeModelBaseUrls(environment);
-      expect(environment.ANTHROPIC_BASE_URL).toBe(expected);
-    }
-    for (const value of [undefined, "", "  "]) {
-      expect(anthropicMessagesUrl({ ANTHROPIC_BASE_URL: value })).toBe(
-        "https://api.anthropic.com/v1/messages",
-      );
-    }
-    for (const value of [
-      "https://gateway.example",
-      "https://gateway.example/v1",
-      " https://gateway.example/v1/ ",
-    ]) {
-      expect(anthropicMessagesUrl({ ANTHROPIC_BASE_URL: value })).toBe(
-        "https://gateway.example/v1/messages",
-      );
-    }
+    // Idempotent, which is what "normalize" has to mean when a caller may run it twice.
+    normalizeModelBaseUrls(custom);
+    expect(custom.OPENAI_BASE_URL).toBe("https://openai.example/v1");
   });
 
-  test("accepts an Anthropic tenant package without changing its credential reference", () => {
-    const result = validateTenantPackage({
-      brand: "tenant: { id: provider-test, product_name: Provider Test }",
-      agents: "agents: []",
-      channels: "channels: []",
-      model:
-        "model: { provider: anthropic, credential_secret_ref: primary-model, default_model: claude-sonnet-4-5 }",
-      knowledge: "sources: []",
-      themeCss: "",
-    });
-    expect(result.model).toEqual({
-      ...anthropicModel,
-      credentialSecretRef: "primary-model",
-    });
+  /*
+   * An Anthropic package is REFUSED, by name.
+   *
+   * WAS "accepts an Anthropic tenant package without changing its credential reference", expecting
+   * validation to pass it through. It does not: `validateTenantPackage` answers
+   * `model.provider must be openai`, so the loader now refuses at the point the package is read
+   * rather than quietly rewriting the provider and running a Claude model id against an
+   * OpenAI-compatible endpoint.
+   *
+   * A named refusal is the better of the two answers for a deployment mid-migration: a stale
+   * `provider: anthropic` is a fact about the package that the operator can see and change, rather
+   * than one this code decides to reinterpret. The message is asserted so that changing it is a
+   * deliberate act.
+   */
+  test("refuses an Anthropic tenant package, naming the field to change", () => {
+    let refusal: unknown;
+    try {
+      validateTenantPackage({
+        brand: "tenant: { id: provider-test, product_name: Provider Test }",
+        agents: "agents: []",
+        channels: "channels: []",
+        model:
+          "model: { provider: anthropic, credential_secret_ref: primary-model, default_model: claude-sonnet-4-5 }",
+        knowledge: "sources: []",
+        themeCss: "",
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain(
+      "model.provider must be openai",
+    );
   });
 
-  test("the desktop Anthropic choice overrides the OpenAI package model", () => {
+  /*
+   * WAS "the desktop Anthropic choice overrides the OpenAI package model": `BOT_PROVIDER: "anthropic"`
+   * plus `BOT_MODEL: "claude-sonnet-4-5"` selected Claude.
+   *
+   * It selects OpenAI now, and says so. `BOT_PROVIDER` used to choose a vendor; there is one vendor,
+   * so the variable no longer decides anything.
+   *
+   * `BOT_MODEL` is subtler: it only applies once an endpoint is configured
+   * (`selectedModelApplies` is `OPENAI_BASE_URL` being set), because a bare model name with no
+   * endpoint means nothing worth honouring. With one, it names the model on whatever provider there
+   * is — which is how a person points this deployment at an Anthropic-compatible gateway.
+   */
+  test("the desktop provider no longer chooses a vendor, but its model is still honoured", () => {
     expect(
       runtimeModelForEnvironment(packageModel, {
         BOT_PROVIDER: " anthropic ",
         BOT_MODEL: " claude-sonnet-4-5 ",
         OPENAI_BASE_URL: "",
       }),
-    ).toEqual(anthropicModel);
+    ).toEqual(packageModel);
+    // With an endpoint chosen, `BOT_MODEL` IS the model: a person pointing this deployment at an
+    // Anthropic-compatible gateway names a Claude model there, and refusing the combination would
+    // refuse the configuration.
+    expect(
+      runtimeModelForEnvironment(packageModel, {
+        BOT_PROVIDER: "anthropic",
+        BOT_MODEL: "claude-sonnet-4-5",
+        OPENAI_BASE_URL: "https://gateway.example/v1",
+      }),
+    ).toEqual({ provider: "openai", defaultModel: "claude-sonnet-4-5" });
+    // No model named, and a stale Anthropic PROVIDER beside it: the package's own default stands,
+    // because an unrecognised provider falls back to the known OpenAI default rather than sending
+    // a Claude model id to an OpenAI-compatible endpoint.
     expect(
       runtimeModelForEnvironment(packageModel, {
         BOT_PROVIDER: "anthropic",
         BOT_MODEL: "",
       }),
-    ).toEqual(anthropicModel);
+    ).toEqual(packageModel);
+    // And an Anthropic package with nothing selected at all, for the same reason.
+    expect(runtimeModelForEnvironment(anthropicModel, {})).toEqual(
+      packageModel,
+    );
   });
 
   test("an unset choice preserves the package while an empty desktop provider selects OpenAI", () => {
+    // A stale Anthropic package, with nothing selected: OpenAI and its default, NOT the package's
+    // `claude-sonnet-4-5`. Sending that to an OpenAI-compatible endpoint is the failure the fallback
+    // exists for, so an unrecognised provider never keeps its own model name.
     expect(runtimeModelForEnvironment(anthropicModel, {})).toEqual(
-      anthropicModel,
+      packageModel,
     );
     expect(
       runtimeModelForEnvironment(anthropicModel, {
@@ -134,16 +161,25 @@ describe("deployment API-key provider selection", () => {
     ).toEqual({ provider: "openai", defaultModel: "local-model" });
   });
 
-  test("credentials stay provider-scoped and a rotated stored key is read on the next call", async () => {
-    let encryptedValue = await encryptSecret(
-      encryptionKey,
-      "stored-anthropic-one",
-    );
+  /*
+   * The stored credential wins, and a rotation is read on the NEXT call.
+   *
+   * WAS the same test with `provider: "anthropic"` and `ANTHROPIC_API_KEY` throughout. There is one
+   * provider, so `resolveModelApiKey` takes `provider: "openai"` and reads `OPENAI_API_KEY` — the
+   * scoping property is unchanged and is what matters: a key stored for this deployment's model is
+   * never taken from the environment, the environment is only consulted when nothing is stored, and a
+   * corrupt envelope is an error rather than a silent fallback to the environment value.
+   *
+   * The `wrong-provider` variable is gone with the second provider. What replaces it is the assertion
+   * that a caller cannot smuggle a different provider in: the type admits only `"openai"`.
+   */
+  test("the stored model credential wins, is re-read on rotation, and never falls back quietly", async () => {
+    let encryptedValue = await encryptSecret(encryptionKey, "stored-one");
     const asked: unknown[] = [];
     const resolve = () =>
       resolveModelApiKey({
         encryptionKey,
-        provider: "anthropic",
+        provider: "openai",
         keyId: "primary-model",
         reader: {
           readModelSecret: async (input) => {
@@ -151,58 +187,71 @@ describe("deployment API-key provider selection", () => {
             return { encryptedValue };
           },
         },
-        environment: {
-          OPENAI_API_KEY: "wrong-provider",
-          ANTHROPIC_API_KEY: "environment-anthropic",
-        },
+        // A stored key must beat an environment one. Named `environment-shadow` so the assertion says
+        // what it is for: the environment value must not be what comes back.
+        environment: { OPENAI_API_KEY: "environment-shadow" },
       });
-    expect(await resolve()).toBe("stored-anthropic-one");
-    encryptedValue = await encryptSecret(encryptionKey, "stored-anthropic-two");
-    expect(await resolve()).toBe("stored-anthropic-two");
+    expect(await resolve()).toBe("stored-one");
+    encryptedValue = await encryptSecret(encryptionKey, "stored-two");
+    expect(await resolve()).toBe("stored-two");
     expect(asked).toEqual(
-      Array(2).fill({ provider: "anthropic", keyId: "primary-model" }),
+      Array(2).fill({ provider: "openai", keyId: "primary-model" }),
     );
+
+    // Nothing stored: the environment answers, trimmed.
     const noStored = {
       encryptionKey,
-      provider: "anthropic" as const,
+      provider: "openai" as const,
       keyId: "primary-model",
       reader: { readModelSecret: async () => null },
     };
     expect(
       await resolveModelApiKey({
         ...noStored,
-        environment: {
-          OPENAI_API_KEY: "wrong-provider",
-          ANTHROPIC_API_KEY: " synthetic-anthropic ",
-        },
+        environment: { OPENAI_API_KEY: " from-environment " },
       }),
-    ).toBe("synthetic-anthropic");
+    ).toBe("from-environment");
     expect(
-      await resolveModelApiKey({
-        ...noStored,
-        environment: { OPENAI_API_KEY: "wrong-provider" },
-      }),
+      await resolveModelApiKey({ ...noStored, environment: {} }),
     ).toBeNull();
+
+    // A corrupt envelope is a failure, not a reason to read the environment: falling back there would
+    // run on a key the operator did not intend, with the error logged rather than raised.
     await expect(
       resolveModelApiKey({
         ...noStored,
         reader: {
           readModelSecret: async () => ({ encryptedValue: "corrupt" }),
         },
-        environment: { ANTHROPIC_API_KEY: "must-not-fallback" },
+        environment: { OPENAI_API_KEY: "must-not-fallback" },
       }),
     ).rejects.toThrow("Credential envelope is invalid");
   });
 });
 
+/*
+ * Built-ins execute tools against a PROXIED endpoint, with the stored key and the one after it.
+ *
+ * WAS an Anthropic test.each over four `ANTHROPIC_BASE_URL` suffixes, asserting `/v1/messages` on
+ * every request, the `x-api-key` header, and a `claude-sonnet-4-5` body.
+ *
+ * The native Anthropic path is gone, so all of that is now `/v1/chat/completions`, `authorization`,
+ * and whatever model is configured. What the four cases are really about is unchanged and is the
+ * reason they were written as four: `chatCompletionsUrl` adds the version segment exactly once, and a
+ * suffix that already has one must not grow another. A proxy in front is the realistic shape, and it
+ * is what makes the prefix arithmetic worth asserting at all.
+ */
 test.each([
-  { suffix: "", prefix: "" },
-  { suffix: "/proxy", prefix: "/proxy" },
-  { suffix: "/v1", prefix: "" },
-  { suffix: "/proxy/v1/", prefix: "/proxy" },
+  // `upstream` is the path the MOCK sees, which is the full request path with `prefix` stripped.
+  // The four rows are the whole point: whatever the operator wrote is what the SDK appends
+  // `/chat/completions` to, and nothing adds a version segment behind their back.
+  { suffix: "", prefix: "", upstream: "/chat/completions" },
+  { suffix: "/proxy", prefix: "/proxy", upstream: "/chat/completions" },
+  { suffix: "/v1", prefix: "", upstream: "/v1/chat/completions" },
+  { suffix: "/proxy/v1/", prefix: "/proxy", upstream: "/v1/chat/completions" },
 ])(
-  "Anthropic built-ins execute tools with a rotated key and base suffix '$suffix'",
-  async ({ suffix, prefix }) => {
+  "built-ins execute tools with a rotated key and base suffix '$suffix'",
+  async ({ suffix, prefix, upstream }) => {
     const mock = new LLMock();
     const executed: unknown[] = [];
     const keys: (string | null)[] = [];
@@ -214,7 +263,7 @@ test.each([
         hostname: "127.0.0.1",
         port: 0,
         async fetch(request) {
-          keys.push(request.headers.get("x-api-key"));
+          keys.push(request.headers.get("authorization"));
           const path = new URL(request.url).pathname;
           paths.push(path);
           return fetch(`${base}${path.slice(prefix.length)}`, {
@@ -224,9 +273,8 @@ test.each([
           });
         },
       });
-      process.env.ANTHROPIC_BASE_URL = `${proxy.url.origin}${suffix}`;
+      process.env.OPENAI_BASE_URL = `${proxy.url.origin}${suffix}`;
       normalizeModelBaseUrls();
-      process.env.OPENAI_BASE_URL = base;
       mock.on({ hasToolResult: true }, { content: "The balance is 42." });
       mock.onMessage(/balance/, {
         toolCalls: [
@@ -237,14 +285,8 @@ test.each([
           },
         ],
       });
-      const model = runtimeModelForEnvironment(packageModel, {
-        BOT_PROVIDER: "anthropic",
-        BOT_MODEL: "claude-sonnet-4-5",
-      });
-      let encryptedValue = await encryptSecret(
-        encryptionKey,
-        "stored-anthropic-one",
-      );
+      const model = packageModel;
+      let encryptedValue = await encryptSecret(encryptionKey, "stored-one");
       const resolve = () =>
         resolveModelApiKey({
           encryptionKey,
@@ -253,7 +295,7 @@ test.each([
           environment: {},
           reader: { readModelSecret: async () => ({ encryptedValue }) },
         });
-      for (const key of ["stored-anthropic-one", "stored-anthropic-two"]) {
+      for (const key of ["stored-one", "stored-two"]) {
         encryptedValue = await encryptSecret(encryptionKey, key);
         const agents = await resolveRuntimeAgents(
           async () => [
@@ -296,18 +338,36 @@ test.each([
       expect(executed).toEqual([{ account: "demo" }, { account: "demo" }]);
       const requests = mock.getRequests();
       expect(requests).toHaveLength(4);
+      /*
+       * The suffix is passed through verbatim and the SDK appends only `/chat/completions`.
+       *
+       * WAS `/v1/messages` with the version segment worked out from the suffix. Two things changed:
+       * the endpoint shape (`/chat/completions`, and there is no Anthropic path), and the version
+       * segment — `chatCompletionsUrl` builds `/v1` for the ROUTER's own call, while the SDK is
+       * pointed straight at `OPENAI_BASE_URL` and appends nothing. So an operator who writes a bare
+       * host gets no `/v1`, and this asserts that: `upstream` is per-row precisely because that is
+       * the observable difference between the four configurations.
+       */
       expect(requests.map((entry) => entry.path)).toEqual(
-        Array(4).fill("/v1/messages"),
+        Array(4).fill(upstream),
       );
-      expect(paths).toEqual(Array(4).fill(`${prefix}/v1/messages`));
+      expect(paths).toEqual(Array(4).fill(`${prefix}${upstream}`));
+      /*
+       * The stored key, then the one it was rotated to — read on the next call, which is the whole
+       * reason the loop runs each key twice.
+       *
+       * With the `Bearer ` prefix the SDK supplies, where the Anthropic path carried the bare key in
+       * `x-api-key`. Asserted in full rather than with a matcher: a header assertion that only checked
+       * the tail would pass just as happily on a key somebody else's SDK had prefixed.
+       */
       expect(keys).toEqual([
-        "stored-anthropic-one",
-        "stored-anthropic-one",
-        "stored-anthropic-two",
-        "stored-anthropic-two",
+        "Bearer stored-one",
+        "Bearer stored-one",
+        "Bearer stored-two",
+        "Bearer stored-two",
       ]);
       expect(
-        requests.every((entry) => entry.body?.model === "claude-sonnet-4-5"),
+        requests.every((entry) => entry.body?.model === "deepseek-flash"),
       ).toBe(true);
       expect(requests[1]?.body?.messages).toEqual(
         expect.arrayContaining([
@@ -321,89 +381,99 @@ test.each([
   },
 );
 
-test.each([
-  {
-    provider: "anthropic" as const,
-    defaultModel: "claude-sonnet-4-5",
-    expectedUrl: "https://api.anthropic.com/v1/messages",
-  },
-  {
-    provider: "openai" as const,
-    defaultModel: "gpt-5.6-terra",
-    expectedUrl: "https://api.openai.com/v1/responses",
-  },
-])(
-  "blank base URLs reach the official $provider endpoint through the real SDK",
-  async ({ expectedUrl, ...model }) => {
-    const mock = new LLMock();
-    const originalFetch = globalThis.fetch;
-    const urls: string[] = [];
-    const keys: (string | null)[] = [];
-    let interception:
-      | ReturnType<typeof spyOn<typeof globalThis, "fetch">>
-      | undefined;
-    try {
-      const base = await mock.start();
-      mock.onMessage("Hello", { content: "Hello back." });
-      process.env.ANTHROPIC_BASE_URL = "";
-      process.env.OPENAI_BASE_URL = "";
-      normalizeModelBaseUrls();
-      // Keep the SDK's request intact while redirecting only its transport to local fake HTTP.
-      interception = spyOn(globalThis, "fetch").mockImplementation(
-        (input, init) => {
-          const request = new Request(input, init);
-          urls.push(request.url);
-          keys.push(
-            request.headers.get(
-              model.provider === "anthropic" ? "x-api-key" : "authorization",
-            ),
-          );
-          return originalFetch(`${base}${new URL(request.url).pathname}`, {
-            method: request.method,
-            headers: request.headers,
-            body: request.body,
-          });
+/*
+ * A blank base URL reaches the provider's OWN endpoint, not a malformed local one.
+ *
+ * WAS a `test.each` over both providers — `https://api.anthropic.com/v1/messages` with a bare
+ * `x-api-key`, and `https://api.openai.com/v1/responses` with `Bearer`. One provider is left, and it
+ * is DeepSeek, so this is now a single case rather than a table of one.
+ *
+ * It is kept rather than folded into the proxy cases above because those configure a URL on purpose.
+ * This is the blank case, and it is the one where `normalizeModelBaseUrls` deletes the variable: if
+ * that ever stopped happening the SDK would dial something relative and this would catch it. With
+ * the variable gone the router falls back to DeepSeek's own endpoint, which is the point — a
+ * deployment that deletes it gets DeepSeek rather than a relative URL.
+ */
+test("a blank base URL reaches DeepSeek's own endpoint through the real SDK", async () => {
+  const mock = new LLMock();
+  const originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  const keys: (string | null)[] = [];
+  let interception:
+    | ReturnType<typeof spyOn<typeof globalThis, "fetch">>
+    | undefined;
+  try {
+    const base = await mock.start();
+    mock.onMessage("Hello", { content: "Hello back." });
+    process.env.ANTHROPIC_BASE_URL = "";
+    process.env.OPENAI_BASE_URL = "";
+    normalizeModelBaseUrls();
+    // Keep the SDK's request intact while redirecting only its transport to local fake HTTP.
+    interception = spyOn(globalThis, "fetch").mockImplementation(
+      (input, init) => {
+        const request = new Request(input, init);
+        urls.push(request.url);
+        keys.push(request.headers.get("authorization"));
+        return originalFetch(`${base}${new URL(request.url).pathname}`, {
+          method: request.method,
+          headers: request.headers,
+          body: request.body,
+        });
+      },
+    );
+    const agents = await resolveRuntimeAgents(
+      async () => [
+        {
+          id: "general-assistant",
+          name: "General Assistant",
+          type: "built_in",
+          systemPrompt: "Answer simply.",
         },
-      );
-      const agents = await resolveRuntimeAgents(
-        async () => [
-          {
-            id: "general-assistant",
-            name: "General Assistant",
-            type: "built_in",
-            systemPrompt: "Answer simply.",
-          },
-        ],
-        model,
-        async () => "synthetic-key",
-      );
-      const agent = agents["general-assistant"]?.clone();
-      if (!agent) throw new Error("The built-in agent was not constructed");
-      agent.addMessage({ id: "request", role: "user", content: "Hello" });
-      await agent.runAgent();
-      expect(agent.messages.at(-1)).toMatchObject({
-        role: "assistant",
-        content: "Hello back.",
-      });
-      expect(urls).toEqual([expectedUrl]);
-      expect(keys).toEqual([
-        model.provider === "anthropic"
-          ? "synthetic-key"
-          : "Bearer synthetic-key",
-      ]);
-    } finally {
-      interception?.mockRestore();
-      await mock.stop();
-    }
-  },
-);
+      ],
+      packageModel,
+      async () => "synthetic-key",
+    );
+    const agent = agents["general-assistant"]?.clone();
+    if (!agent) throw new Error("The built-in agent was not constructed");
+    agent.addMessage({ id: "request", role: "user", content: "Hello" });
+    await agent.runAgent();
+    expect(agent.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "Hello back.",
+    });
+    // `/chat/completions`, where `/v1/responses` was: the SDK is pointed straight at the base URL
+    // and appends the chat path itself. `chatCompletionsUrl` — which does build
+    // `/v1/chat/completions` — is the ROUTER's call, not this one. DeepSeek's own base carries the
+    // version segment already, so nothing adds another.
+    expect(urls).toEqual(["https://api.deepseek.com/v1/chat/completions"]);
+    expect(keys).toEqual(["Bearer synthetic-key"]);
+  } finally {
+    interception?.mockRestore();
+    await mock.stop();
+  }
+});
 
-test("the production selector speaks native Anthropic and rereads its key", async () => {
+/*
+ * The production selector dials the OpenAI chat endpoint and rereads its key per call.
+ *
+ * WAS "the production selector speaks native Anthropic..." — `/v1/messages`, a bare `x-api-key`,
+ * an `anthropic-version: 2023-06-01` header, and assertions that the body carried `max_tokens` and
+ * NOT `response_format`.
+ *
+ * The selector builds OpenAI requests now, so the wire shape is different in every particular and the
+ * same in the one that matters: `resolveApiKey` is called on EVERY completion, not once at
+ * construction. That is the property this test exists for, and it is asserted by running two
+ * completions with the key changed between them and reading the headers.
+ *
+ * The `response_format` assertion is kept and now means more: JSON mode is what makes the selector's
+ * output parseable, so its absence would be a silent failure where a hand-written parser guess is
+ * used instead.
+ */
+test("the production selector speaks OpenAI and rereads its key", async () => {
   const seen: {
     path: string;
-    key: string | null;
     authorization: string | null;
-    version: string | null;
+    key: string | null;
     body: Record<string, unknown>;
   }[] = [];
   const server = Bun.serve({
@@ -412,26 +482,25 @@ test("the production selector speaks native Anthropic and rereads its key", asyn
     async fetch(request) {
       seen.push({
         path: new URL(request.url).pathname,
-        key: request.headers.get("x-api-key"),
         authorization: request.headers.get("authorization"),
-        version: request.headers.get("anthropic-version"),
+        key: request.headers.get("x-api-key"),
         body: await request.json(),
       });
       return Response.json({
-        content: [
-          { type: "thinking", thinking: "private" },
-          { type: "text", text: '{"skills":' },
-          { type: "text", text: '["bank"]}' },
+        choices: [
+          {
+            message: { role: "assistant", content: '{"skills":["bank"]}' },
+            finish_reason: "stop",
+          },
         ],
       });
     },
   });
   try {
-    process.env.ANTHROPIC_BASE_URL = `${server.url.origin}/v1/`;
     process.env.OPENAI_BASE_URL = `${server.url.origin}/v1`;
     let key = "synthetic-one";
     const complete = createModelCompleter({
-      model: anthropicModel,
+      model: packageModel,
       resolveApiKey: async () => key,
     });
     expect(await complete("Choose bank tools; return JSON.")).toBe(
@@ -441,23 +510,25 @@ test("the production selector speaks native Anthropic and rereads its key", asyn
     expect(await complete("Choose bank tools; return JSON.")).toBe(
       '{"skills":["bank"]}',
     );
-    expect(seen.map((entry) => entry.key)).toEqual([
-      "synthetic-one",
-      "synthetic-two",
+    // The whole point: a rotated key is picked up without rebuilding the selector.
+    expect(seen.map((entry) => entry.authorization)).toEqual([
+      "Bearer synthetic-one",
+      "Bearer synthetic-two",
     ]);
     for (const entry of seen) {
-      expect(entry.path).toBe("/v1/messages");
-      expect(entry.authorization).toBeNull();
-      expect(entry.version).toBe("2023-06-01");
+      // `chatCompletionsUrl` IS used here, unlike the SDK path above: the selector builds the URL
+      // itself and adds the version segment the configured base lacks. `/v1` was written in the
+      // env above and the function did not grow a second.
+      expect(entry.path).toBe("/v1/chat/completions");
+      // Not the Anthropic header, on a route that used to be native Anthropic.
+      expect(entry.key).toBeNull();
       expect(entry.body).toMatchObject({
-        model: "claude-sonnet-4-5",
-        max_tokens: expect.any(Number),
+        model: packageModel.defaultModel,
         messages: [
           { role: "user", content: "Choose bank tools; return JSON." },
         ],
       });
-      expect(entry.body).not.toHaveProperty("response_format");
-      expect(entry.body).not.toHaveProperty("temperature");
+      expect(entry.body).toHaveProperty("response_format");
     }
   } finally {
     await server.stop(true);
@@ -481,7 +552,7 @@ async function bounded<T>(promise: Promise<T>, boundary: string): Promise<T> {
   }
 }
 
-test("cancelling an Anthropic selector closes its in-flight HTTP request", async () => {
+test("cancelling the selector closes its in-flight HTTP request", async () => {
   const entered = Promise.withResolvers<void>();
   const closed = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
@@ -495,15 +566,16 @@ test("cancelling an Anthropic selector closes its in-flight HTTP request", async
       });
       entered.resolve();
       await release.promise;
-      return Response.json({ content: [{ type: "text", text: "late reply" }] });
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: "late reply" } }],
+      });
     },
   });
   try {
-    process.env.ANTHROPIC_BASE_URL = server.url.origin;
     process.env.OPENAI_BASE_URL = server.url.origin;
     const controller = new AbortController();
     const complete = createModelCompleter({
-      model: anthropicModel,
+      model: packageModel,
       resolveApiKey: async () => "synthetic-key",
     });
     const run = complete("Choose tools.", controller.signal);

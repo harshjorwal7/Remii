@@ -25,6 +25,18 @@ export type SkillInput = {
    * would be the same request from a form that just had its last one unticked.
    */
   tools?: string[];
+  /**
+   * The public repository to point at, or null to point at none.
+   *
+   * Sent on every save for the same reason as `tools`: the server replaces the pointer rather than
+   * merging into it, so omitting the field and sending `null` would be the same request from a form
+   * that just had its repository field emptied.
+   *
+   * The whole address as one string, branch and folder included, because a repository is one thing a
+   * person names and a pasted `/tree/main/packages/api` carries all three. The server parses it with
+   * the same rules this file mirrors in `splitRepoUrl`.
+   */
+  repo?: string | null;
 };
 
 /** A curated server from the catalogue, which supplies the URL. */
@@ -138,6 +150,32 @@ export function setPluginGrantMutationOptions(queryClient: QueryClient) {
       await client(
         `/api/plugins/grants?kind=${variables.kind}&ref=${encodeURIComponent(variables.ref)}&agentId=${encodeURIComponent(variables.agentId)}`,
         { method: "DELETE", fallback: "That Agent could not be changed." },
+      );
+    },
+    onSettled: () => invalidatePlugins(queryClient),
+  });
+}
+
+/**
+ * Grant or revoke all tools of an entire app/server for one Bot.
+ */
+export function setServerAppGrantMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async (variables: {
+      serverId: string;
+      agentId: string;
+      granted: boolean;
+    }) => {
+      await client(
+        `/api/plugins/servers/${encodeURIComponent(variables.serverId)}/grant`,
+        {
+          method: "POST",
+          body: {
+            agentId: variables.agentId,
+            granted: variables.granted,
+          },
+          fallback: "Could not update app access for this Agent.",
+        },
       );
     },
     onSettled: () => invalidatePlugins(queryClient),
@@ -290,10 +328,9 @@ export function registerOAuthClientMutationOptions(queryClient: QueryClient) {
 /**
  * Start a consent flow, and say which screen it started from.
  *
- * `returnTo` decides where the vendor's callback puts somebody down, because two screens offer this:
- * a person's own connected-accounts page, and the connector's admin page where an administrator
- * verifies the setup they have just finished. Sending an administrator to their personal settings
- * afterwards is the round trip the inline row exists to remove.
+ * `returnTo` decides where the vendor's callback puts somebody down: their own
+ * connected-accounts page. There is no administrator connector page any more —
+ * every user verifies their own setup.
  *
  * A name rather than a URL. The server narrows it to a known set before signing it into the state,
  * so this parameter cannot become an open redirect however it is called.
@@ -323,7 +360,7 @@ export function registerOAuthClientMutationOptions(queryClient: QueryClient) {
  * what makes the branch below it obligatory rather than advisory.
  */
 export function connectAccountMutationOptions(
-  returnTo: "settings" | "admin" = "settings",
+  returnTo: "settings" = "settings",
 ) {
   return mutationOptions({
     mutationFn: async (serverId: string): Promise<string | null> => {
@@ -396,6 +433,79 @@ export function disconnectBrokeredMutationOptions(queryClient: QueryClient) {
         {
           method: "DELETE",
           fallback: "That account could not be disconnected.",
+        },
+      );
+    },
+    onSettled: () => invalidatePlugins(queryClient),
+  });
+}
+
+/**
+ * What GitHub says about a repository address, before a skill has been saved.
+ *
+ * Read-only and deliberately cheap: it asks GitHub whether the address is real, whether it is public
+ * and whether the folder inside it exists, and it carries no key files with it. What a screen cannot
+ * check locally is exactly those three, so this is the Check button beside the field and nothing more
+ * is spent on it — pressing Save must cost no GitHub request at all.
+ *
+ * The answer is a summary rather than a file list because a file list would be several hundred
+ * kilobytes to draw four words with. The count is what tells a person their address is right.
+ */
+export type RepoPreview = {
+  repository: {
+    url: string;
+    description: string | null;
+    language: string | null;
+    /** The branch this would be read at, which is the default branch when the address names none. */
+    ref: string;
+    path: string;
+    fileCount: number;
+    truncated: boolean;
+  };
+};
+
+/**
+ * Ask GitHub about an address, without saving it.
+ *
+ * Writes nothing, and cannot: the request carries an address and no slug, so there is nothing on the
+ * server to attach a reading to. That is what makes it safe to press against a skill that does not
+ * exist yet, which is the normal case.
+ */
+export function previewRepoMutationOptions() {
+  return mutationOptions({
+    mutationFn: async (url: string): Promise<RepoPreview> => {
+      const response = await client("/api/plugins/repos/preview", {
+        method: "POST",
+        body: { repo: url },
+        // The server's sentence, not a paraphrase: a 404 from GitHub means either "no such
+        // repository" or "it is private", and this is the one that has to say both.
+        fallback: "That repository could not be checked.",
+      });
+      return response.json();
+    },
+  });
+}
+
+/**
+ * Read the repository now rather than waiting for a run to notice it moved.
+ *
+ * Owns the index, and so is a button rather than something every read does: GitHub allows sixty
+ * requests an hour to an unauthenticated caller and this deployment shares that ceiling across every
+ * person using it. Somebody asking whether a skill's repository is current deserves an answer now;
+ * somebody merely running a skill does not.
+ *
+ * Refetched on both outcomes, like every other write here — the refresh commits, writes its audit row
+ * and then may fail on the audit insert, so a failure is not evidence that the reading did not happen.
+ */
+export function refreshSkillRepoMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async (slug: string) => {
+      await client(
+        `/api/plugins/skills/${encodeURIComponent(slug)}/repo/refresh`,
+        {
+          method: "POST",
+          body: {},
+          fallback: "That repository could not be read again.",
         },
       );
     },
@@ -577,5 +687,97 @@ export function recheckBrokeredConnectionMutationOptions(
       return response.json();
     },
     onSettled: () => invalidatePlugins(queryClient),
+  });
+}
+
+export function disconnectBrokeredAccountMutationOptions(
+  queryClient: QueryClient,
+) {
+  return mutationOptions({
+    mutationFn: async ({
+      serverId,
+      connectionId,
+    }: {
+      serverId: string;
+      connectionId: string;
+    }): Promise<void> => {
+      await client(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/accounts/${encodeURIComponent(connectionId)}`,
+        {
+          method: "DELETE",
+          fallback: "This account could not be disconnected.",
+        },
+      );
+    },
+    onSettled: (_data, _error, { serverId }) => {
+      invalidatePlugins(queryClient);
+      void queryClient.invalidateQueries({
+        queryKey: ["plugins", "servers", serverId, "accounts"],
+      });
+    },
+  });
+}
+
+export function setAccountGrantMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async ({
+      serverId,
+      connectionId,
+      agentId,
+      granted,
+    }: {
+      serverId: string;
+      connectionId: string;
+      agentId: string;
+      granted: boolean;
+    }): Promise<void> => {
+      await client(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/accounts/${encodeURIComponent(connectionId)}/grant`,
+        {
+          method: "POST",
+          body: { agentId, granted },
+          fallback: "Could not update account grant.",
+        },
+      );
+    },
+    onSettled: (_data, _error, { serverId, agentId }) => {
+      invalidatePlugins(queryClient);
+      void queryClient.invalidateQueries({
+        queryKey: ["plugins", "servers", serverId, "accounts"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["plugins", "account-grants", agentId],
+      });
+    },
+  });
+}
+
+export function updateAccountLabelMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async ({
+      serverId,
+      connectionId,
+      label,
+    }: {
+      serverId: string;
+      connectionId: string;
+      label: string;
+    }): Promise<{ ok: boolean; label: string }> => {
+      const response = await client(
+        `/api/plugins/servers/${encodeURIComponent(serverId)}/accounts/${encodeURIComponent(connectionId)}`,
+        {
+          method: "PATCH",
+          body: { label },
+          fallback: "Could not update account tag.",
+        },
+      );
+      return response.json();
+    },
+    onSettled: (_data, _error, { serverId }) => {
+      invalidatePlugins(queryClient);
+      void queryClient.invalidateQueries({
+        queryKey: ["plugins", "servers", serverId, "accounts"],
+      });
+    },
   });
 }

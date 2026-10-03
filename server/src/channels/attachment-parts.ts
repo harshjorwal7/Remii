@@ -3,6 +3,7 @@ import {
   classifyAttachment,
   MAX_EXTRACTED_CHARACTERS,
 } from "../../../shared/attachments";
+import { extractDocument } from "./document-extract";
 
 /**
  * What `load` hands back for an attachment id: the bytes and the metadata
@@ -479,6 +480,51 @@ async function resolvePart(
     };
   }
 
+  /*
+   * A DOCUMENT IS READ, NOT REFUSED.
+   *
+   * The four formats with a reader are opened and their text handed over as a text part, which is
+   * the whole point of storing a document: somebody attached a contract and asked a question about
+   * it. The reader is chosen by the STORED media type — `sniffMimeType`'s answer, earned from the
+   * bytes — so an uploader cannot pick the extractor by renaming a file, which is the same rule the
+   * image branch above is written on.
+   */
+  if (kind === "document") {
+    const extracted = await extractDocument(
+      attachment.mimeType,
+      attachment.bytes,
+    );
+    if (extracted.ok) {
+      return {
+        type: "text",
+        text: `Attached file "${attachment.name}":\n\n${extracted.text}`,
+      };
+    }
+    /*
+     * A document that yielded nothing is reported as such, in the model's own terms.
+     *
+     * `unreadableNote` would say the file "cannot be put in front of the model", which is both
+     * untrue — the file is right there — and the sort of sentence a model answers around rather
+     * than in. The reason is given instead, so the answer can be "that PDF is a scan, so there is
+     * no text in it to read" rather than a guess about the contents.
+     */
+    return {
+      type: "text",
+      text: `Attached file "${displayName(part, id)}" is a ${attachment.mimeType} file and its text could not be read: ${extracted.reason ?? "unknown reason"}.`,
+    };
+  }
+
+  /*
+   * MEDIA AND BINARY ARE STORED AND SENT, BUT NOT READ.
+   *
+   * A video is not something to put in front of a model as text, and transcribing an audio file is
+   * a different feature with its own costs and its own privacy questions — a microphone's worth of
+   * a person's voice is not the same thing to them as a spreadsheet. So the note says the file is
+   * attached and unreadable rather than pretending the app looked.
+   *
+   * The note names the file, because a model told only "an attachment cannot be read" has no way to
+   * tell somebody WHICH attachment it is talking about.
+   */
   if (kind !== "image") return unreadableNote(part, id, attachment.mimeType);
 
   /*

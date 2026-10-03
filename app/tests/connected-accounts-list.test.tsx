@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import type { PluginServer } from "@/lib/plugins/queries";
-import { brokeredAccountsListedOn } from "@/routes/_authed/settings/connected-accounts/index";
+import {
+  appMatchesCategory,
+  brokeredAccountsListedOn,
+  CONNECTED_ACCOUNT_CATEGORIES,
+  sortConnectedFirst,
+} from "@/routes/_authed/settings/connected-accounts/index";
 
 /**
  * Which brokered apps the Connected accounts page lists, decided without drawing anything.
@@ -78,4 +83,147 @@ test("a server that is not brokered at all is never listed", () => {
       }),
     ]),
   ).toEqual([]);
+});
+
+test("all category matches any app", () => {
+  expect(
+    appMatchesCategory("all", "Random App", "random-key", "random description"),
+  ).toBe(true);
+});
+
+test("productivity category matches productivity tools", () => {
+  expect(
+    appMatchesCategory(
+      "productivity",
+      "Notion",
+      "notion",
+      "Pages and workspace",
+    ),
+  ).toBe(true);
+  expect(
+    appMatchesCategory(
+      "productivity",
+      "Google Drive",
+      "google-drive",
+      "Files in drive",
+    ),
+  ).toBe(true);
+  expect(
+    appMatchesCategory(
+      "productivity",
+      "Slack",
+      "slack",
+      "Team messaging",
+      "Slack",
+      ["communication"],
+    ),
+  ).toBe(true);
+  expect(
+    appMatchesCategory("productivity", "BambooHR", "bamboohr", "HR software"),
+  ).toBe(false);
+});
+
+test("ops category matches operational and security tools", () => {
+  expect(
+    appMatchesCategory(
+      "ops",
+      "1password",
+      "1password",
+      "Password manager and vault",
+    ),
+  ).toBe(true);
+  expect(
+    appMatchesCategory("ops", "21risk", "21risk", "Compliance and risk audits"),
+  ).toBe(true);
+  expect(
+    appMatchesCategory("ops", "Datadog", "datadog", "Monitoring service"),
+  ).toBe(true);
+  expect(
+    appMatchesCategory("ops", "Google Drive", "google-drive", "Files in drive"),
+  ).toBe(false);
+});
+
+test("google category matches Google ecosystem tools", () => {
+  expect(
+    appMatchesCategory(
+      "google",
+      "Google Drive",
+      "google-drive",
+      "Files in drive",
+    ),
+  ).toBe(true);
+  expect(appMatchesCategory("google", "Gmail", "gmail", "Email service")).toBe(
+    true,
+  );
+  expect(appMatchesCategory("google", "Notion", "notion", "Notes")).toBe(false);
+});
+
+test("dev category matches developer tools", () => {
+  expect(
+    appMatchesCategory("dev", "0CodeKit", "0codekit", "Utility APIs for AI"),
+  ).toBe(true);
+  expect(appMatchesCategory("dev", "GitHub", "github", "Code repository")).toBe(
+    true,
+  );
+  expect(appMatchesCategory("dev", "2chat", "2chat", "WhatsApp API")).toBe(
+    true,
+  );
+  expect(appMatchesCategory("dev", "BambooHR", "bamboohr", "HR app")).toBe(
+    false,
+  );
+});
+
+test("marketing category matches CRM and marketing tools", () => {
+  expect(
+    appMatchesCategory("marketing", "HubSpot", "hubspot", "CRM and marketing"),
+  ).toBe(true);
+  expect(
+    appMatchesCategory(
+      "marketing",
+      "Mailchimp",
+      "mailchimp",
+      "Email campaigns",
+    ),
+  ).toBe(true);
+  expect(appMatchesCategory("marketing", "GitHub", "github", "Code repo")).toBe(
+    false,
+  );
+});
+
+test("hr category matches HR and personnel tools", () => {
+  expect(
+    appMatchesCategory(
+      "hr",
+      "BambooHR",
+      "bamboohr",
+      "HR and employee software",
+    ),
+  ).toBe(true);
+  expect(
+    appMatchesCategory(
+      "hr",
+      "Rippling",
+      "rippling",
+      "Payroll and human resources",
+    ),
+  ).toBe(true);
+  expect(appMatchesCategory("hr", "1password", "1password", "Vault")).toBe(
+    false,
+  );
+});
+
+test("sortConnectedFirst places connected accounts at the top of the list", () => {
+  const apps = [
+    { id: "0codekit", connected: false },
+    { id: "1password", connected: false },
+    { id: "composio-gmail", connected: true },
+    { id: "2chat", connected: false },
+  ];
+  const sorted = sortConnectedFirst(apps, (item) => item.connected);
+  expect(sorted.map((a) => a.id)).toEqual([
+    "composio-gmail",
+    "0codekit",
+    "1password",
+    "2chat",
+  ]);
 });

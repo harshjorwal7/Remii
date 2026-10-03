@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull, or } from "drizzle-orm";
 import { type AuditStore, recordAuditEvent } from "../audit";
 import type { Database } from "../db/client";
 import { components, sandboxedComponents } from "../db/schema";
@@ -41,6 +41,7 @@ export type SandboxedRecord = {
   published: boolean;
   publishedAt: string | null;
   authoredBy: string | null;
+  ownerUserId: string | null;
   hasUnpublishedChanges: boolean;
 };
 
@@ -127,6 +128,7 @@ export function createSandboxedStore(
     published: row.published,
     publishedAt: iso(row.publishedAt),
     authoredBy: row.authoredBy,
+    ownerUserId: row.ownerUserId,
     hasUnpublishedChanges:
       row.published &&
       (row.draftHtml !== row.publishedHtml ||
@@ -135,10 +137,21 @@ export function createSandboxedStore(
   });
 
   return {
-    async list(): Promise<SandboxedRecord[]> {
+    /**
+     * This person's playground: their own components plus legacy shared rows
+     * (written before ownership existed). Nothing of anybody else's: one
+     * user's draft is not another user's to read, edit or publish.
+     */
+    async list(ownerId: string): Promise<SandboxedRecord[]> {
       const rows = await database
         .select()
         .from(sandboxedComponents)
+        .where(
+          or(
+            eq(sandboxedComponents.ownerUserId, ownerId),
+            isNull(sandboxedComponents.ownerUserId),
+          ),
+        )
         .orderBy(asc(sandboxedComponents.title));
       return rows.map(toRecord);
     },
@@ -160,6 +173,12 @@ export function createSandboxedStore(
       argumentSchema: Record<string, unknown>;
       sampleArguments: Record<string, unknown>;
       by: string;
+      /**
+       * Whose component this is. Required: a playground save with nobody
+       * behind it has no sandbox to belong to, and an ownerless save is how
+       * one user's code ends up drawn in another user's transcript.
+       */
+      ownerId: string;
     }): Promise<SandboxedRecord> {
       if (!/^[a-z0-9][a-z0-9_]{0,38}[a-z0-9]$/.test(input.slug)) {
         throw new SandboxedNameRefusedError(
@@ -167,6 +186,21 @@ export function createSandboxedStore(
         );
       }
       const name = sandboxedNameFor(input.slug);
+
+      // A name somebody else owns is taken, not shared: overwriting it would
+      // put one user's code in every transcript that draws it. Legacy shared
+      // rows (no owner) may be claimed by whoever saves the name first, which
+      // stamps them and ends the sharing.
+      const [existing] = await database
+        .select({ ownerUserId: sandboxedComponents.ownerUserId })
+        .from(sandboxedComponents)
+        .where(eq(sandboxedComponents.name, name))
+        .limit(1);
+      if (existing?.ownerUserId && existing.ownerUserId !== input.ownerId) {
+        throw new SandboxedNameRefusedError(
+          "That name belongs to somebody else's component. Pick another name.",
+        );
+      }
 
       await database
         .insert(sandboxedComponents)
@@ -180,6 +214,7 @@ export function createSandboxedStore(
           draftArgumentSchema: input.argumentSchema,
           sampleArguments: input.sampleArguments,
           authoredBy: input.by,
+          ownerUserId: input.ownerId,
         })
         .onConflictDoUpdate({
           target: sandboxedComponents.name,
@@ -192,6 +227,7 @@ export function createSandboxedStore(
             draftArgumentSchema: input.argumentSchema,
             sampleArguments: input.sampleArguments,
             authoredBy: input.by,
+            ownerUserId: input.ownerId,
             updatedAt: new Date(),
           },
         });
@@ -237,8 +273,18 @@ export function createSandboxedStore(
      * wording would leave a component no model is told about. Either half on its own is a state
      * nobody wants and both would be reachable if this were two endpoints.
      */
-    async publish(name: string, by: string): Promise<SandboxedRecord> {
+    async publish(
+      name: string,
+      by: string,
+      ownerId: string,
+    ): Promise<SandboxedRecord> {
       const row = await requireRow(name);
+      // Only the author publishes: publishing hands this code to every Bot
+      // the author grants it to, and another user's publish would put their
+      // decision on somebody else's code. Legacy shared rows are frozen.
+      if (!row.ownerUserId || row.ownerUserId !== ownerId) {
+        throw new SandboxedNotFoundError(name);
+      }
 
       await database
         .update(sandboxedComponents)
@@ -276,7 +322,18 @@ export function createSandboxedStore(
       return toRecord(await requireRow(name));
     },
 
-    async remove(name: string, by: string): Promise<void> {
+    async remove(name: string, by: string, ownerId: string): Promise<void> {
+      // Only the author deletes a live component: the rows below take the
+      // published source with them, and another user's delete would unpublish
+      // somebody else's code from every transcript that draws it. "Not
+      // found" rather than forbidden, so the check cannot become an oracle
+      // for other people's component names. A governance orphan (no source
+      // row left to own) is still cleared below: it belongs to this surface
+      // and nothing else can reach it.
+      const row = await requireRow(name).catch(() => null);
+      if (row && (!row.ownerUserId || row.ownerUserId !== ownerId)) {
+        throw new SandboxedNotFoundError(name);
+      }
       /*
        * Refuse a name this surface does not own.
        *
@@ -331,11 +388,24 @@ export function createSandboxedStore(
      * published source, so it is absent from this list and the app has nothing to draw. A draft
      * quietly rendering in production is the one outcome the draft column exists to prevent.
      */
-    async published(): Promise<PublishedSandboxed[]> {
+    /**
+     * The published source this person may draw with: their own components
+     * plus legacy shared rows. Nothing of anybody else's: a published page
+     * one user wrote is not another user's to render.
+     */
+    async published(ownerId: string): Promise<PublishedSandboxed[]> {
       const rows = await database
         .select()
         .from(sandboxedComponents)
-        .where(eq(sandboxedComponents.published, true));
+        .where(
+          and(
+            eq(sandboxedComponents.published, true),
+            or(
+              eq(sandboxedComponents.ownerUserId, ownerId),
+              isNull(sandboxedComponents.ownerUserId),
+            ),
+          ),
+        );
       return rows
         .filter((row) => row.publishedHtml !== null)
         .map((row) => ({

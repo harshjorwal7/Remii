@@ -98,7 +98,7 @@ pub fn compose(
     // Absent means no harness was picked, and the package's gated rows stay dropped.
     harness: Option<&PickedHarness>,
     // What a previous run of THIS deployment already minted, so it is not minted again. Empty on a
-    // machine that has never run OpenBot, which is exactly when generating is right.
+    // machine that has never run Remii, which is exactly when generating is right.
     kept: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
@@ -288,7 +288,7 @@ pub fn compose(
     env.insert(
         "DATABASE_URL".into(),
         format!(
-            "postgres://openbot:openbot@127.0.0.1:{}/openbot",
+            "postgres://remii:remii@127.0.0.1:{}/remii",
             ports.postgres
         ),
     );
@@ -336,7 +336,6 @@ pub fn compose(
         "PICKED_HARNESS_SOURCE".into(),
         match harness {
             Some(PickedHarness::Installed { .. }) => "installed",
-            Some(PickedHarness::RemoteAgUi { .. }) => "byo",
             None => "",
         }
         .into(),
@@ -383,16 +382,6 @@ pub fn compose(
                 );
                 insert_if_given(&mut env, "PICKED_HARNESS_AGENT_ID", remote_agent_id);
             }
-            PickedHarness::RemoteAgUi {
-                url,
-                name,
-                remote_agent_id,
-            } => {
-                env.insert("PICKED_HARNESS_NAME".into(), name.clone());
-                env.insert("PICKED_HARNESS_URL".into(), url.trim().to_string());
-                env.insert("PICKED_HARNESS_KIND".into(), "remote-ag-ui".into());
-                insert_if_given(&mut env, "PICKED_HARNESS_AGENT_ID", remote_agent_id);
-            }
         }
     }
 
@@ -431,17 +420,14 @@ pub fn compose(
     // that came with the deployment, and the Bots somebody was given are not the Bots they get.
     env.insert("TENANT_PACKAGE_DIR".into(), "../examples/fintech".into());
 
-    // The one person, named. `OPENBOT_SINGLE_USER` says there is nobody else; this says who that
-    // somebody is, so the routes that ask what an actor may do have an actor to answer about.
-    env.insert("INITIAL_ADMIN_EMAILS".into(), "dev@openbot.local".into());
-
     // One machine, one person, no sign-in.
     //
     // The server refuses to start with no identity provider rather than serve a deployment where
-    // every visitor is an administrator, which is the right refusal on a server and the wrong
-    // question on a laptop: there is nobody else here. Saying so explicitly is how that refusal is
-    // answered, and it is the same switch `ci.yml` uses for the same reason.
-    env.insert("OPENBOT_SINGLE_USER".into(), "true".into());
+    // every visitor is let in, which is the right refusal on a server and the wrong question on a
+    // laptop: there is nobody else here. Saying so explicitly is how that refusal is answered, and
+    // it is the same switch `ci.yml` uses for the same reason. The actor it admits as is the dev
+    // user `server/src/auth/dev-actor.ts` names, so there is no identity to configure here either.
+    env.insert("REMII_SINGLE_USER".into(), "true".into());
 
     // Pull the published images rather than build them. A desktop install has no toolchain and no
     // reason to compile Chromium.
@@ -449,7 +435,7 @@ pub fn compose(
 
     // Which images, by digest, from the release's own manifest. Compose's defaults are local build
     // names, so leaving these unset does not fall back to something workable: it asks a registry
-    // for `openbot-supervisor:latest`, which nobody publishes, and the denial that comes back
+    // for `remii-supervisor:latest`, which nobody publishes, and the denial that comes back
     // reads as a login problem.
     for (variable, reference) in images {
         env.insert(variable.clone(), reference.clone());
@@ -483,7 +469,7 @@ Nothing new had to be built to make a Bot appear.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickedHarness {
     Installed {
-        /// The published image, e.g. `openbot-agent-crewai`. Named by the release, not derived.
+        /// The published image, e.g. `remii-agent-crewai`. Named by the release, not derived.
         image: String,
         /// The port that image listens on, fixed by its own Dockerfile.
         port: u16,
@@ -496,21 +482,12 @@ pub enum PickedHarness {
         /// Which agent on that server, for a Mastra roster. Empty means the only one there.
         remote_agent_id: String,
     },
-    RemoteAgUi {
-        /// The AG-UI endpoint the person already runs.
-        url: String,
-        /// What the Bot is called on screen.
-        name: String,
-        /// Reserved for a future remote roster field. Empty means the only one there.
-        remote_agent_id: String,
-    },
 }
 
 impl PickedHarness {
     pub fn installed_port(&self) -> Option<u16> {
         match self {
             Self::Installed { port, .. } => Some(*port),
-            Self::RemoteAgUi { .. } => None,
         }
     }
 }
@@ -584,7 +561,7 @@ pub const NO_KEY_NEEDED: &str = "no-key-needed";
 ///
 /// Named rather than written inline, because `write` has to recognise its own from a previous start
 /// as well as put one down.
-const BANNER: &str = "# Written by OpenBot Desktop. Anything else in this file is left alone.";
+const BANNER: &str = "# Written by Remii Desktop. Anything else in this file is left alone.";
 
 /// The secrets this deployment mints for itself, once.
 pub const MINTED: [&str; 6] = [
@@ -598,9 +575,9 @@ pub const MINTED: [&str; 6] = [
 
 const PUBLISHED: [&str; 4] = [
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-    "openbot-dev-supervisor-token",
-    "openbot-dev-computer-token",
-    "openbot-dev-worker-secret",
+    "remii-dev-supervisor-token",
+    "remii-dev-computer-token",
+    "remii-dev-worker-secret",
 ];
 
 /// Whether an original installation key can be reused without replacement.
@@ -713,7 +690,7 @@ pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<(
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("missing parent directory"))?;
-    let temporary = parent.join(format!(".openbot-write-{:016x}.tmp", rand::random::<u64>()));
+    let temporary = parent.join(format!(".remii-write-{:016x}.tmp", rand::random::<u64>()));
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -774,7 +751,7 @@ pub fn write(
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "OpenBot setting names and values must not contain line breaks.",
+            "Remii setting names and values must not contain line breaks.",
         ));
     }
     let existing = match std::fs::read_to_string(path) {
@@ -844,7 +821,7 @@ mod tests {
             .map(|(published, variable)| {
                 (
                     (*variable).to_string(),
-                    format!("ghcr.io/copilotkit/openbot-{published}@sha256:abc"),
+                    format!("ghcr.io/copilotkit/remii-{published}@sha256:abc"),
                 )
             })
             .collect()
@@ -1087,7 +1064,7 @@ HTTPS_PROXY=http://proxy:8080
             "KEY_ENCRYPTION_KEY",
         ] {
             let value = env.get(key).expect(key);
-            assert!(!value.contains("openbot-dev"), "{key} kept a dev default");
+            assert!(!value.contains("remii-dev"), "{key} kept a dev default");
             assert!(
                 value.len() > 20,
                 "{key} is too short to be a generated secret"
@@ -1219,7 +1196,7 @@ HTTPS_PROXY=http://proxy:8080
             &BTreeMap::new(),
         );
         assert_eq!(
-            env.get("OPENBOT_SINGLE_USER").map(String::as_str),
+            env.get("REMII_SINGLE_USER").map(String::as_str),
             Some("true")
         );
     }
@@ -1486,9 +1463,9 @@ HTTPS_PROXY=http://proxy:8080
         std::fs::write(
             &path,
             "KEY_ENCRYPTION_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
-             SUPERVISOR_TOKEN=openbot-dev-supervisor-token\n\
-             COMPUTER_TOKEN=openbot-dev-computer-token\n\
-             WORKER_SHARED_SECRET=openbot-dev-worker-secret\n",
+             SUPERVISOR_TOKEN=remii-dev-supervisor-token\n\
+             COMPUTER_TOKEN=remii-dev-computer-token\n\
+             WORKER_SHARED_SECRET=remii-dev-worker-secret\n",
         )
         .unwrap();
 
@@ -1608,7 +1585,7 @@ mod model_tests {
             .map(|(published, variable)| {
                 (
                     (*variable).to_string(),
-                    format!("ghcr.io/copilotkit/openbot-{published}@sha256:abc"),
+                    format!("ghcr.io/copilotkit/remii-{published}@sha256:abc"),
                 )
             })
             .collect()
@@ -1743,7 +1720,7 @@ mod model_tests {
                 &Ports::default(),
                 &pinned(),
                 Some(&PickedHarness::Installed {
-                    image: "openbot-agent-crewai".into(),
+                    image: "remii-agent-crewai".into(),
                     port,
                     name: "CrewAI".into(),
                     mastra,
@@ -1761,39 +1738,6 @@ mod model_tests {
     }
 
     #[test]
-    fn a_byo_harness_writes_only_the_remote_ag_ui_address_and_kind() {
-        let env = compose(
-            &intelligence(),
-            &Model::default(),
-            &engine(),
-            &Ports::default(),
-            &pinned(),
-            Some(&PickedHarness::RemoteAgUi {
-                url: "https://agent.example/ag-ui".into(),
-                name: "An agent you already run".into(),
-                remote_agent_id: String::new(),
-            }),
-            &BTreeMap::new(),
-        );
-
-        assert_eq!(
-            env.get("PICKED_HARNESS_URL").map(String::as_str),
-            Some("https://agent.example/ag-ui")
-        );
-        assert_eq!(
-            env.get("PICKED_HARNESS_KIND").map(String::as_str),
-            Some("remote-ag-ui")
-        );
-        assert_eq!(
-            env.get("PICKED_HARNESS_NAME").map(String::as_str),
-            Some("An agent you already run")
-        );
-        assert!(!env.contains_key("PICKED_HARNESS_IMAGE"));
-        assert!(!env.contains_key("PICKED_HARNESS_PORT"));
-        assert!(!env.contains_key("PICKED_HARNESS_AGENT_ID"));
-    }
-
-    #[test]
     fn harness_provenance_is_replaced_and_cleared_in_saved_settings() {
         let dir = temp_root("harness-provenance");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1806,14 +1750,17 @@ mod model_tests {
             run_path: "/ag-ui".into(),
             remote_agent_id: String::new(),
         };
-        let byo = PickedHarness::RemoteAgUi {
-            url: "https://agent.example/ag-ui".into(),
-            name: "BYO".into(),
+        let second = PickedHarness::Installed {
+            image: "synthetic-harness".into(),
+            port: 4206,
+            name: "Second".into(),
+            mastra: false,
+            run_path: "/ag-ui".into(),
             remote_agent_id: String::new(),
         };
         for (selection, expected) in [
             (Some(&installed), "installed"),
-            (Some(&byo), "byo"),
+            (Some(&second), "installed"),
             (None, ""),
             (Some(&installed), "installed"),
         ] {

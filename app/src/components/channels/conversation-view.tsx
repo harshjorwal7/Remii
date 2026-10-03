@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { ActivityMark } from "@/components/channels/activity-mark";
 import { ChatTranscript } from "@/components/channels/chat-transcript";
 import {
   type AgentOption,
@@ -19,6 +20,7 @@ import {
   reduceQueue,
 } from "@/components/channels/composer";
 import { attachmentUrl } from "@/lib/channels/attachments";
+import type { ChannelActivityBrief } from "@/lib/channels/queries";
 import { newId } from "../../lib/new-id";
 
 export function ConversationView({
@@ -35,6 +37,7 @@ export function ConversationView({
   stoppable,
   queueWhileBusy = false,
   restoring = false,
+  activity = null,
   onSubmit,
   onStop,
 }: {
@@ -92,6 +95,14 @@ export function ConversationView({
   onSubmit: (draft: ComposerDraft) => void | Promise<void>;
   /** Stop the Bot mid-answer; forwarded to turn the send button into a stop button. */
   onStop?: () => void;
+  /**
+   * What is running in this channel right now, or null. Drawn above the composer.
+   *
+   * A prop rather than a query read here, so the line and the roster mark are looking at one piece
+   * of state: this screen is patched by the same socket event that patches the roster, and a second
+   * read would be a second answer to a question that must have one.
+   */
+  activity?: ChannelActivityBrief | null;
 }) {
   /*
    * THE QUEUE LIVES HERE BECAUSE BOTH HALVES OF IT DO.
@@ -432,7 +443,31 @@ export function ConversationView({
           {...(stopped ? { stopped } : {})}
         />
       </div>
-      <div className="max-w-2xl mx-auto w-full px-0 pb-4 shrink-0">
+      {/*
+       * `px-4` TO MATCH THE TRANSCRIPT COLUMN, NOT `px-0`.
+       *
+       * The transcript pads its `max-w-2xl` column by 16px (`chat-transcript.tsx`), so with `px-0`
+       * the composer's card sat 16px wider than the messages above it on each side: the left and
+       * right edges of the two never lined up, and on a phone the card touched the screen edge
+       * while the text beside it kept a gutter.
+       */}
+      <div className="mx-auto w-full max-w-2xl shrink-0 px-4 pb-4">
+        {/*
+         * WHAT IS HAPPENING, directly above where the answer will appear.
+         *
+         * A person who has just asked something is waiting, and the worst thing this screen can do
+         * is be silent while it thinks. The line is quiet and one line high, and it appears only
+         * while something is running: a screen that always has a status line is a screen whose
+         * silence means something, which is the only way silence can mean anything here.
+         *
+         * Read from the same brief as the roster's mark, so the two cannot disagree about which
+         * Bot is working.
+         */}
+        {activity ? (
+          <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
+            <ActivityMark activity={activity} withText />
+          </div>
+        ) : null}
         {notice}
         <Composer
           agents={agents}

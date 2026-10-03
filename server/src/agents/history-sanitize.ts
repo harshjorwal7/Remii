@@ -54,19 +54,24 @@ function isSilent(message: Message): boolean {
  * sanitizing cannot turn a firing into one that re-persists the transcript.
  *
  * The rules, in order:
- *  1. A tool call is ANSWERED if a later message carries it as `toolCallId` before the next user
- *     message, or if the caller says it is answered elsewhere. Later, not merely present: a result
- *     ahead of its call is not a pairing any provider accepts either. And before the next user
- *     message, because that is where the model API stops looking: see `boundaryAfter` below.
+ *  1. A tool call OCCURRENCE is ANSWERED if a result for its id follows that occurrence (not
+ *     merely exists somewhere) before the next user message, or if the caller says it is
+ *     answered elsewhere. A call id must be globally unique per conversation: once an
+ *     occurrence claims an id, any duplicate occurrence of that call id (e.g. stored echoes
+ *     where both the assistant message and tool result were persisted or merged twice under
+ *     different message ids) is rejected. This prevents provider errors like DeepSeek's
+ *     `Duplicate 'call_id'`. Any duplicate tool results trailing the echo are left unconsumed
+ *     and dropped by rule 3.
  *  2. An assistant message keeps only its answered calls. If that leaves it with no calls and
  *     nothing said, the message is dropped — an empty assistant husk is itself invalid for some
  *     providers, so stripping the call is not enough.
- *  3. A tool result survives only as THE answer to a surviving call: the first one after the call
- *     and before the boundary. Everything else carrying a `toolCallId` is dropped — a result whose
- *     call is gone (the mirror-image dangle an interruption leaves in the other order), a result that
- *     sits ahead of its own call even when a real answer follows later, and a second answer to a
- *     call already answered. The browser's `repair-history.ts` calls those shapes misplaced and
- *     relocates them; here they are dropped, because the real answer is already in place.
+ *  3. A tool result survives only as THE answer to a surviving occurrence: the first unconsumed
+ *     one after the occurrence and before the boundary. Everything else carrying a `toolCallId`
+ *     is dropped — a result whose call is gone (the mirror-image dangle an interruption leaves
+ *     in the other order), a result that sits ahead of its own call even when a real answer
+ *     follows later, and a second answer to a call already answered. The browser's
+ *     `repair-history.ts` calls those shapes misplaced and relocates them; here they are
+ *     dropped, because the real answer is already in place.
  *
  * Order is preserved, the input array is not mutated, and a message the pass does not change is
  * returned as the same object — a healthy thread, which is nearly all of them, goes through
@@ -115,39 +120,58 @@ export function sanitizeSeededHistory(
     if (role === "user") next = index;
   }
 
-  /** Where each call was made: the first assistant row carrying its id. */
-  const callAt = new Map<string, number>();
-  for (const [index, message] of history.entries()) {
-    const { toolCalls } = message as { toolCalls?: ToolCall[] };
-    for (const call of toolCalls ?? []) {
-      if (!callAt.has(call.id)) callAt.set(call.id, index);
-    }
-  }
   /*
-   * The one position that answers each call: the first result after the call and before the
-   * boundary. Recording every position instead would let a result AHEAD of its call survive on
-   * the strength of a real answer behind it, and send a `tool` row before any call — the exact
-   * shape the browser's `repair-history.ts` treats as misplaced.
+   * Every result position per call id, in order. Pairing is per OCCURRENCE: each assistant
+   * message consumes the earliest result for that id that follows the message itself and
+   * precedes the boundary, and a result is spent at most once. A repeated id is a stored echo
+   * of one call (see rule 1), so the echo finds its id's only result already spent and is
+   * stripped rather than kept as "answered".
    */
-  const answerAt = new Map<string, number>();
+  const resultsById = new Map<string, number[]>();
   for (const [index, message] of history.entries()) {
     const { toolCallId } = message as { toolCallId?: string };
-    if (toolCallId === undefined || answerAt.has(toolCallId)) continue;
-    const called = callAt.get(toolCallId);
-    if (called === undefined || index <= called) continue;
-    if (index >= (boundaryAfter[called] ?? history.length)) continue;
-    answerAt.set(toolCallId, index);
+    if (toolCallId === undefined) continue;
+    const list = resultsById.get(toolCallId);
+    if (list) list.push(index);
+    else resultsById.set(toolCallId, [index]);
   }
+  /** Result positions already spent answering an earlier occurrence. */
+  const consumed = new Set<number>();
+  /** Call ids already claimed by an earlier occurrence or answered elsewhere. */
+  const claimedCallIds = new Set<string>();
 
-  const surviving = new Set<string>();
-  const kept: (Message | undefined)[] = history.map((message) => {
+  const kept: (Message | undefined)[] = history.map((message, messageIndex) => {
     const { toolCalls } = message as { toolCalls?: ToolCall[] };
     if (toolCalls === undefined) return message;
 
-    const answered = toolCalls.filter(
-      (call) => answeredElsewhere.has(call.id) || answerAt.has(call.id),
-    );
-    for (const call of answered) surviving.add(call.id);
+    const boundary = boundaryAfter[messageIndex] ?? history.length;
+    const consumeNext = (id: string): boolean => {
+      const candidates = resultsById.get(id) ?? [];
+      for (const at of candidates) {
+        if (at <= messageIndex || at >= boundary || consumed.has(at)) continue;
+        consumed.add(at);
+        return true;
+      }
+      return false;
+    };
+    const answered = toolCalls.filter((call) => {
+      if (claimedCallIds.has(call.id)) {
+        return false;
+      }
+      // A resumed call survives whether or not history answers it, and still spends a
+      // historical answer when one is there, so the answer is kept rather than dropped as
+      // orphaned while the resume appends its own.
+      if (answeredElsewhere.has(call.id)) {
+        claimedCallIds.add(call.id);
+        consumeNext(call.id);
+        return true;
+      }
+      if (consumeNext(call.id)) {
+        claimedCallIds.add(call.id);
+        return true;
+      }
+      return false;
+    });
 
     // The husk check goes FIRST so it also catches a row that arrived with no calls and nothing
     // said — the same invalid shape, reached without a dangle.
@@ -175,6 +199,6 @@ export function sanitizeSeededHistory(
     if (message === undefined) return false;
     const { toolCallId } = message as { toolCallId?: string };
     if (toolCallId === undefined) return true;
-    return surviving.has(toolCallId) && answerAt.get(toolCallId) === index;
+    return consumed.has(index);
   });
 }

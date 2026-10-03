@@ -8,8 +8,12 @@ type RemoteAgent = {
   id: string;
   name: string;
   /**
-   * How the endpoint is dialled. Both kinds are a URL this deployment posts a run to, and both are
-   * available on the same condition, which is why availability below does not branch on it.
+   * How the endpoint is dialled. Both kinds are an address this deployment posts a run to, and both
+   * are available on the same condition, which is why availability below does not branch on it.
+   *
+   * Every address here comes from deployment configuration or the tenant package — the Bot this
+   * deployment ships in the box, or the harness chosen at setup. A person cannot add one, so the
+   * check below reports a broken deployment rather than guarding a boundary.
    */
   type: "remote_ag_ui" | "remote_mastra";
   endpoint: string;

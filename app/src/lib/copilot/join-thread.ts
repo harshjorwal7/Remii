@@ -10,6 +10,7 @@ export async function joinWithin({
   connect,
   deadline,
   detach,
+  keepAttached,
 }: {
   /** The join already in progress. Its rejection is an outcome, not a failure of this function. */
   connect: Promise<unknown>;
@@ -17,6 +18,23 @@ export async function joinWithin({
   deadline: Promise<void>;
   /** End the in-flight connect. Asked for once, and only when the deadline came first. */
   detach: () => Promise<unknown>;
+  /**
+   * Whether the connect must be left alone when the deadline arrives.
+   *
+   * The deadline normally ENDS the connect, which is right for a thread at rest: nothing is streaming,
+   * the history read has what it needs, and a connect left running would replace the agent's messages
+   * on the next run and lose anything added in between. That reasoning assumes there is nothing to
+   * receive, though, and on a thread with a run still going there is — the connect is how this browser
+   * reattaches to a run it walked away from.
+   *
+   * So the caller answers this from the one thing that knows: whether the server says a run is live on
+   * this thread. With it true the connect is left attached and keeps streaming the continuation; with
+   * it false, or absent, the deadline behaves exactly as before.
+   *
+   * Asked ONCE, at the moment the deadline wins, because a predicate consulted continuously would turn
+   * a bounded wait into an unbounded one — which is the failure this file exists to avoid.
+   */
+  keepAttached?: () => boolean;
 }): Promise<void> {
   // Settled either way: a connect that failed is a join that is over, and the caller restores
   // history separately. Kept as one promise so it can be awaited twice without a second rejection.
@@ -32,6 +50,15 @@ export async function joinWithin({
   if (outcome === "connected") {
     return;
   }
+
+  /*
+   * THE DEADLINE, BUT NOT FOR A THREAD THAT IS STILL WORKING.
+   *
+   * Detaching now would cut off the one stream that is delivering the answer this person came back for,
+   * and `agent.isRunning` would drop to false as it went — so the Stop button would appear for about a
+   * second and then vanish, which is the exact symptom being fixed, arriving by a second route.
+   */
+  if (keepAttached?.() === true) return;
 
   try {
     await detach();

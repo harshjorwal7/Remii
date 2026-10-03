@@ -83,14 +83,14 @@ function setupEvents() {
 }
 
 async function enterInstallation(view: Awaited<ReturnType<typeof renderApp>>) {
-  await userEvent.click(view.getByRole("button", { name: "Set up OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Set up Remii" }));
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
 }
 
 async function completeInstallation(
   view: Awaited<ReturnType<typeof renderApp>>,
 ) {
-  await userEvent.click(view.getByRole("button", { name: "Install OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Install Remii" }));
   await userEvent.click(
     await view.findByRole("button", { name: "Continue to sign in" }),
   );
@@ -114,15 +114,15 @@ test("installation completes before either sign-in is available", async () => {
   };
   const view = await renderApp();
   await enterInstallation(view);
-  expect(view.getByRole("heading", { name: "Install OpenBot" })).toBeTruthy();
-  expect(view.getByLabelText("Where OpenBot lives")).toHaveProperty(
+  expect(view.getByRole("heading", { name: "Install Remii" })).toBeTruthy();
+  expect(view.getByLabelText("Where Remii lives")).toHaveProperty(
     "value",
     "/tmp/install-before-signin",
   );
   expect(
     view.queryByRole("button", { name: /Sign in|Continue to sign in/i }),
   ).toBeNull();
-  await userEvent.click(view.getByRole("button", { name: "Install OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Install Remii" }));
   expect(installationCalls()).toEqual([
     {
       command: "prepare_installation",
@@ -132,7 +132,7 @@ test("installation completes before either sign-in is available", async () => {
       },
     },
   ]);
-  expect(view.getByLabelText("Where OpenBot lives")).toHaveProperty(
+  expect(view.getByLabelText("Where Remii lives")).toHaveProperty(
     "disabled",
     true,
   );
@@ -190,7 +190,7 @@ test("failed installation blocks sign-in and retries before reporting completion
   };
   const view = await renderApp();
   await enterInstallation(view);
-  await userEvent.click(view.getByRole("button", { name: "Install OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Install Remii" }));
   expect((await view.findByRole("alert")).textContent).toContain(
     "The download was interrupted.",
   );
@@ -307,7 +307,7 @@ test("a completed installation can be repaired after a provider reports missing 
 });
 
 test("changing the Bot invalidates its completed installation", async () => {
-  useBringYourOwnHarnessSetup();
+  useHarnessCatalogueSetup();
   const view = await renderApp();
   await enterInstallation(view);
   await completeInstallation(view);
@@ -315,11 +315,7 @@ test("changing the Bot invalidates its completed installation", async () => {
   await userEvent.click(view.getByRole("button", { name: "Back" }));
   await userEvent.click(view.getByText("Choose the agent framework"));
   await userEvent.click(
-    view.getByRole("radio", { name: /An agent you already run/ }),
-  );
-  await userEvent.type(
-    view.getByLabelText("AG-UI endpoint"),
-    "https://agent.example/ag-ui",
+    view.getByRole("radio", { name: /Mastra/ }),
   );
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
   expect(
@@ -329,13 +325,13 @@ test("changing the Bot invalidates its completed installation", async () => {
   expect(installationCalls()).toEqual([
     {
       command: "prepare_installation",
-      args: { root: "/tmp/openbot-app-test", harness: { id: "langgraph" } },
+      args: { root: "/tmp/remii-app-test", harness: { id: "langgraph" } },
     },
     {
       command: "prepare_installation",
       args: {
-        root: "/tmp/openbot-app-test",
-        harness: { id: "byo-url", agentUrl: "https://agent.example/ag-ui" },
+        root: "/tmp/remii-app-test",
+        harness: { id: "mastra" },
       },
     },
   ]);
@@ -358,20 +354,20 @@ test.each([false, true])(
     invokeHandler = async (command, args) => {
       if (command === "selected_root") return root;
       if (command === "start_stack") return launch.promise;
-      if (command === "show_openbot") return null;
+      if (command === "show_remii") return null;
       return previous(command, args);
     };
     const view = await renderApp(strictMode);
     expect(
-      view.getByRole("heading", { name: "Starting OpenBot" }),
+      view.getByRole("heading", { name: "Starting Remii" }),
     ).toBeTruthy();
     expect(
       view.queryByRole("heading", { name: "Connect to CopilotKit" }),
     ).toBeNull();
-    expect(view.queryByRole("button", { name: "Set up OpenBot" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Set up Remii" })).toBeNull();
     await act(async () => launch.resolve());
     await waitFor(() =>
-      expect(invokeCalls).toContainEqual({ command: "show_openbot" }),
+      expect(invokeCalls).toContainEqual({ command: "show_remii" }),
     );
     expect(getStartStackPayload()).toEqual({
       root,
@@ -391,7 +387,7 @@ test.each([false, true])(
         ),
       ),
     ).toBe(false);
-    expect(view.queryByRole("button", { name: "Set up OpenBot" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Set up Remii" })).toBeNull();
     expect(view.queryByRole("button", { name: "Ask" })).toBeNull();
   },
 );
@@ -416,14 +412,14 @@ test("a failed automatic reopen offers recovery without retrying or installing",
     invokeCalls.filter((call) => call.command === "start_stack"),
   ).toHaveLength(1);
   expect(installationCalls()).toHaveLength(0);
-  expect(view.getByRole("button", { name: "Start OpenBot" })).toHaveProperty(
+  expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
     "disabled",
     false,
   );
   await userEvent.click(
     view.getByRole("button", { name: "Change installation" }),
   );
-  expect(view.getByRole("button", { name: "Install OpenBot" })).toBeTruthy();
+  expect(view.getByRole("button", { name: "Install Remii" })).toBeTruthy();
 });
 
 test("reopening a retained root waits for its saved setup without flashing the wizard", async () => {
@@ -436,12 +432,12 @@ test("reopening a retained root waits for its saved setup without flashing the w
     return previous(command, args);
   };
   const view = await renderApp();
-  expect(view.getByRole("heading", { name: "Opening OpenBot" })).toBeTruthy();
-  expect(view.queryByRole("button", { name: "Set up OpenBot" })).toBeNull();
+  expect(view.getByRole("heading", { name: "Opening Remii" })).toBeTruthy();
+  expect(view.queryByRole("button", { name: "Set up Remii" })).toBeNull();
   await act(async () => configuration.resolve(savedOpenAiConfiguration()));
   // A retained folder with no successful launch still needs the setup screens.
   expect(
-    await view.findByRole("button", { name: "Set up OpenBot" }),
+    await view.findByRole("button", { name: "Set up Remii" }),
   ).toBeTruthy();
   expect(invokeCalls.some((call) => call.command === "start_stack")).toBe(
     false,
@@ -509,7 +505,7 @@ test("setup records telemetry without a consent gate and deduplicates viewed ste
   expect(setupEvents()).toEqual([
     { event: { kind: "step_viewed", step: "welcome" } },
   ]);
-  await userEvent.click(view.getByRole("button", { name: "Set up OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Set up Remii" }));
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
 
   expect(setupEvents()).toEqual([
@@ -543,7 +539,7 @@ test("setup records only model categories and reaches Ask when telemetry is unav
       custom_base_url: true,
     },
   });
-  await userEvent.click(view.getByRole("button", { name: "Start OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Start Remii" }));
   await view.findByRole("button", { name: "Ask" });
   expect(setupEvents().at(-1)).toEqual({
     event: { kind: "step_viewed", step: "ask" },
@@ -553,7 +549,7 @@ test("setup records only model categories and reaches Ask when telemetry is unav
     privateUrl,
     privateKey,
     "local-model",
-    "/tmp/openbot-app-test",
+    "/tmp/remii-app-test",
   ]) {
     expect(serialized).not.toContain(privateValue);
   }
@@ -690,12 +686,12 @@ function useRootConfigurationSetup(
 }
 
 test("Windows detection failure blocks setup and displays its diagnostic", async () => {
-  useRootConfigurationSetup("/tmp/openbot-windows-detection-test", async () =>
+  useRootConfigurationSetup("/tmp/remii-windows-detection-test", async () =>
     emptyConfiguration(),
   );
   const setupHandler = invokeHandler;
   const problem = {
-    said: "OpenBot could not check Windows virtualization support.",
+    said: "Remii could not check Windows virtualization support.",
     detail: "powershell exited with 17: synthetic CIM access denied",
   };
   invokeHandler = async (command, args) => {
@@ -708,8 +704,8 @@ test("Windows detection failure blocks setup and displays its diagnostic", async
   expect(alert.textContent).toContain(problem.said);
   await userEvent.click(view.getByText("Technical details"));
   expect(alert.textContent).toContain(problem.detail);
-  expect(view.queryByRole("button", { name: "Set up OpenBot" })).toBeNull();
-  expect(view.queryByRole("button", { name: "Start OpenBot" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Set up Remii" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Start Remii" })).toBeNull();
   expect(
     view.queryByText(/firmware settings|wsl --install|wsl --update/),
   ).toBeNull();
@@ -719,7 +715,7 @@ test("Windows detection failure blocks setup and displays its diagnostic", async
 });
 
 test("a failed Windows blocker instruction is visible instead of an empty blocker", async () => {
-  useRootConfigurationSetup("/tmp/openbot-windows-detection-test", async () =>
+  useRootConfigurationSetup("/tmp/remii-windows-detection-test", async () =>
     emptyConfiguration(),
   );
   const setupHandler = invokeHandler;
@@ -734,16 +730,16 @@ test("a failed Windows blocker instruction is visible instead of an empty blocke
   expect((await view.findByRole("alert")).textContent).toContain(
     "The blocker instruction could not be read.",
   );
-  expect(view.queryByRole("button", { name: "Set up OpenBot" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Set up Remii" })).toBeNull();
 });
 
 test("a successfully detected missing WSL feature keeps its setup instruction", async () => {
-  useRootConfigurationSetup("/tmp/openbot-windows-detection-test", async () =>
+  useRootConfigurationSetup("/tmp/remii-windows-detection-test", async () =>
     emptyConfiguration(),
   );
   const setupHandler = invokeHandler;
   const instruction =
-    "Run wsl --install, restart Windows, and start OpenBot again.";
+    "Run wsl --install, restart Windows, and start Remii again.";
   invokeHandler = async (command, args) => {
     if (command === "windows_blocker") return "wsl-absent";
     if (command === "windows_blocker_instruction") return instruction;
@@ -752,16 +748,16 @@ test("a successfully detected missing WSL feature keeps its setup instruction", 
   const view = await renderApp();
   expect(await view.findByText(instruction)).toBeTruthy();
   expect(view.queryByRole("alert")).toBeNull();
-  expect(view.queryByRole("button", { name: "Set up OpenBot" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Set up Remii" })).toBeNull();
 });
 
 test("disabled Virtual Machine Platform displays its feature-specific fix and blocks setup", async () => {
-  useRootConfigurationSetup("/tmp/openbot-vmp-detection-test", async () =>
+  useRootConfigurationSetup("/tmp/remii-vmp-detection-test", async () =>
     emptyConfiguration(),
   );
   const setupHandler = invokeHandler;
   const instruction =
-    "Virtual Machine Platform is switched off. Open Windows Terminal or PowerShell as an administrator, run `dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart`, restart Windows, and start OpenBot again.";
+    "Virtual Machine Platform is switched off. Open Windows Terminal or PowerShell as an administrator, run `dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart`, restart Windows, and start Remii again.";
   invokeHandler = async (command, args) => {
     if (command === "windows_blocker")
       return "virtual-machine-platform-disabled";
@@ -779,8 +775,8 @@ test("disabled Virtual Machine Platform displays its feature-specific fix and bl
     }),
   ).toBeTruthy();
   expect(view.queryByRole("alert")).toBeNull();
-  expect(view.queryByRole("button", { name: "Set up OpenBot" })).toBeNull();
-  expect(view.queryByRole("button", { name: "Start OpenBot" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Set up Remii" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Start Remii" })).toBeNull();
   expect(
     invokeCalls.some((call) =>
       ["prepare_installation", "prepare_engine", "start_stack"].includes(
@@ -812,7 +808,7 @@ function useCompatibleEndpointSetup(
         detail: "Docker is answering.",
       };
     }
-    if (command === "default_root") return "/tmp/openbot-app-test";
+    if (command === "default_root") return "/tmp/remii-app-test";
     if (command === "already_configured") {
       return {
         values: existingValues,
@@ -866,7 +862,7 @@ async function enterCompatibleEndpoint(
   const view = await renderApp();
 
   await userEvent.click(
-    await view.findByRole("button", { name: "Set up OpenBot" }),
+    await view.findByRole("button", { name: "Set up Remii" }),
   );
   await userEvent.click(await view.findByRole("button", { name: "Continue" }));
   await completeInstallation(view);
@@ -902,7 +898,7 @@ async function startWithCompatibleEndpoint(
   );
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
   await userEvent.click(
-    await view.findByRole("button", { name: "Start OpenBot" }),
+    await view.findByRole("button", { name: "Start Remii" }),
   );
 }
 
@@ -942,7 +938,7 @@ test.each([true, false])(
   async (keyed) => {
     useSavedCompatibleEndpointSetup(undefined, undefined, keyed);
     const view = await renderApp();
-    await userEvent.click(view.getByRole("button", { name: "Set up OpenBot" }));
+    await userEvent.click(view.getByRole("button", { name: "Set up Remii" }));
     await userEvent.click(view.getByRole("button", { name: "Continue" }));
     await completeInstallation(view);
     expect(view.getByLabelText("Base URL")).toHaveProperty(
@@ -957,16 +953,16 @@ test.each([true, false])(
       view.getByLabelText("API key, if the endpoint needs one"),
     ).toHaveProperty("value", "");
     await userEvent.click(view.getByRole("button", { name: "Continue" }));
-    expect(view.getByRole("button", { name: "Start OpenBot" })).toHaveProperty(
+    expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
       "disabled",
       false,
     );
-    await userEvent.click(view.getByRole("button", { name: "Start OpenBot" }));
+    await userEvent.click(view.getByRole("button", { name: "Start Remii" }));
     expect(
       invokeCalls.filter((call) => call.command === "start_stack"),
     ).toHaveLength(1);
     expect(getStartStackPayload()).toEqual({
-      root: "/tmp/openbot-app-test",
+      root: "/tmp/remii-app-test",
       apiKey: "",
       apiUrl: "https://api.intelligence.copilotkit.ai",
       gatewayWsUrl: "wss://realtime.intelligence.copilotkit.ai",
@@ -993,7 +989,7 @@ test.each([
   async (baseUrl, model) => {
     useSavedCompatibleEndpointSetup(baseUrl, model);
     const view = await renderApp();
-    await userEvent.click(view.getByRole("button", { name: "Set up OpenBot" }));
+    await userEvent.click(view.getByRole("button", { name: "Set up Remii" }));
     await userEvent.click(view.getByRole("button", { name: "Continue" }));
     await completeInstallation(view);
     expect(view.getByRole("button", { name: "Continue" })).toHaveProperty(
@@ -1001,7 +997,7 @@ test.each([
       true,
     );
     await userEvent.click(view.getByRole("button", { name: "Continue" }));
-    expect(view.queryByRole("button", { name: "Start OpenBot" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Start Remii" })).toBeNull();
     expect(invokeCalls.some((call) => call.command === "start_stack")).toBe(
       false,
     );
@@ -1016,14 +1012,14 @@ test("an unsupported saved model kind does not become a startable endpoint", asy
     "unsupported-model",
   );
   const view = await renderApp();
-  await userEvent.click(view.getByRole("button", { name: "Set up OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Set up Remii" }));
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
   await completeInstallation(view);
   expect(view.getByRole("button", { name: "Continue" })).toHaveProperty(
     "disabled",
     true,
   );
-  expect(view.queryByRole("button", { name: "Start OpenBot" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Start Remii" })).toBeNull();
   expect(invokeCalls.some((call) => call.command === "start_stack")).toBe(
     false,
   );
@@ -1040,7 +1036,7 @@ test("Change the model after an Ask failure stops the stack and reaches the prov
         detail: "Docker is answering.",
       };
     }
-    if (command === "default_root") return "/tmp/openbot-app-test";
+    if (command === "default_root") return "/tmp/remii-app-test";
     if (command === "already_configured") {
       return {
         values: {
@@ -1095,20 +1091,20 @@ test("Change the model after an Ask failure stops the stack and reaches the prov
   const view = await renderApp();
 
   await userEvent.click(
-    await view.findByRole("button", { name: "Set up OpenBot" }),
+    await view.findByRole("button", { name: "Set up Remii" }),
   );
   await userEvent.click(await view.findByRole("button", { name: "Continue" }));
   await completeInstallation(view);
   await userEvent.click(await view.findByRole("radio", { name: /OpenAI/ }));
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
   await waitFor(() =>
-    expect(view.getByRole("button", { name: "Start OpenBot" })).toHaveProperty(
+    expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
       "disabled",
       false,
     ),
   );
 
-  await userEvent.click(view.getByRole("button", { name: "Start OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Start Remii" }));
   await userEvent.click(await view.findByRole("button", { name: "Ask" }));
   await userEvent.click(
     await view.findByRole("button", { name: "Change the model" }),
@@ -1121,7 +1117,7 @@ test("Change the model after an Ask failure stops the stack and reaches the prov
   );
   expect(view.getByRole("heading", { name: "Connect your AI" })).toBeTruthy();
   expect(view.getByRole("radio", { name: /OpenAI/ })).toBeTruthy();
-  expect(view.queryByRole("button", { name: "Stop OpenBot" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Stop Remii" })).toBeNull();
 });
 
 test("empty Intelligence projects keep sign-in retryable while Start waits for a project key", async () => {
@@ -1136,7 +1132,7 @@ test("empty Intelligence projects keep sign-in retryable while Start waits for a
         detail: "Docker is answering.",
       };
     }
-    if (command === "default_root") return "/tmp/openbot-app-test";
+    if (command === "default_root") return "/tmp/remii-app-test";
     if (command === "already_configured") {
       return {
         values: {
@@ -1193,7 +1189,7 @@ test("empty Intelligence projects keep sign-in retryable while Start waits for a
   const view = await renderApp();
 
   await userEvent.click(
-    await view.findByRole("button", { name: "Set up OpenBot" }),
+    await view.findByRole("button", { name: "Set up Remii" }),
   );
   await userEvent.click(await view.findByRole("button", { name: "Continue" }));
   await completeInstallation(view);
@@ -1208,7 +1204,7 @@ test("empty Intelligence projects keep sign-in retryable while Start waits for a
       exact: false,
     }),
   ).toBeTruthy();
-  expect(view.getByRole("button", { name: "Start OpenBot" })).toHaveProperty(
+  expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
     "disabled",
     true,
   );
@@ -1222,15 +1218,15 @@ test("empty Intelligence projects keep sign-in retryable while Start waits for a
   );
   await userEvent.type(view.getByLabelText("Project key"), "ck-test");
   await waitFor(() =>
-    expect(view.getByRole("button", { name: "Start OpenBot" })).toHaveProperty(
+    expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
       "disabled",
       false,
     ),
   );
 });
 
-test("mount navigates to OpenBot only when the selected root is already owned and running", async () => {
-  const root = "/tmp/openbot-owned-running-root";
+test("mount navigates to Remii only when the selected root is already owned and running", async () => {
+  const root = "/tmp/remii-owned-running-root";
   useRootConfigurationSetup(root, async () => emptyConfiguration());
   const setupHandler = invokeHandler;
   invokeHandler = async (command, args) => {
@@ -1243,37 +1239,37 @@ test("mount navigates to OpenBot only when the selected root is already owned an
 
   await renderApp();
   await waitFor(() =>
-    expect(invokeCalls).toContainEqual({ command: "show_openbot" }),
+    expect(invokeCalls).toContainEqual({ command: "show_remii" }),
   );
 });
 
 test("mount leaves setup visible when the shared port answers without selected root ownership", async () => {
-  const root = "/tmp/openbot-unowned-running-root";
+  const root = "/tmp/remii-unowned-running-root";
   useRootConfigurationSetup(root, async () => emptyConfiguration());
 
   const view = await renderApp();
 
   expect(
-    await view.findByRole("button", { name: "Set up OpenBot" }),
+    await view.findByRole("button", { name: "Set up Remii" }),
   ).toBeTruthy();
-  expect(invokeCalls.some((call) => call.command === "show_openbot")).toBe(
+  expect(invokeCalls.some((call) => call.command === "show_remii")).toBe(
     false,
   );
 });
 
 for (const staleProbe of [false, true]) {
   test(`recovery mount keeps setup available after ${staleProbe ? "a stale positive" : "a negative"} adoption probe`, async () => {
-    useRootConfigurationSetup("/tmp/openbot-worker-recovery", async () =>
+    useRootConfigurationSetup("/tmp/remii-worker-recovery", async () =>
       emptyConfiguration(),
     );
     const setupHandler = invokeHandler;
     const failure = {
-      said: "Part of OpenBot (worker) stopped and could not be started again. Try starting OpenBot once more.",
+      said: "Part of Remii (worker) stopped and could not be started again. Try starting Remii once more.",
     };
     invokeHandler = async (command, args) => {
       if (command === "already_running") return staleProbe;
       if (command === "last_failure") return failure;
-      if (command === "show_openbot") throw failure;
+      if (command === "show_remii") throw failure;
       return setupHandler(command, args);
     };
     const view = await renderApp();
@@ -1285,13 +1281,13 @@ for (const staleProbe of [false, true]) {
     if (staleProbe) {
       await waitFor(() =>
         expect(
-          invokeCalls.some((call) => call.command === "show_openbot"),
+          invokeCalls.some((call) => call.command === "show_remii"),
         ).toBe(true),
       );
     }
-    expect(view.getByRole("button", { name: "Set up OpenBot" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "Set up Remii" })).toBeTruthy();
     expect(view.getByRole("alert").textContent).toContain(failure.said);
-    expect(view.queryByRole("button", { name: "Stop OpenBot" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Stop Remii" })).toBeNull();
   });
 }
 
@@ -1306,7 +1302,7 @@ test("saved startup credentials enable Start without raw protected secrets on mo
         detail: "Docker is answering.",
       };
     }
-    if (command === "default_root") return "/tmp/openbot-app-test";
+    if (command === "default_root") return "/tmp/remii-app-test";
     if (command === "already_configured") {
       return {
         values: {},
@@ -1353,7 +1349,7 @@ test("saved startup credentials enable Start without raw protected secrets on mo
   const view = await renderApp();
 
   await userEvent.click(
-    await view.findByRole("button", { name: "Set up OpenBot" }),
+    await view.findByRole("button", { name: "Set up Remii" }),
   );
   await userEvent.click(await view.findByRole("button", { name: "Continue" }));
   await completeInstallation(view);
@@ -1361,7 +1357,7 @@ test("saved startup credentials enable Start without raw protected secrets on mo
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
 
   await waitFor(() =>
-    expect(view.getByRole("button", { name: "Start OpenBot" })).toHaveProperty(
+    expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
       "disabled",
       false,
     ),
@@ -1375,7 +1371,7 @@ async function chooseModelAfterRootEdit(
   view: Awaited<ReturnType<typeof renderApp>>,
   apiKey?: string,
 ) {
-  expect(view.queryByRole("button", { name: "Start OpenBot" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Start Remii" })).toBeNull();
   await completeInstallation(view);
   await userEvent.click(await view.findByRole("radio", { name: /OpenAI/ }));
   if (apiKey)
@@ -1384,9 +1380,9 @@ async function chooseModelAfterRootEdit(
 }
 
 test("root edits reload saved configuration for that root and ignore stale saved responses", async () => {
-  const rootA = "/tmp/openbot-root-a";
-  const rootB = "/tmp/openbot-root-b";
-  const rootC = "/tmp/openbot-root-c";
+  const rootA = "/tmp/remii-root-a";
+  const rootB = "/tmp/remii-root-b";
+  const rootC = "/tmp/remii-root-c";
   const savedForRootA = deferred<ReturnType<typeof savedOpenAiConfiguration>>();
   const emptyForRootB = deferred<ReturnType<typeof emptyConfiguration>>();
   const savedForRootC = deferred<ReturnType<typeof savedOpenAiConfiguration>>();
@@ -1404,7 +1400,7 @@ test("root edits reload saved configuration for that root and ignore stale saved
   });
 
   await userEvent.click(
-    await view.findByRole("button", { name: "Set up OpenBot" }),
+    await view.findByRole("button", { name: "Set up Remii" }),
   );
   await userEvent.click(await view.findByRole("button", { name: "Continue" }));
   await completeInstallation(view);
@@ -1412,7 +1408,7 @@ test("root edits reload saved configuration for that root and ignore stale saved
   expect(view.getByText(/A saved OpenAI API key will be used/)).toBeTruthy();
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
   await waitFor(() =>
-    expect(view.getByRole("button", { name: "Start OpenBot" })).toHaveProperty(
+    expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
       "disabled",
       false,
     ),
@@ -1421,7 +1417,7 @@ test("root edits reload saved configuration for that root and ignore stale saved
   await userEvent.click(
     view.getByRole("button", { name: "Change installation" }),
   );
-  const rootField = view.getByLabelText("Where OpenBot lives");
+  const rootField = view.getByLabelText("Where Remii lives");
   const user = userEvent.setup({
     document: view.container.ownerDocument,
   });
@@ -1463,12 +1459,12 @@ test("root edits reload saved configuration for that root and ignore stale saved
   });
   await chooseModelAfterRootEdit(view);
   await waitFor(() =>
-    expect(view.getByRole("button", { name: "Start OpenBot" })).toHaveProperty(
+    expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
       "disabled",
       false,
     ),
   );
-  await userEvent.click(view.getByRole("button", { name: "Start OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Start Remii" }));
 
   expect(getStartStackPayload()).toMatchObject({
     root: rootC,
@@ -1481,8 +1477,8 @@ test("root edits reload saved configuration for that root and ignore stale saved
 });
 
 test("same-process setup remount prefers the retained selected root", async () => {
-  const rootA = "/tmp/openbot-default-root";
-  const rootB = "/tmp/openbot-retained-root";
+  const rootA = "/tmp/remii-default-root";
+  const rootB = "/tmp/remii-retained-root";
   useRootConfigurationSetup(rootA, async (requestedRoot) => {
     if (requestedRoot !== rootB)
       throw new Error(`unexpected already_configured root ${requestedRoot}`);
@@ -1496,10 +1492,10 @@ test("same-process setup remount prefers the retained selected root", async () =
 
   const view = await renderApp();
   await userEvent.click(
-    await view.findByRole("button", { name: "Set up OpenBot" }),
+    await view.findByRole("button", { name: "Set up Remii" }),
   );
   await userEvent.click(await view.findByRole("button", { name: "Continue" }));
-  expect(view.getByLabelText("Where OpenBot lives")).toHaveProperty(
+  expect(view.getByLabelText("Where Remii lives")).toHaveProperty(
     "value",
     rootB,
   );
@@ -1507,7 +1503,7 @@ test("same-process setup remount prefers the retained selected root", async () =
   await userEvent.click(await view.findByRole("radio", { name: /OpenAI/ }));
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
   await userEvent.click(
-    await view.findByRole("button", { name: "Start OpenBot" }),
+    await view.findByRole("button", { name: "Start Remii" }),
   );
 
   expect(
@@ -1533,9 +1529,9 @@ test.each([
 ])(
   "root edits invalidate the $name before blur",
   async ({ pendingRoot, finalRoot, savedModel }) => {
-    const rootA = "/tmp/openbot-root-a";
-    const rootB = "/tmp/openbot-root-b";
-    const currentRoot = `/tmp/openbot-root-${finalRoot}`;
+    const rootA = "/tmp/remii-root-a";
+    const rootB = "/tmp/remii-root-b";
+    const currentRoot = `/tmp/remii-root-${finalRoot}`;
     const requests: Array<{
       root: string;
       response: Deferred<ReturnType<typeof savedOpenAiConfiguration>>;
@@ -1554,7 +1550,7 @@ test.each([
       );
     }
     await user.click(
-      await view.findByRole("button", { name: "Set up OpenBot" }),
+      await view.findByRole("button", { name: "Set up Remii" }),
     );
     await user.click(await view.findByRole("button", { name: "Continue" }));
     await completeInstallation(view);
@@ -1569,10 +1565,10 @@ test.each([
       );
     }
     await user.click(view.getByRole("button", { name: "Continue" }));
-    const previousStart = view.getByRole("button", { name: "Start OpenBot" });
+    const previousStart = view.getByRole("button", { name: "Start Remii" });
     expect(previousStart).toHaveProperty("disabled", !savedModel);
     await user.click(view.getByRole("button", { name: "Change installation" }));
-    const rootField = view.getByLabelText("Where OpenBot lives");
+    const rootField = view.getByLabelText("Where Remii lives");
 
     await user.clear(rootField);
     await user.type(rootField, rootB);
@@ -1584,7 +1580,7 @@ test.each([
       await user.type(rootField, currentRoot);
     }
     const pending = requests[requests.length - 1];
-    expect(pending.root).toBe(`/tmp/openbot-root-${pendingRoot}`);
+    expect(pending.root).toBe(`/tmp/remii-root-${pendingRoot}`);
     const requestCountBeforeBlur = requests.length;
 
     function expectBlockedSetup() {
@@ -1595,7 +1591,7 @@ test.each([
       expect(
         view.queryByRole("button", { name: "Continue to sign in" }),
       ).toBeNull();
-      expect(view.queryByRole("button", { name: "Start OpenBot" })).toBeNull();
+      expect(view.queryByRole("button", { name: "Start Remii" })).toBeNull();
       expect(requests).toHaveLength(requestCountBeforeBlur);
       expect(invokeCalls.some((call) => call.command === "start_stack")).toBe(
         false,
@@ -1634,8 +1630,8 @@ test.each([
         true,
       );
       await user.click(view.getByRole("button", { name: "Back" }));
-      await user.click(view.getByLabelText("Where OpenBot lives"));
-      await act(async () => view.getByLabelText("Where OpenBot lives").blur());
+      await user.click(view.getByLabelText("Where Remii lives"));
+      await act(async () => view.getByLabelText("Where Remii lives").blur());
     } else {
       await act(async () => rootField.blur());
     }
@@ -1673,7 +1669,7 @@ test.each([
       "value",
       "wss://current.example/ws",
     );
-    const currentStart = view.getByRole("button", { name: "Start OpenBot" });
+    const currentStart = view.getByRole("button", { name: "Start Remii" });
     expect(currentStart).toHaveProperty("disabled", false);
     await user.click(currentStart);
     expect(
@@ -1696,7 +1692,7 @@ test.each([
   },
 );
 
-function useBringYourOwnHarnessSetup() {
+function useHarnessCatalogueSetup() {
   invokeHandler = async (command) => {
     if (command === "prepare_installation") return null;
     if (command === "detect_engine") {
@@ -1707,7 +1703,7 @@ function useBringYourOwnHarnessSetup() {
         detail: "Docker is answering.",
       };
     }
-    if (command === "default_root") return "/tmp/openbot-app-test";
+    if (command === "default_root") return "/tmp/remii-app-test";
     if (command === "already_configured") {
       return {
         values: {},
@@ -1735,15 +1731,15 @@ function useBringYourOwnHarnessSetup() {
           port: 8000,
         },
         {
-          id: "byo-url",
-          name: "An agent you already run",
-          summary: "Give its address.",
+          id: "mastra",
+          name: "Mastra",
+          summary: "TypeScript agents.",
           image: null,
           health_path: null,
-          credential: "their-endpoint",
-          maintainer: "community",
+          credential: "any-provider",
+          maintainer: "partnership",
           mark: null,
-          port: null,
+          port: 4213,
         },
       ];
     }
@@ -1764,105 +1760,6 @@ function useBringYourOwnHarnessSetup() {
   };
 }
 
-async function enterBringYourOwnHarnessEndpoint(agentUrl: string) {
-  const view = await renderApp();
-
-  await userEvent.click(
-    await view.findByRole("button", { name: "Set up OpenBot" }),
-  );
-  await userEvent.click(await view.findByText("Choose the agent framework"));
-  await userEvent.click(
-    await view.findByRole("radio", { name: /An agent you already run/ }),
-  );
-
-  const continueFromHarness = view.getByRole("button", { name: "Continue" });
-  expect(continueFromHarness).toHaveProperty("disabled", true);
-  const agentEndpoint = view.getByLabelText("AG-UI endpoint");
-  if (agentUrl) {
-    await userEvent.type(agentEndpoint, agentUrl.replaceAll("[", "[["));
-  }
-  expect(agentEndpoint).toHaveProperty("value", agentUrl);
-  return view;
-}
-
-test.each([
-  "",
-  "http://",
-  "https://",
-  "httpx://models.example/v1",
-  "httpfoo://models.example/v1",
-  "https://exa mple.example/v1",
-  "HTTP://agent.example/ag-ui",
-  "https:agent.example/ag-ui",
-])("bring-your-own agent refuses startup for URL %s", async (agentUrl) => {
-  useBringYourOwnHarnessSetup();
-  const view = await enterBringYourOwnHarnessEndpoint(agentUrl);
-
-  const continueButton = view.getByRole("button", { name: "Continue" });
-  expect(continueButton).toHaveProperty("disabled", true);
-  await userEvent.click(continueButton);
-  expect(view.getByRole("heading", { name: "Your first Bot" })).toBeTruthy();
-  expect(view.queryByRole("heading", { name: "Connect your AI" })).toBeNull();
-  expect(view.queryByRole("button", { name: "Start OpenBot" })).toBeNull();
-  expect(invokeCalls.filter((call) => call.command === "start_stack")).toEqual(
-    [],
-  );
-});
-
-test.each([
-  ["https://agent.example/ag-ui", "https://agent.example/ag-ui"],
-  ["http://localhost:11434/v1", "http://localhost:11434/v1"],
-  ["https://models.example/v1", "https://models.example/v1"],
-  ["https://bücher.example/ag-ui", "https://bücher.example/ag-ui"],
-  ["http://[::1]:8000/ag-ui", "http://[::1]:8000/ag-ui"],
-  ["  http://localhost:8000/ag-ui  ", "http://localhost:8000/ag-ui"],
-])(
-  "bring-your-own agent collects a distinct AG-UI endpoint for startup: %s",
-  async (agentUrl, expectedAgentUrl) => {
-    useBringYourOwnHarnessSetup();
-    const view = await enterBringYourOwnHarnessEndpoint(agentUrl);
-
-    const continueFromHarness = view.getByRole("button", { name: "Continue" });
-    expect(continueFromHarness).toHaveProperty("disabled", false);
-    await userEvent.click(continueFromHarness);
-    await completeInstallation(view);
-    expect(
-      await view.findByRole("heading", { name: "Connect your AI" }),
-    ).toBeTruthy();
-    await userEvent.click(
-      await view.findByRole("radio", { name: /OpenAI-compatible/ }),
-    );
-    await userEvent.type(
-      view.getByLabelText("Base URL"),
-      "https://provider.example/v1",
-    );
-    await userEvent.type(view.getByLabelText("Model name"), "local-model");
-    await userEvent.click(view.getByRole("button", { name: "Continue" }));
-    await userEvent.click(
-      await view.findByRole("button", { name: "Start OpenBot" }),
-    );
-
-    const payload = getStartStackPayload();
-    expect(
-      invokeCalls.filter((call) => call.command === "start_stack"),
-    ).toHaveLength(1);
-    expect(payload).toEqual({
-      root: "/tmp/openbot-app-test",
-      apiKey: "",
-      apiUrl: "https://api.intelligence.copilotkit.ai",
-      gatewayWsUrl: "wss://realtime.intelligence.copilotkit.ai",
-      harness: { id: "byo-url", agentUrl: expectedAgentUrl },
-      model: {
-        provider: "openai-compatible",
-        login: "endpoint",
-        baseUrl: "https://provider.example/v1",
-        model: "local-model",
-      },
-    });
-    expect(payload.model).not.toHaveProperty("apiKey");
-  },
-);
-
 test.each([
   "http://",
   "https://",
@@ -1877,7 +1774,7 @@ test.each([
   expect(continueButton).toHaveProperty("disabled", true);
   await userEvent.click(continueButton);
   expect(view.getByRole("heading", { name: "Connect your AI" })).toBeTruthy();
-  expect(view.queryByRole("button", { name: "Start OpenBot" })).toBeNull();
+  expect(view.queryByRole("button", { name: "Start Remii" })).toBeNull();
   expect(invokeCalls.filter((call) => call.command === "start_stack")).toEqual(
     [],
   );
@@ -1897,7 +1794,7 @@ test.each(["http://localhost:11434/v1", "https://models.example/v1"])(
       invokeCalls.filter((call) => call.command === "start_stack"),
     ).toHaveLength(1);
     expect(payload).toEqual({
-      root: "/tmp/openbot-app-test",
+      root: "/tmp/remii-app-test",
       apiKey: "",
       apiUrl: "https://api.intelligence.copilotkit.ai",
       gatewayWsUrl: "wss://realtime.intelligence.copilotkit.ai",
@@ -1943,7 +1840,7 @@ test("saved compatible endpoint restores the optional container URL", async () =
   );
 
   const view = await renderApp();
-  await userEvent.click(view.getByRole("button", { name: "Set up OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Set up Remii" }));
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
   await completeInstallation(view);
 
@@ -1952,7 +1849,7 @@ test("saved compatible endpoint restores the optional container URL", async () =
   ).toHaveProperty("value", "http://ollama:11434/v1");
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
   await userEvent.click(
-    await view.findByRole("button", { name: "Start OpenBot" }),
+    await view.findByRole("button", { name: "Start Remii" }),
   );
 
   expect(getStartStackPayload().model).toMatchObject({
@@ -1991,7 +1888,7 @@ for (const provider of [
     async (session) => {
       const planToken = `synthetic-${provider.id}-plan-token`;
       const hiddenKey = `sk-synthetic-${provider.id}-hidden`;
-      useRootConfigurationSetup("/tmp/openbot-app-test", async () => ({
+      useRootConfigurationSetup("/tmp/remii-app-test", async () => ({
         ...emptyConfiguration(),
         saved: {
           ...emptyConfiguration().saved,
@@ -2023,7 +1920,7 @@ for (const provider of [
 
       const view = await renderApp();
       await userEvent.click(
-        await view.findByRole("button", { name: "Set up OpenBot" }),
+        await view.findByRole("button", { name: "Set up Remii" }),
       );
       await userEvent.click(
         await view.findByRole("button", { name: "Continue" }),
@@ -2063,7 +1960,7 @@ for (const provider of [
       );
       await userEvent.click(view.getByRole("button", { name: "Continue" }));
       await userEvent.click(
-        await view.findByRole("button", { name: "Start OpenBot" }),
+        await view.findByRole("button", { name: "Start Remii" }),
       );
 
       const payload = getStartStackPayload();
@@ -2088,7 +1985,7 @@ for (const provider of [
           detail: "Docker is answering.",
         };
       }
-      if (command === "default_root") return "/tmp/openbot-app-test";
+      if (command === "default_root") return "/tmp/remii-app-test";
       if (command === "already_configured") {
         return {
           values: {},
@@ -2139,7 +2036,7 @@ for (const provider of [
     const view = await renderApp();
 
     await userEvent.click(
-      await view.findByRole("button", { name: "Set up OpenBot" }),
+      await view.findByRole("button", { name: "Set up Remii" }),
     );
     await userEvent.click(
       await view.findByRole("button", { name: "Continue" }),
@@ -2157,17 +2054,17 @@ for (const provider of [
 
     await waitFor(() =>
       expect(
-        view.getByRole("button", { name: "Start OpenBot" }),
+        view.getByRole("button", { name: "Start Remii" }),
       ).toHaveProperty("disabled", false),
     );
-    await userEvent.click(view.getByRole("button", { name: "Start OpenBot" }));
+    await userEvent.click(view.getByRole("button", { name: "Start Remii" }));
 
     expect(
       invokeCalls.filter((call) => call.command === "already_configured"),
     ).toEqual([
       {
         command: "already_configured",
-        args: { root: "/tmp/openbot-app-test" },
+        args: { root: "/tmp/remii-app-test" },
       },
     ]);
     for (const call of invokeCalls) {
@@ -2178,7 +2075,7 @@ for (const provider of [
     expect(
       invokeCalls.find((call) => call.command === "start_stack")?.args,
     ).toMatchObject({
-      root: "/tmp/openbot-app-test",
+      root: "/tmp/remii-app-test",
       apiKey: "",
       model: {
         provider: provider.id,
@@ -2190,10 +2087,18 @@ for (const provider of [
   });
 }
 
+/*
+ * `name` AND `plan` ARE BOTH NEEDED, and they are not the same string.
+ *
+ * The button that selects a saved session is labelled after the PRODUCT — "Use a saved ChatGPT
+ * sign-in", "Use a saved Claude sign-in" — while the row a person clicks to pick this provider is
+ * labelled after the COMPANY. Spelling one for the other makes the query miss, and the miss reads
+ * as "the button is not there" rather than as a typo in a test.
+ */
 for (const provider of [
   { id: "openai", name: "OpenAI", plan: "ChatGPT" },
   { id: "anthropic", name: "Anthropic", plan: "Claude" },
-]) {
+] as const) {
   for (const login of ["plan", "api-key"] as const) {
     test(`unknown legacy ${provider.name} ${login} and Intelligence reuse stays passive until Start`, async () => {
       useRootConfigurationSetup("/tmp/synthetic-legacy-root", async () => ({
@@ -2221,7 +2126,7 @@ for (const provider of [
       };
       const view = await renderApp();
       await userEvent.click(
-        await view.findByRole("button", { name: "Set up OpenBot" }),
+        await view.findByRole("button", { name: "Set up Remii" }),
       );
       await userEvent.click(
         await view.findByRole("button", { name: "Continue" }),
@@ -2244,7 +2149,7 @@ for (const provider of [
       );
       await userEvent.click(view.getByRole("button", { name: "Continue" }));
       expect(
-        view.getByRole("button", { name: "Start OpenBot" }),
+        view.getByRole("button", { name: "Start Remii" }),
       ).toHaveProperty("disabled", true);
       await userEvent.click(
         view.getByRole("button", { name: "Use a saved connection" }),
@@ -2263,7 +2168,7 @@ for (const provider of [
         ),
       ).toBe(false);
       await userEvent.click(
-        view.getByRole("button", { name: "Start OpenBot" }),
+        view.getByRole("button", { name: "Start Remii" }),
       );
       await view.findByText("Synthetic saved credential is unavailable.");
       expect(getStartStackPayload()).toMatchObject({
@@ -2295,7 +2200,7 @@ test("Start credential failures do not expose a restore action", async () => {
           setting: "INTELLIGENCE_API_KEY",
           label: "Restore access to saved setup",
           explanation:
-            "This Mac is protecting a credential from your saved OpenBot setup. Restoring access may ask macOS to confirm this app. Your saved data stays in place.",
+            "This Mac is protecting a credential from your saved Remii setup. Restoring access may ask macOS to confirm this app. Your saved data stays in place.",
         },
       };
     return previous(command, args);
@@ -2305,7 +2210,7 @@ test("Start credential failures do not expose a restore action", async () => {
     "synthetic-model-key",
   );
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
-  await userEvent.click(view.getByRole("button", { name: "Start OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Start Remii" }));
 
   expect(
     await view.findByText("Saved credential needs authorization."),
@@ -2332,7 +2237,7 @@ test("the Enter that finishes a composed character does not ask the Bot", async 
   };
   const view = await enterCompatibleEndpoint("https://models.example/v1");
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
-  await userEvent.click(view.getByRole("button", { name: "Start OpenBot" }));
+  await userEvent.click(view.getByRole("button", { name: "Start Remii" }));
   const question = await view.findByLabelText("Your question");
   // Keys land on the focused field.
   await userEvent.click(question);

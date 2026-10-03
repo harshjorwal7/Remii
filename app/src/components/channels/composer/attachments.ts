@@ -1,7 +1,10 @@
 import type { AttachmentsConfig } from "@copilotkit/react-core/v2";
 import {
+  ACCEPTED_AUDIO_MIME,
+  ACCEPTED_DOCUMENT_MIME,
   ACCEPTED_IMAGE_MIME,
   ACCEPTED_TEXT_MIME,
+  ACCEPTED_VIDEO_MIME,
   attachmentUrl,
   MAX_IMAGE_BYTES,
 } from "@/lib/channels/attachments";
@@ -159,6 +162,9 @@ function isUploadedAttachment(body: unknown): body is UploadedAttachment {
 export const FILE_PICKER_ACCEPT = [
   ...ACCEPTED_IMAGE_MIME,
   ...ACCEPTED_TEXT_MIME,
+  ...ACCEPTED_DOCUMENT_MIME,
+  ...ACCEPTED_AUDIO_MIME,
+  ...ACCEPTED_VIDEO_MIME,
   ".png",
   ".jpg",
   ".jpeg",
@@ -168,6 +174,20 @@ export const FILE_PICKER_ACCEPT = [
   ".md",
   ".csv",
   ".json",
+  ".pdf",
+  ".docx",
+  ".xlsx",
+  ".pptx",
+  ".zip",
+  ".gz",
+  ".mp3",
+  ".m4a",
+  ".wav",
+  ".ogg",
+  ".flac",
+  ".mp4",
+  ".mov",
+  ".webm",
 ].join(",");
 
 /**

@@ -11,14 +11,12 @@ export function testEnvironment(
   overrides: Record<string, string | undefined> = {},
 ): Record<string, string | undefined> {
   return {
-    DATABASE_URL: "postgres://openbot:openbot@localhost:5432/openbot",
+    DATABASE_URL: "postgres://remii:remii@localhost:5432/remii",
     KEY_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
     GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
     BETTER_AUTH_SECRET: "a-long-enough-local-development-auth-secret",
     BETTER_AUTH_URL: "http://localhost:3001",
-    // Required whenever a provider is configured: nothing else grants the administrator role.
-    INITIAL_ADMIN_EMAILS: "admin@openbot.test",
     // Required. See server/src/config.ts: there is no runtime without Intelligence.
     INTELLIGENCE_API_URL: "http://localhost:7100",
     INTELLIGENCE_GATEWAY_WS_URL: "ws://localhost:7103",
