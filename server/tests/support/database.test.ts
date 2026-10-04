@@ -26,8 +26,7 @@ describe("TEST_DATABASE_URL", () => {
   test("accepts a dedicated test database", () => {
     expect(
       testDatabaseUrlFrom({
-        TEST_DATABASE_URL:
-          "postgres://remii:remii@localhost:5432/remii_test",
+        TEST_DATABASE_URL: "postgres://remii:remii@localhost:5432/remii_test",
       }),
     ).toBe("postgres://remii:remii@localhost:5432/remii_test");
   });

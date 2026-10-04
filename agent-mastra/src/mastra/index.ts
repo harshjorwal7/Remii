@@ -85,20 +85,19 @@ export function buildRemiiInstructions({
   requestContext,
 }: RemiiInstructionArgs = {}) {
   const contextEntries = agUiContextEntries(requestContext);
-  const remiiInstructions = REMII_CONTEXT_DESCRIPTIONS.flatMap(
-    (description) =>
-      contextEntries
-        .filter(
-          (entry): entry is { description: string; value: string } =>
-            typeof entry === "object" &&
-            entry !== null &&
-            "description" in entry &&
-            entry.description === description &&
-            "value" in entry &&
-            typeof entry.value === "string" &&
-            entry.value.trim().length > 0,
-        )
-        .map((entry) => entry.value.trim()),
+  const remiiInstructions = REMII_CONTEXT_DESCRIPTIONS.flatMap((description) =>
+    contextEntries
+      .filter(
+        (entry): entry is { description: string; value: string } =>
+          typeof entry === "object" &&
+          entry !== null &&
+          "description" in entry &&
+          entry.description === description &&
+          "value" in entry &&
+          typeof entry.value === "string" &&
+          entry.value.trim().length > 0,
+      )
+      .map((entry) => entry.value.trim()),
   );
 
   if (remiiInstructions.length === 0) return remiiBaseInstructions;

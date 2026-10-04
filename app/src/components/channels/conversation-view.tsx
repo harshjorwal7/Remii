@@ -1,5 +1,6 @@
 import type { Message } from "@ag-ui/core";
 import type { Attachment } from "@copilotkit/react-core/v2";
+import type { PromptAreaHandle } from "prompt-area";
 import {
   type ReactNode,
   useCallback,
@@ -21,6 +22,7 @@ import {
 } from "@/components/channels/composer";
 import { attachmentUrl } from "@/lib/channels/attachments";
 import type { ChannelActivityBrief } from "@/lib/channels/queries";
+import { liveRun, patchLiveRun, useLiveRun } from "@/lib/copilot/live-runs";
 import { newId } from "../../lib/new-id";
 
 export function ConversationView({
@@ -40,6 +42,7 @@ export function ConversationView({
   activity = null,
   onSubmit,
   onStop,
+  editorRef,
 }: {
   messages: readonly Message[];
   busy?: boolean;
@@ -47,7 +50,8 @@ export function ConversationView({
   notice?: ReactNode;
   agents?: readonly AgentOption[];
   /**
-   * The `/` menu for this Bot's granted skills, supplied by the route that owns grant loading.
+   * The `/` menu and the resolution table for this Bot: skills, hidden component chips, and the
+   * component/repo pickers, assembled by the route that owns grant loading.
    */
   commands?: readonly CommandOption[];
   /**
@@ -95,6 +99,8 @@ export function ConversationView({
   onSubmit: (draft: ComposerDraft) => void | Promise<void>;
   /** Stop the Bot mid-answer; forwarded to turn the send button into a stop button. */
   onStop?: () => void;
+  /** Passed through so a `/components` or `/repo` picker can drop its pick into the draft. */
+  editorRef?: { current: PromptAreaHandle | null };
   /**
    * What is running in this channel right now, or null. Drawn above the composer.
    *
@@ -111,11 +117,17 @@ export function ConversationView({
    * is where the person has to be able to see that it landed. This is the nearest thing that owns
    * them both, and putting the list in either one would mean handing it straight back out again.
    *
-   * See `composer/queue.ts` for what this state is worth: it is memory in one tab, it does not
-   * survive a reload, and it is not an outbox.
+   * AND IT LIVES IN THE STORE BECAUSE PARKED WORDS ARE NOT A RENDER EFFECT. The queue used to be
+   * memory in this mount, and a conversation this screen leaves for another took whatever was
+   * parked in it with it, after the person watched their words land on screen. `liveRun` holds the
+   * list where the turns themselves already live, so the same list is there — and still theirs —
+   * when the conversation comes back. See `lib/copilot/live-runs.ts` for why the store rather than
+   * the route owns what outlives the route.
+   *
+   * See `composer/queue.ts` for what this list can hold and how a join is built from it.
    */
-  const [queued, setQueued] = useState<readonly QueuedMessage[]>([]);
-  const queuedRef = useRef<readonly QueuedMessage[]>(queued);
+  const storeKey = channelId ?? "no-channel";
+  const { queued } = useLiveRun(storeKey);
 
   /**
    * Files the queue left behind AND the reason it did, forwarded to the composer so it can say so
@@ -162,11 +174,9 @@ export function ConversationView({
   const inFlight = pending || running;
 
   /**
-   * Every change to the queue goes through here, so the ref and the state can never disagree.
-   *
-   * The ref is what the decisions read. React state is a render behind, and both callers below have
-   * to know what is actually queued at the moment they are called rather than at the moment they
-   * were last rendered — one of them is an effect firing on the same commit that emptied the list.
+   * Every change to the queue goes through here, and the store is the one place it can change.
+   * The store is updated synchronously, so a caller that reads `liveRun(storeKey).queued` at
+   * the moment it is called does not have to wait on a render the way the `useState` answer did.
    *
    * THE WHOLE TRANSITION COMES BACK, NOT JUST THE RUN. It used to hand back `next.run` alone, which
    * was every caller's whole interest until a failed run became something either of them had to
@@ -174,77 +184,51 @@ export function ConversationView({
    * contributed, and that is on the transition beside it. Recomputing it out here would mean
    * re-deriving from a queue this function has already emptied.
    */
-  const apply = useCallback((action: QueueAction) => {
-    const next = reduceQueue(queuedRef.current, action);
-    queuedRef.current = next.queue;
-    setQueued(next.queue);
-    // Only on an actual drop, so a settle or a remove that let go of nothing does not hand the
-    // composer a fresh empty array it has no reason to react to.
-    if (next.droppedAttachments.length > 0) {
-      /*
-       * THE ACTION IS WHAT SAYS WHICH OF THE TWO CAUSES THIS WAS, and this is the only place that
-       * has both halves. `reduceQueue` reports the same `Attachment[]` whether the files were
-       * bumped off a merged draft by the cap or carried out of the queue by a message somebody
-       * removed, so the cause cannot be recovered downstream — and the composer's sentence for one
-       * of them is false about the other.
-       */
-      for (const attachment of next.droppedAttachments) {
-        releaseStagedAttachment(attachment);
-      }
-      setDroppedAttachments({
-        attachments: next.droppedAttachments,
-        cause:
-          action.type === "remove"
-            ? "queued-message-removed"
-            : "merged-over-cap",
-      });
-    }
-    return next;
-  }, []);
-
-  /**
-   * WALKING AWAY WITH SOMETHING STILL PARKED IS THE THIRD WAY A ROW LOSES ITS LAST REFERENCE, and
-   * until this it was the one way that said nothing and gave nothing back.
-   *
-   * IT USED TO BE THE FOURTH, and the one that went was a way a row should never have lost its last
-   * reference at all: a drained turn whose send failed used to release everything it was carrying.
-   * That one is now a restore — the messages go back in the queue, still holding their rows — so
-   * the ways out are the two in `apply` above, a removal and the cap's excess, and this.
-   *
-   * The other two go through `apply` above. This one goes through React:
-   * `queue.ts` is candid that the queue "lives and dies with the component holding it" and that
-   * switching channels "takes anything parked in it with it" — but that paragraph is about the
-   * person's WORDS, which they watched land on screen and can retype. It was never a statement
-   * about the staged rows underneath them, and `releaseStagedAttachment` is explicit that a parked
-   * entry holds the only reference anything has to those.
-   *
-   * WHAT IT COSTS TO SKIP, stated because it is smaller than the other two and the fix should be
-   * priced honestly: the upload cap is scoped by `uploadGroup`, minted per composer mount, so this
-   * orphan does not refuse anybody's next pick the way a removal's would — the composer that staged
-   * it is gone and its group with it. It is storage held for up to a day by
-   * `cull-staged-attachments.ts`, not a 409. Worth releasing anyway, because the row is bytes in a
-   * table nobody will ever ask for again and the release is two lines.
-   *
-   * BEST-EFFORT IN THE STRICTEST SENSE. This runs during teardown, so the requests go out into a
-   * component that is already gone and nothing here could act on an answer even in principle —
-   * which is exactly what `releaseStagedAttachment` already is. A tab CLOSING is not this path at
-   * all and is not chased: the page is going, `fetch` on the way out is not reliable, and the
-   * sweeper is the honest answer for that one.
-   *
-   * The ref rather than the state, for the reason `apply` records: on an unmount that follows a
-   * transition in the same commit, the state is a render behind and the ref is not. Empty on
-   * StrictMode's development double-mount, which makes that pass a no-op.
-   */
-  useEffect(
-    () => () => {
-      for (const message of queuedRef.current) {
-        for (const attachment of message.attachments) {
+  const apply = useCallback(
+    (action: QueueAction) => {
+      const next = reduceQueue(liveRun(storeKey).queued, action);
+      patchLiveRun(storeKey, { queued: next.queue });
+      // Only on an actual drop, so a settle or a remove that let go of nothing does not hand the
+      // composer a fresh empty array it has no reason to react to.
+      if (next.droppedAttachments.length > 0) {
+        /*
+         * THE ACTION IS WHAT SAYS WHICH OF THE TWO CAUSES THIS WAS, and this is the only place that
+         * has both halves. `reduceQueue` reports the same `Attachment[]` whether the files were
+         * bumped off a merged draft by the cap or carried out of the queue by a message somebody
+         * removed, so the cause cannot be recovered downstream — and the composer's sentence for one
+         * of them is false about the other.
+         */
+        for (const attachment of next.droppedAttachments) {
           releaseStagedAttachment(attachment);
         }
+        setDroppedAttachments({
+          attachments: next.droppedAttachments,
+          cause:
+            action.type === "remove"
+              ? "queued-message-removed"
+              : "merged-over-cap",
+        });
       }
+      return next;
     },
-    [],
+    [storeKey],
   );
+
+  /*
+   * THERE IS NO UNMOUNT RELEASE ANY MORE, AND THAT IS THE POINT.
+   *
+   * The queue used to be `useState` in this screen, so leaving a conversation released the staged
+   * rows under everything somebody had parked in it — the files behind a queued correction given
+   * back with nothing on screen to say so. It was not a reference-counted truth either: the words
+   * the person typed reached them and vanished, and the files were swept
+   * as the rent for a mistake of a different size.
+   *
+   * The store holds the queue now and the conversation the queue belongs to, rather than this
+   * screen, so nothing is released on unmount. The ways a row still leaves the queue are the two
+   * that say so: a removal, which pays the row back beside the message it was riding, and a join
+   * into a run, which carries the rows by reference into the send. A removed message's attachments
+   * are paid back through `reduceQueue`'s `droppedAttachments`, exactly as before.
+   */
 
   /**
    * A RUN BUILT OUT OF THIS QUEUE FAILED, SO THE DRAIN WAITS FOR A TURN BEFORE TRYING AGAIN.
@@ -374,7 +358,7 @@ export function ConversationView({
       heldBack.current = false;
       return;
     }
-    if (disabled || heldBack.current || queuedRef.current.length === 0) {
+    if (disabled || heldBack.current || liveRun(storeKey).queued.length === 0) {
       return;
     }
     const next = apply({ type: "settle" });
@@ -416,7 +400,7 @@ export function ConversationView({
        */
       restoreFailedRun(carried);
     });
-  }, [apply, disabled, inFlight, restoreFailedRun]);
+  }, [apply, disabled, inFlight, restoreFailedRun, storeKey]);
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -474,6 +458,7 @@ export function ConversationView({
           autoFocus={autoFocus}
           {...(channelId ? { channelId } : {})}
           {...(commands ? { commands } : {})}
+          {...(editorRef ? { editorRef } : {})}
           className="w-full mt-auto"
           compact
           disabled={disabled}

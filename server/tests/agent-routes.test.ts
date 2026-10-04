@@ -224,11 +224,15 @@ describe("agent input parser", () => {
         endpoint: "https://agents.example.com/ag-ui",
       }),
     ).toMatchObject({ ok: false });
-    expect(parseAgentInput({ ...validInput, auth: { value: "Bearer x" } })).toMatchObject({
+    expect(
+      parseAgentInput({ ...validInput, auth: { value: "Bearer x" } }),
+    ).toMatchObject({
       ok: false,
     });
     // Absent is still fine: the deployment decides where a coworker runs.
-    expect(parseAgentInput({ ...validInput, endpoint: undefined })).toMatchObject({
+    expect(
+      parseAgentInput({ ...validInput, endpoint: undefined }),
+    ).toMatchObject({
       ok: true,
     });
   });
@@ -370,9 +374,9 @@ describe("agent lifecycle routes", () => {
     // Bot at an address of its own, which is exactly the belief this route exists to remove.
     expect(created.status).toBe(400);
     expect(updated.status).toBe(400);
-    expect(store.calls.filter(([op]) => op === "create" || op === "update")).toEqual(
-      [],
-    );
+    expect(
+      store.calls.filter(([op]) => op === "create" || op === "update"),
+    ).toEqual([]);
   });
 
   test("projects exact DTO fields and computes permissions for the authenticated actor", async () => {
@@ -562,7 +566,11 @@ describe("agent lifecycle routes", () => {
     }
 
     expect(store.calls).toEqual([
-      ["create", actor, { ...validInput, systemPrompt: validInput.roleDescription }],
+      [
+        "create",
+        actor,
+        { ...validInput, systemPrompt: validInput.roleDescription },
+      ],
       ["update", actor, "agent-1", validInput],
     ]);
   });
@@ -623,14 +631,11 @@ describe("agent lifecycle routes", () => {
       },
     });
 
-    const response = await appFor(store).request(
-      "http://remii.test/agent-1",
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(validInput),
-      },
-    );
+    const response = await appFor(store).request("http://remii.test/agent-1", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(validInput),
+    });
 
     expect(response.status).toBe(status);
     expect(await json(response)).toEqual({ error: message });
@@ -647,12 +652,9 @@ describe("agent lifecycle routes", () => {
       context.json({ sentinel: error.message }, 599),
     );
 
-    const response = await app.request(
-      "http://remii.test/agent-1/duplicate",
-      {
-        method: "POST",
-      },
-    );
+    const response = await app.request("http://remii.test/agent-1/duplicate", {
+      method: "POST",
+    });
 
     expect(response.status).toBe(599);
     expect(await json(response)).toEqual({ sentinel: "database disconnected" });
@@ -740,10 +742,7 @@ describe("which Bots a Bot may hand work to", () => {
       context.set("actor", who);
       await next();
     };
-    app.route(
-      "/",
-      createAgentRoutes(fakeStore(), asWho, undefined, handoff),
-    );
+    app.route("/", createAgentRoutes(fakeStore(), asWho, undefined, handoff));
     return app;
   }
 

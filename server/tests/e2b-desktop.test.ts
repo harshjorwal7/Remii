@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
-  MODEL_IMAGE_WIDTH,
   captureScreenshot,
   computerUseFor,
+  type E2BDesktopLike,
+  MODEL_IMAGE_WIDTH,
   machineFor,
   normaliseKey,
-  type E2BDesktopLike,
 } from "../src/computer/e2b-desktop";
 
 /**
@@ -25,10 +25,16 @@ import {
  */
 
 /** A sandbox that records what it was asked to do. */
+let sandboxCounter = 0;
 const makeSandbox = (overrides: Partial<E2BDesktopLike> = {}) => {
   const log: string[] = [];
+  sandboxCounter += 1;
   const sandbox = {
-    sandboxId: "sbx-1",
+    // Unique per stub by default. Every detector in e2b-desktop.ts is keyed on the id, because a
+    // `Sandbox.connect` handle is a new object every call and the cache that matters must survive
+    // that. A hardcoded shared id collapses all the isolated stubs into one cache entry and makes
+    // every test here a test of an unrelated test's answer.
+    sandboxId: `sbx-${sandboxCounter}`,
     display: ":0",
     log,
     commands: {

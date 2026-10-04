@@ -1,4 +1,11 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -51,18 +58,22 @@ function extract(
   store: unknown,
   extra: { apiKey?: string; userText?: string; assistantText?: string } = {},
 ) {
-  return import("../src/remi/memory-extract").then(({ extractMemoriesAfterRun }) =>
-    extractMemoriesAfterRun({
-      store: store as never,
-      botId: "remii",
-      actorId: "user-1",
-      userText: extra.userText ?? "Remind me to call the accountant about the invoice.",
-      assistantText:
-        extra.assistantText ?? "Noted — I will remind you to call the accountant.",
-      model: MODEL,
-      environment: { OPENAI_BASE_URL: server.url.toString() },
-      ...(extra.apiKey ? { apiKey: extra.apiKey } : {}),
-    }),
+  return import("../src/remi/memory-extract").then(
+    ({ extractMemoriesAfterRun }) =>
+      extractMemoriesAfterRun({
+        store: store as never,
+        botId: "remii",
+        actorId: "user-1",
+        userText:
+          extra.userText ??
+          "Remind me to call the accountant about the invoice.",
+        assistantText:
+          extra.assistantText ??
+          "Noted — I will remind you to call the accountant.",
+        model: MODEL,
+        environment: { OPENAI_BASE_URL: server.url.toString() },
+        ...(extra.apiKey ? { apiKey: extra.apiKey } : {}),
+      }),
   );
 }
 

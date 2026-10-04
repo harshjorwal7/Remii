@@ -31,7 +31,7 @@ function profile(over: Partial<AgentProfile> & { id: string }): AgentProfile {
     avatarSeed: over.id,
     visibility: "public",
     endpoint: null,
-    
+
     hidden: false,
     systemOwned: false,
     canManage: false,

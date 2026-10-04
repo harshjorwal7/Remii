@@ -1,4 +1,11 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import type { ComponentType } from "react";
@@ -129,7 +136,8 @@ async function mount(props: ComputerViewProps) {
 const hasLiveScreen = (container: HTMLElement) =>
   container.querySelector("iframe") !== null;
 const hasStillFrame = (container: HTMLElement) =>
-  container.querySelector('img[alt="What the assistant is looking at"]') !== null;
+  container.querySelector('img[alt="What the assistant is looking at"]') !==
+  null;
 
 describe("the watch panel, which has no turn of its own", () => {
   test("shows the live stream while a run is going, with no still frame to begin with", async () => {
@@ -156,7 +164,9 @@ describe("the watch panel, which has no turn of its own", () => {
       name: "Panel Bot",
     });
 
-    await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 300));
+    });
     await waitFor(() => expect(streamCalls).toBeGreaterThan(0));
   });
 

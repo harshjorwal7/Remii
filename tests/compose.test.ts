@@ -21,7 +21,6 @@ function rootDockerfile() {
   return readFileSync(join(import.meta.dir, "..", "Dockerfile"), "utf8");
 }
 
-
 function runLangGraphAguiModelProbe(
   openaiBaseUrl: string | undefined,
   options: {

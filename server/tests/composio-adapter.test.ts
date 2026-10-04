@@ -1651,10 +1651,7 @@ describe("telling this deployment's auth configs from anybody else's", () => {
     // Adopting the hand-made one would have this deployment mint connections against scopes it
     // cannot see and delete an operator's work when the app is removed.
     expect(created).toEqual([
-      [
-        "linear",
-        { type: "use_composio_managed_auth", name: "Linear (Remii)" },
-      ],
+      ["linear", { type: "use_composio_managed_auth", name: "Linear (Remii)" }],
     ]);
   });
 });

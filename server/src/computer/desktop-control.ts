@@ -38,6 +38,41 @@ export type DesktopState = {
   isolation: "per-person";
 };
 
+/**
+ * How recently each person's screen was looked at, per process.
+ *
+ * Only ever read to decide whether a write is due, so an entry that outlives its usefulness costs
+ * nothing but a few bytes — there is no cleanup, deliberately, because a `setInterval` sweeping a map
+ * is more machinery than the problem deserves and a periodic timer is one more thing to stop when the
+ * server shuts down.
+ */
+const watchedAt = new Map<string, number>();
+
+/**
+ * How often `last_seen_at` may be rewritten by looking at the screen.
+ *
+ * Thirty seconds, matching the provisioner's own `touch` cadence for the same column. The idle sweep
+ * that reads this decides on a scale of minutes, so a slower write cannot change its answer, and the
+ * browser polls this route far more often than that.
+ */
+const WATCH_WRITE_INTERVAL_MS = 30_000;
+
+/**
+ * Record that a person is looking at this computer right now.
+ *
+ * Fire-and-forget on purpose: this rides along with a status poll whose answer must not wait on a
+ * write, and a failed heartbeat costs one idle sweep's opinion rather than the request. Nothing is
+ * awaited and nothing is thrown — the desktop being watched is unaffected either way.
+ */
+function markWatched(store: UserComputerStore, userId: string): void {
+  const now = Date.now();
+  if (now - (watchedAt.get(userId) ?? 0) < WATCH_WRITE_INTERVAL_MS) return;
+  watchedAt.set(userId, now);
+  void Promise.resolve(store.patch(userId, { lastSeenAt: new Date() })).catch(
+    () => undefined,
+  );
+}
+
 export function createDesktopControlRoutes(
   store: UserComputerStore,
   requireUser: MiddlewareHandler<{ Variables: AppVariables }>,
@@ -148,8 +183,30 @@ export function createDesktopControlRoutes(
    * prove they have not, and a Bot that meets a missing row should get on with the work.
    */
   app.get("/control", requireUser, async (context) => {
-    const row = await store.get(context.var.actor.id);
-    const secretWanted = readSecretWanted?.(context.var.actor.id);
+    const userId = context.var.actor.id;
+    const row = await store.get(userId);
+    /*
+     * "Somebody has this computer open on their screen" counts as using it.
+     *
+     * Without this, a person watching their Bot work — the exact thing this product is for — could
+     * have the machine paused out from under them. The idle sweep reads `last_seen_at`, and until now
+     * the only thing that wrote it was a tool call, so a screen sitting still after the Bot finished
+     * a step stopped looking alive and got reclaimed while it was being looked at. The noVNC bytes go
+     * from the browser straight to the sandbox and never pass through this process, so nothing else
+     * here could possibly notice that a human was present.
+     *
+     * This is the cheapest honest signal available: a poll the browser already makes, answered from the
+     * row this handler was going to read anyway. It costs one throttled database write and, crucially,
+     * NO round trip to the sandbox — unlike the screenshot poll, which resolves the whole desktop just
+     * to draw a frame. So the machine stays alive for someone watching without competing with the Bot
+     * for the machine it is driving.
+     *
+     * Throttled to the same cadence the provisioner uses for its own `touch`, because a write per
+     * poll would put a database write in front of every status check, and because the sweep's own
+     * resolution is minutes — thirty seconds of staleness cannot change its answer.
+     */
+    markWatched(store, userId);
+    const secretWanted = readSecretWanted?.(userId);
     return context.json({
       ...read(row?.controlHolder, row?.controlSince),
       /*
@@ -202,6 +259,13 @@ export function createDesktopControlRoutes(
     const row = await store.patch(context.var.actor.id, {
       controlHolder: "human",
     });
+    /*
+     * Taking the wheel is the strongest possible statement that this computer is wanted, so it counts
+     * as activity for the idle sweep even before any tool call follows. The browser polls `/control`
+     * continuously anyway, so this is belt-and-braces rather than the only signal — but it makes the
+     * intent explicit at the exact moment it is expressed, which is worth a throttled write.
+     */
+    markWatched(store, context.var.actor.id);
     return context.json(read(row?.controlHolder ?? "human", row?.controlSince));
   });
 

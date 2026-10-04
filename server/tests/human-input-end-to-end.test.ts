@@ -98,14 +98,11 @@ function appFor(baseUrl: string) {
 async function drive(kind: string, body: unknown) {
   const { received, baseUrl } = serveComputer();
   const { app, rows } = appFor(baseUrl);
-  const response = await app.request(
-    `http://remii.test/bot-1/human/${kind}`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
+  const response = await app.request(`http://remii.test/bot-1/human/${kind}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
   return { response, received, rows };
 }
 

@@ -36,15 +36,32 @@ export function seedMessage(text: string, id: string): Message {
  * Deliberately not persisted. A reload finds nothing here, which is correct, by then the message
  * is in the thread and arrives through the normal replay.
  */
-const firstMessages = new Map<string, string>();
+const firstMessages = new Map<string, StashedFirstMessage>();
 
-export function stashFirstMessage(channelId: string, text: string): void {
-  firstMessages.set(channelId, text);
+export type StashedFirstMessage = {
+  text: string;
+  /**
+   * Skill/component instructions that travel with the first message, already resolved against the
+   * command list at stash time. The compose screen that writes here holds that list; the channel
+   * that reads this back must not have to guess it. Without this, a `/` chip on the first message
+   * drew a badge in the transcript but never taught the Bot anything.
+   */
+  instructions: string[];
+};
+
+export function stashFirstMessage(
+  channelId: string,
+  text: string,
+  instructions: string[] = [],
+): void {
+  firstMessages.set(channelId, { text, instructions });
 }
 
 /** Read the pending first message and forget it. Null for a channel opened any other way. */
-export function takeFirstMessage(channelId: string): string | null {
-  const text = firstMessages.get(channelId) ?? null;
+export function takeFirstMessage(
+  channelId: string,
+): StashedFirstMessage | null {
+  const pending = firstMessages.get(channelId) ?? null;
   firstMessages.delete(channelId);
-  return text;
+  return pending;
 }

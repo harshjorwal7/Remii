@@ -83,3 +83,50 @@ test("a channel that cannot be started still fails the send", async () => {
     startWithChosen({ agentId: "risk-analyst", text: "hello", record, start }),
   ).rejects.toThrow("Could not start a channel");
 });
+
+/*
+ * The half of this sequence that was missing. A `/` chip on the first message of a new channel used
+ * to be drawn in the transcript and never reach the Bot, because the text was all that travelled:
+ * the compose screen built the command menu, resolved nothing, and started the channel with a
+ * string. What a chip stands for has to ride alongside the text or the chip is a decoration.
+ */
+test("carries what the invoked commands stand for into the new channel", async () => {
+  const started: { text: string; instructions: string[] }[] = [];
+
+  await startWithChosen({
+    agentId: "risk-analyst",
+    text: "/show-bar-chart draw it",
+    instructions: [
+      "The person asked for this on screen. Draw it with the `showBarChart` component.",
+    ],
+    record: async () => undefined,
+    start: async (agentId, text, instructions = []) => {
+      started.push({ text, instructions });
+      expect(agentId).toBe("risk-analyst");
+    },
+  });
+
+  expect(started).toEqual([
+    {
+      text: "/show-bar-chart draw it",
+      instructions: [
+        "The person asked for this on screen. Draw it with the `showBarChart` component.",
+      ],
+    },
+  ]);
+});
+
+test("starts a channel whose first message invoked nothing with nothing to add", async () => {
+  const started: string[][] = [];
+
+  await startWithChosen({
+    agentId: "risk-analyst",
+    text: "hello",
+    record: async () => undefined,
+    start: async (_agentId, _text, instructions = []) => {
+      started.push(instructions);
+    },
+  });
+
+  expect(started).toEqual([[]]);
+});

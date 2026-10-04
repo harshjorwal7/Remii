@@ -115,9 +115,7 @@ async function validate(nativePath: string) {
     existsSync(nativePath),
     `Build the native telemetry_probe example first: ${nativePath}`,
   );
-  const scratch = await mkdtemp(
-    join(tmpdir(), "remii-telemetry-validation-"),
-  );
+  const scratch = await mkdtemp(join(tmpdir(), "remii-telemetry-validation-"));
   const received: Captured[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",

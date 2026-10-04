@@ -2866,11 +2866,8 @@ describe("a dynamic client the vendor has evicted", () => {
     const registered = await registeredRows();
     expect(registered.length).toBe(registeredBefore.length + 1);
     // Whoever pressed Connect, because for a first registration that IS the act that caused it.
-    expect(
-      registeredBy(registered, "someone@remii.test", FRESH.clientId),
-    ).toBe(
-      registeredBy(registeredBefore, "someone@remii.test", FRESH.clientId) +
-        1,
+    expect(registeredBy(registered, "someone@remii.test", FRESH.clientId)).toBe(
+      registeredBy(registeredBefore, "someone@remii.test", FRESH.clientId) + 1,
     );
   });
 

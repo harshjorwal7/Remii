@@ -32,7 +32,6 @@ function template(id: string, name: string): AgentProfile {
     hidden: false,
     deletedAt: null,
     endpoint: null,
-    
   };
 }
 

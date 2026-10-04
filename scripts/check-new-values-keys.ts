@@ -74,9 +74,7 @@ function paths(value: unknown, prefix = ""): string[] {
 }
 
 const before = new Set(
-  paths(
-    parse(await run(["git", "show", `${since}:charts/remii/values.yaml`])),
-  ),
+  paths(parse(await run(["git", "show", `${since}:charts/remii/values.yaml`]))),
 );
 const now = paths(parse(await Bun.file("charts/remii/values.yaml").text()));
 /*

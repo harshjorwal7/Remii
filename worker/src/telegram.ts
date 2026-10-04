@@ -31,12 +31,15 @@ async function botCall(
   method: string,
   params: Record<string, unknown>,
 ): Promise<unknown> {
-  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(params),
-    signal: AbortSignal.timeout(40_000),
-  });
+  const response = await fetch(
+    `https://api.telegram.org/bot${token}/${method}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(params),
+      signal: AbortSignal.timeout(40_000),
+    },
+  );
   if (!response.ok) {
     throw new Error(`Telegram ${method} answered ${response.status}.`);
   }
@@ -136,7 +139,12 @@ export async function runTelegramLoop(
         .filter((id): id is string => typeof id === "string" && id.length > 0);
       const documentFileId = incoming?.document?.file_id;
       if (chatId === undefined) continue;
-      if (!text.trim() && !voiceFileId && photoFileIds.length === 0 && !documentFileId) {
+      if (
+        !text.trim() &&
+        !voiceFileId &&
+        photoFileIds.length === 0 &&
+        !documentFileId
+      ) {
         continue;
       }
       if (update.message && "from" in update.message) {

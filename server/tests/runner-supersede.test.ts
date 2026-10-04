@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AbstractAgent, BaseEvent } from "@ag-ui/client";
-import { Observable } from "rxjs";
+import type { Observable } from "rxjs";
 import type { AgentRunnerRunRequest } from "@copilotkit/runtime";
 import { PostgresAgentRunner, type ThreadStore } from "../src/threads/local";
 
@@ -131,9 +131,11 @@ function firstEvent(stream: Observable<BaseEvent>): Promise<BaseEvent> {
  * Returns a handle so the test can close it when it is done, and to observe whether superseding closed
  * it on its own.
  */
-function heldRun(
-  stream: Observable<BaseEvent>,
-): { opened: Promise<BaseEvent>; ended: Promise<void>; close: () => void } {
+function heldRun(stream: Observable<BaseEvent>): {
+  opened: Promise<BaseEvent>;
+  ended: Promise<void>;
+  close: () => void;
+} {
   let settle: () => void = () => {};
   const ended = new Promise<void>((resolve) => {
     settle = resolve;

@@ -54,11 +54,13 @@ import { asText, forDisplay, REFUSAL_MARKER } from "@/lib/plugins/tool-result";
 import { cn } from "@/lib/utils";
 import {
   attachmentModality,
+  groupChatWork,
   type SentAttachment,
   toVisibleChatItems,
   type VisibleChatItem,
 } from "./chat-messages";
 import type { QueuedMessage } from "./composer";
+import { ThoughtProcess } from "./thought-process";
 import { ToolRenderBoundary } from "./tool-boundary";
 import { ToolLine } from "./tool-line";
 
@@ -1270,6 +1272,74 @@ const TranscriptToolCall = memo(function TranscriptToolCall({
 });
 
 /**
+ * WHAT THE MODEL SAID IT WAS DOING, drawn at the size of the process it is rather than as prose.
+ *
+ * A thought is not an answer and must not read like one: no markdown, no bubble, no paragraph
+ * rhythm, and nothing that would let a reader mistake the Bot's working notes for what it then told
+ * them. It sits inside the turn's disclosure with the tool lines, in the same muted small type a
+ * tool result is drawn in, which is the shared visual object for "something the Bot did that you
+ * can open".
+ *
+ * `whitespace-pre-wrap` because reasoning arrives in paragraphs and a run of them has to keep their
+ * breaks to be readable at all.
+ */
+function TranscriptThinking({ text }: { text: string }) {
+  return (
+    <p className="my-0 whitespace-pre-wrap text-xs text-muted-foreground">
+      {text}
+    </p>
+  );
+}
+
+/**
+ * ONE TURN'S WORK, AS THE DISCLOSURE IT IS NOW DRAWN AS.
+ *
+ * The rows are rendered here rather than passed in, for the reason `TranscriptToolCall` gives about
+ * `useRenderToolCall`: a function whose identity the parent cannot guarantee is the classic way to
+ * make a memo boundary useless, and each row is already memoised on its own primitives. Folding
+ * changes only the disclosure around them, never what a row draws.
+ *
+ * `busy` IS THE WHOLE TRANSCRIPT'S BUSINESS, passed down rather than derived from the rows: whether
+ * this conversation is mid-turn is one fact, it is already known at the top, and a row asked to work
+ * it out from its own neighbours would disagree with the Working line above the composer at exactly
+ * the moment a person is watching both.
+ */
+function TranscriptWork({
+  answered,
+  busy,
+  rows,
+}: {
+  answered: boolean;
+  busy: boolean;
+  rows: readonly VisibleChatItem[];
+}) {
+  return (
+    <ThoughtProcess answered={answered} busy={busy}>
+      {rows.map((row) =>
+        row.kind === "tool" ? (
+          <TranscriptToolCall
+            args={row.toolCall.function.arguments}
+            delay={0}
+            key={row.id}
+            name={row.toolCall.function.name}
+            {...(row.result === undefined ? {} : { result: row.result })}
+            toolCallId={row.toolCall.id}
+          />
+        ) : row.kind === "thinking" ? (
+          <TranscriptThinking key={row.id} text={row.text} />
+        ) : /*
+         * Unreachable by construction: `groupChatWork` only ever puts tool and thinking rows in
+         * `rows`. This is here because the union is enforced at the projection rather than
+         * trusted here, and a row that somehow was not one of those two would otherwise render
+         * nothing and take its neighbours' spacing with it.
+         */
+        null,
+      )}
+    </ThoughtProcess>
+  );
+}
+
+/**
  * A tool the runtime executed, drawn for the person watching.
  *
  * Named from the reader's side: what was done, against which server, with the server's own words
@@ -1450,11 +1520,17 @@ export function ChatTranscript({
    * dependency never changed, the cached items were kept forever and a reply never appeared. A Bot
    * that answered looked like a Bot that had not.
    *
-   * It was never the expensive part either. Rebuilding this list is a flatMap over messages; the
-   * cost was markdown parsing and chart SVGs, and those are skipped by the memoised children below,
-   * which is where the 25x came from. This runs per render and is not worth guarding.
+   * It was never the expensive part either. Rebuilding this list is a flatMap over messages followed
+   * by one pass that folds each turn's work into a single row; the cost was markdown parsing and
+   * chart SVGs, and those are skipped by the memoised children below, which is where the 25x came
+   * from. This runs per render and is not worth guarding.
+   *
+   * THE GROUPING IS WHAT MAKES A BUSY TURN WATCHABLE, and it is here rather than inside the
+   * projection so the projection stays a flatMap of what each message produced. `groupChatWork`
+   * folds a run of tool and thinking rows into one disclosure that opens while the answer is still
+   * being produced and folds the moment it starts arriving.
    */
-  const items = toVisibleChatItems(messages);
+  const items = groupChatWork(toVisibleChatItems(messages));
 
   /*
    * ONLY WHILE THERE IS NOTHING ELSE TO LOOK AT. Once a reply starts streaming, or a tool line
@@ -1607,6 +1683,14 @@ export function ChatTranscript({
                     toolCallId={item.toolCall.id}
                   />
                 </MessageScrollerItem>
+              ) : item.kind === "work" ? (
+                <MessageScrollerItem key={item.id} messageId={item.id}>
+                  <TranscriptWork
+                    answered={item.answered}
+                    busy={busy}
+                    rows={item.rows}
+                  />
+                </MessageScrollerItem>
               ) : item.kind === "activity" ? (
                 <MessageScrollerItem key={item.id} messageId={item.id}>
                   <TranscriptActivity
@@ -1637,6 +1721,17 @@ export function ChatTranscript({
                     attachments={item.attachments}
                     delay={delays.delayFor(item.id, index, items.length)}
                   />
+                </MessageScrollerItem>
+              ) : item.kind === "thinking" ? (
+                <MessageScrollerItem key={item.id} messageId={item.id}>
+                  {/*
+                   * Unreachable while `groupChatWork` is what builds this list — a thinking row is
+                   * work, so it arrives inside a `work` group and nowhere else. It is handled here
+                   * because the union is enforced at the projection and trusted nowhere: a row that
+                   * somehow reached the top level draws as itself rather than falling into
+                   * `assertNever` and taking the conversation down with a type error at runtime.
+                   */}
+                  <TranscriptThinking text={item.text} />
                 </MessageScrollerItem>
               ) : (
                 // Every member of the union is handled above. `assertNever` types `item` as

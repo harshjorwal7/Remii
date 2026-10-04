@@ -45,7 +45,9 @@ const PROBE_USER = "probe_live_desktop_check";
 
 const results: string[] = [];
 const ok = (label: string, pass: boolean, detail = "") => {
-  results.push(`${pass ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`);
+  results.push(
+    `${pass ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`,
+  );
   if (!pass) process.exitCode = 1;
 };
 
@@ -102,14 +104,20 @@ try {
   // Guarded, because an account without volumes answers this with a 403 and the point of the check is
   // to keep going rather than to die in the setup.
   volumeName = await Volume.list(connection)
-    .then((volumes) => volumes.map((v) => v.name).find((n) => n.includes("probe")) ?? null)
+    .then(
+      (volumes) =>
+        volumes.map((v) => v.name).find((n) => n.includes("probe")) ?? null,
+    )
     .catch(() => null);
 
   console.log(
     `desktop ${sandboxId} up in ${Date.now() - began}ms, status=${row.status}, ` +
       `geometry=${row.displayWidth}x${row.displayHeight}`,
   );
-  ok("a desktop was created and reports itself running", row.status === "RUNNING");
+  ok(
+    "a desktop was created and reports itself running",
+    row.status === "RUNNING",
+  );
   ok(
     "its geometry is what it was asked to be",
     row.displayWidth === 1280 && row.displayHeight === 720,
@@ -117,16 +125,26 @@ try {
   );
   ok("the row names a sandbox", Boolean(sandboxId));
 
-  const sandbox = (await provisioner.sandboxFor(scope)) as unknown as E2BDesktopLike;
+  const sandbox = (await provisioner.sandboxFor(
+    scope,
+  )) as unknown as E2BDesktopLike;
   const machine = machineFor(sandbox);
   const use = computerUseFor(sandbox);
 
   // 2. The screen, from OUTSIDE. This is the assertion the whole migration rests on.
   console.log("\nopening the live screen…");
   const session = await provisioner.streamUrlFor(scope);
-  console.log(`url: ${session.url.replace(/password=[^&]*/, "password=<redacted>")}`);
-  ok("a noVNC URL and a separate password were issued", Boolean(session.url && session.authKey));
-  ok("the password is not folded into the URL", !session.url.includes(session.authKey));
+  console.log(
+    `url: ${session.url.replace(/password=[^&]*/, "password=<redacted>")}`,
+  );
+  ok(
+    "a noVNC URL and a separate password were issued",
+    Boolean(session.url && session.authKey),
+  );
+  ok(
+    "the password is not folded into the URL",
+    !session.url.includes(session.authKey),
+  );
 
   const base = new URL(session.url);
   const wsUrl = `${base.origin}/websockify`;
@@ -157,9 +175,17 @@ try {
   await machine.writeFile("live-check.txt", "written-by-the-check");
   ok("a file wrote", true);
   const readBack = await machine.readFile("live-check.txt");
-  ok("it reads back", readBack === "written-by-the-check", JSON.stringify(readBack));
+  ok(
+    "it reads back",
+    readBack === "written-by-the-check",
+    JSON.stringify(readBack),
+  );
   const listed = await machine.listFiles("");
-  ok("it is listed", listed.some((e) => e.name === "live-check.txt"), `${listed.length} entries`);
+  ok(
+    "it is listed",
+    listed.some((e) => e.name === "live-check.txt"),
+    `${listed.length} entries`,
+  );
 
   /*
    * WHERE THE WORKSPACE ACTUALLY IS.
@@ -187,7 +213,10 @@ try {
   ok("the tools can screenshot the desktop", Boolean(shot.screenshot));
 
   // 6. The key mapping, on a real desktop rather than in a test double.
-  ok("Enter becomes Return, which is what xdotool types", normaliseKey("Enter") === "Return");
+  ok(
+    "Enter becomes Return, which is what xdotool types",
+    normaliseKey("Enter") === "Return",
+  );
 
   // 4b. THE REGRESSION THAT MATTERS MOST: opening it AGAIN.
   //
@@ -226,8 +255,14 @@ try {
     matches.stdout.trim() === "MATCH",
     matches.stdout.trim(),
   );
-  const bannerAgain = await readRfbBanner(`${new URL(second.url).origin}/websockify`).catch((e) => String(e));
-  ok("the RFB endpoint still answers after the second open", bannerAgain.startsWith("RFB "), bannerAgain);
+  const bannerAgain = await readRfbBanner(
+    `${new URL(second.url).origin}/websockify`,
+  ).catch((e) => String(e));
+  ok(
+    "the RFB endpoint still answers after the second open",
+    bannerAgain.startsWith("RFB "),
+    bannerAgain,
+  );
 
   // 4c. HOW LONG "TAKE CONTROL" TAKES, asserted rather than hoped for.
   //
@@ -240,7 +275,9 @@ try {
     await provisioner.streamUrlFor(scope);
     warm.push(Date.now() - at);
   }
-  console.log(`  warm screen open x3: ${warm.map((ms) => `${ms}ms`).join("  ")}`);
+  console.log(
+    `  warm screen open x3: ${warm.map((ms) => `${ms}ms`).join("  ")}`,
+  );
   /*
    * The MEDIAN, not the worst, and the reason is worth stating rather than looking like leniency.
    *
@@ -281,7 +318,10 @@ try {
   // 5. Persistence.
   console.log("\npausing and resuming…");
   await provisioner.stopIdle(scope, "idle");
-  ok("the desktop was paused, not deleted", (store.read()!.status as string) === "STOPPED");
+  ok(
+    "the desktop was paused, not deleted",
+    (store.read()!.status as string) === "STOPPED",
+  );
 
   const resumed = await provisioner.ensure(scope);
   ok(
@@ -290,7 +330,9 @@ try {
     `status=${resumed.status}`,
   );
 
-  const afterSandbox = (await provisioner.sandboxFor(scope)) as unknown as E2BDesktopLike;
+  const afterSandbox = (await provisioner.sandboxFor(
+    scope,
+  )) as unknown as E2BDesktopLike;
   const survived = await machineFor(afterSandbox).readFile("live-check.txt");
   ok(
     "the file survived pause and resume",
@@ -298,7 +340,12 @@ try {
     JSON.stringify(survived),
   );
 } catch (error) {
-  console.error("\nCHECK THREW:", error instanceof Error ? error.stack?.slice(0, 1500) : String(error).slice(0, 800));
+  console.error(
+    "\nCHECK THREW:",
+    error instanceof Error
+      ? error.stack?.slice(0, 1500)
+      : String(error).slice(0, 800),
+  );
   process.exitCode = 1;
 } finally {
   if (sandboxId) {
@@ -306,7 +353,9 @@ try {
     const { Sandbox } = await import("@e2b/desktop");
     await Sandbox.connect(sandboxId, connection)
       .then((s) => s.kill())
-      .catch((error: unknown) => console.log("delete failed:", String(error).slice(0, 200)));
+      .catch((error: unknown) =>
+        console.log("delete failed:", String(error).slice(0, 200)),
+      );
   }
   if (volumeName) {
     console.log(
@@ -345,7 +394,9 @@ function readRfbBanner(url: string, timeoutMs = 15_000): Promise<string> {
       const bytes =
         typeof event.data === "string"
           ? event.data
-          : new TextDecoder("latin1").decode(new Uint8Array(event.data as ArrayBuffer));
+          : new TextDecoder("latin1").decode(
+              new Uint8Array(event.data as ArrayBuffer),
+            );
       socket.close();
       resolve(bytes.slice(0, 12));
     };

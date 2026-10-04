@@ -30,6 +30,7 @@ import {
 
 import {
   ComputerRowExistsError,
+  singleFlight,
   type UserComputer,
   type UserComputerStore,
 } from "./user-computers";
@@ -270,7 +271,31 @@ function createScopedProvisioner<
       .catch(() => undefined);
   }
 
-  async function ensure(scope: ProvisionScope): Promise<Row> {
+  /**
+   * Bring one person's desktop up, collapsing concurrent attempts onto one.
+   *
+   * `singleFlight` because two callers racing on a cold user each built a machine.
+   *
+   * The interleaving was reachable and expensive. Caller A reads a row with no sandbox, inserts one,
+   * lists sandboxes (empty), and starts `Sandbox.create`. Caller B, a few hundred ms behind, reads
+   * the row A just inserted — which has `sandboxId: null` — so it skips the `getInfo` branch, is
+   * excluded from the concurrency cap (which only counts rows WITH a sandbox id), lists sandboxes
+   * again, still sees nothing, and creates a SECOND sandbox. One user, two desktops, one row pointing
+   * at whichever won. The loser is orphaned: nothing references it, nothing pauses it, and it bills
+   * roughly $0.17/hour until E2B's own timeout deletes it days later.
+   *
+   * The row insert alone cannot prevent this — `ComputerRowExistsError` guards the INSERT, and both
+   * callers succeed at that. The window is the create itself, and the only thing that closes it is
+   * not doing it twice.
+   *
+   * Keyed on the scope key, which is the person. Two different people are still provisioned
+   * concurrently, which is the point — this is a per-user lock, not a global one.
+   */
+  function ensure(scope: ProvisionScope): Promise<Row> {
+    return singleFlight(`e2b-ensure:${scope.key}`, () => ensureOnce(scope));
+  }
+
+  async function ensureOnce(scope: ProvisionScope): Promise<Row> {
     const existing = await store.get(scope.key);
     if (existing && existing.status !== "DELETED" && existing.sandboxId) {
       /*
@@ -876,9 +901,27 @@ function createScopedProvisioner<
     lastTouchedAt.delete(scope.key);
     const row = await store.get(scope.key);
     if (row?.sandboxId) {
-      await Sandbox.connect(row.sandboxId, connection)
-        .then((sandbox) => sandbox.pause({ keepMemory: true }))
-        .catch(() => undefined);
+      /*
+       * Ask before connecting, because `Sandbox.connect` RESUMES.
+       *
+       * The sweep only reaches here for rows it believes are running, and it is often wrong: E2B's own
+       * `onTimeout` will have paused the sandbox out from under a row that still says RUNNING, and the
+       * sweep runs on a minute cadence while that can happen at any moment. Connecting in that state
+       * woke the machine — seconds of restoring a memory snapshot, plus billable runtime — purely so
+       * the next line could pause it again. So a machine that is already stopped is simply recorded as
+       * stopped.
+       *
+       * `getInfo` rather than `connect` for the same reason `ensure` uses it: asking whether a machine
+       * is up must never be the act of waking it.
+       */
+      const alreadyStopped = await Sandbox.getInfo(row.sandboxId, connection)
+        .then((info) => info.state !== "running")
+        .catch(() => true);
+      if (!alreadyStopped) {
+        await Sandbox.connect(row.sandboxId, connection)
+          .then((sandbox) => sandbox.pause({ keepMemory: true }))
+          .catch(() => undefined);
+      }
     }
     await Promise.resolve(hooks.onSessionEnd?.(scope, reason)).catch(
       () => undefined,
@@ -1154,12 +1197,31 @@ function createScopedProvisioner<
     },
     recordGeometry,
     /** Resolve one person's running desktop as the live screen and the tools need it. */
-    sandboxFor: (scope: ProvisionScope) =>
-      ensure(scope).then((row) =>
+    sandboxFor: (scope: ProvisionScope) => {
+      /*
+       * The memo next to a tool call, not a second full `ensure`.
+       *
+       * `resolveDesktopFor` calls `ensureDesktop` and then `sandboxFor` on the same scope, back to
+       * back — and `sandboxFor` used to run its own unmemoised `ensure` regardless, which re-read the
+       * row, re-asked `getInfo`, and potentially re-drove a resume on every single tool call. The
+       * first call had just verified and cached the row; reading it back through the same map, so the
+       * handle is built and nothing else is re-asked, removes a `SELECT`, a `getInfo` and, on a cold
+       * sandbox, an unnecessary resume from the hot path of every `computer_*` call.
+       *
+       * A miss on the memo is not an error and not dead-code: the memoicing list covers another
+       * instance, or a TTL that lapsed between server boot and the first read, so falling through to
+       * `ensure` is the whole answer rather than a workaround.
+       */
+      const warm = desktopMemo.get(scope.key);
+      if (warm && Date.now() - warm.at < desktopTtlMs && warm.row.sandboxId) {
+        return Sandbox.connect(warm.row.sandboxId, connection);
+      }
+      return ensure(scope).then((row) =>
         row.sandboxId
           ? Sandbox.connect(row.sandboxId, connection)
           : Promise.reject(new Error("This computer has no sandbox yet.")),
-      ),
+      );
+    },
     /** Ask one person's desktop for its noVNC URL, starting the VNC server if it is not up. */
     streamUrlFor: (scope: ProvisionScope) => ensureStream(scope),
   };

@@ -181,6 +181,32 @@ const MAX_TOOL_ITEMS = 15;
 const MAX_TOOL_JSON = 4000;
 
 /**
+ * HOW MANY TIMES A RUN MAY ASK THE MODEL TO FINISH WHAT IT STARTED.
+ *
+ * The loop used to end the moment the model stopped asking for tools, which made a Bot that gave up
+ * half way through a task indistinguishable from one that had finished it: same `RUN_FINISHED`, same
+ * silence, no reason on the wire. Asking again is the fix, and this is the bound on how many times
+ * it may ask — a model that has genuinely nothing left to say is asked this once more and then let
+ * go, rather than narrated to indefinitely.
+ */
+const MAX_CONTINUATIONS = 3;
+
+/**
+ * THE WORDS A CONTINUATION IS ASKED WITH.
+ *
+ * Deliberately about the CONVERSATION and not about the loop. The model is told it has work in
+ * progress and asked to finish it or say what stopped it; it is not told it is in a loop, how many
+ * steps it has taken, or that anything is watching for the run to end. A nudge that describes its
+ * own machinery is a nudge the model can satisfy by narrating instead of doing — the exact failure
+ * this is here to prevent. Told what is outstanding rather than what to do about it, the same
+ * weights either carry on or say honestly that they cannot.
+ */
+const CONTINUE_AFTER_WORK =
+  "You have work in progress from this turn and have not finished it. If the task is complete, " +
+  "give the person the result now. If it is not, take the next step. If you cannot continue, say " +
+  "what is stopping you and what is left to do — do not stop silently.";
+
+/**
  * Why a run stopped, in the words of whatever stopped it.
  *
  * A run can be ended by the person at the keyboard, by the loop breaker that caps iterative tool
@@ -220,9 +246,23 @@ function textOfMessage(message: Message): string {
   return "";
 }
 
+/**
+ * Shorten a tool result that is too long to keep whole.
+ *
+ * THE HEAD IS WHAT MATTERS, so the head is what survives. This used to keep the first 2500 characters
+ * AND the last 1000, on the reasoning that a tail often carries the answer. For structured output that is
+ * a reasonable bet; for the one tool that returns a document — `computer_read_file` — it silently
+ * produces a plausible-looking splice of the beginning and end of a file with the middle removed, and
+ * nothing marks where the join is. A model given that will reason about a file it has never seen and
+ * answer confidently.
+ *
+ * So the cut is a clean prefix with the omission stated, and it is stated as a count so the model can
+ * decide whether to go and read the rest rather than assuming it has.
+ */
 function truncateToolText(value: string): string {
   if (value.length <= MAX_TOOL_JSON) return value;
-  return `${value.slice(0, 2500)}\n... [Truncated ${value.length - 3500} characters] ...\n${value.slice(-1000)}`;
+  const kept = MAX_TOOL_JSON - 200;
+  return `${value.slice(0, kept)}\n\n[Truncated: ${value.length - kept} more characters were not shown. Do not assume this is the whole result — read the rest or narrow the query.]`;
 }
 
 export function truncateToolValue(value: unknown, depth = 0): unknown {
@@ -480,7 +520,66 @@ export function pruneContext(
   return kept;
 }
 
+/**
+ * The model said a call produced no answer before the history ended, so that gets one: a tool
+ * message, straight after the call. No call ever ships unpaired — an assistant with an open call
+ * is the one shape every provider refuses.
+ */
+export const UNANSWERED_CALL =
+  "This call produced no result: the surface was interrupted before it could answer. Do not assume it succeeded.";
+
+/**
+ * Message history, in the shape the wire APIs require — not the row order in which the conversation
+ * happens to be stored.
+ *
+ * The conversation is persisted one row per message, so an assistant message carrying one call and
+ * an assistant message carrying the next call land side by side, and the two results land *after*
+ * both, or even across a later exchange. Providers do not accept that, and DeepSeek rejects it
+ * twice over with `400 An assistant message with 'tool_calls' must be followed by tool messages
+ * responding to each 'tool_call_id'.`, which failed whole conversations server-side, the same way
+ * `AI_MissingToolResultsError` did on routines:
+ *
+ * 1. assistant(tool_calls=[A]), assistant(tool_calls=[B]), tool(A), tool(B) — each call IS
+ *    answered, so `sanitizeSeededHistory` keeps both, and a row-order conversion hands the pair
+ *    off the way it was written. The wire format requires every assistant message with calls to be
+ *    answered by ITS tool messages immediately after it, so the order in the rows is never right.
+ * 2. tool(A), ..., assistant(tool_calls=[A]) — a result buried before its own call. The browser
+ *    repairs that shape in `repair-history.ts`; history must not depend on the sender having
+ *    remembered to call its own repair, so this pass does it too.
+ *
+ * Same for an assistant call with no result anywhere: `sanitizeSeededHistory` strips the call from
+ * history, but a resume answer or a different surface may supply a result at the last moment, or
+ * not at all — hence it ships with the caller entirely possible without an answer, it does not
+ * exist here, and a little stub companion:
+ *
+ *   assistant(tool_calls=[A]), tool(A, UNANSWERED_CALL).
+ *
+ * WHAT IS DROPPED, unchanged from before: a tool row that answers nothing a kept call asked for —
+ * it answers nothing, and a provider refuses it for the mirror-image reason.
+ */
 export function historyToOpenAI(history: Message[]): OpenAIMessage[] {
+  /*
+   * Pass 1: call ids of every assistant-made call, and every tool row available as an answer, by
+   * location. Results may sit before, between, or after their call; they answer by id, wherever
+   * they sat. First unconsumed result for a call id is the one the call gets — the later one is
+   * a stored echo and answers nothing this conversion will reach for.
+   */
+  const toolRows: { index: number; toolCallId: string; message: Message }[] =
+    [];
+  for (const [index, message] of history.entries()) {
+    if ((message as { role?: string }).role !== "tool") continue;
+    const { toolCallId } = message as { toolCallId?: string };
+    if (typeof toolCallId === "string")
+      toolRows.push({ index, toolCallId, message });
+  }
+  /** Results this pass still owes a call. */
+  const unclaimedByCallId = new Map<string, (typeof toolRows)[number][]>();
+  for (const row of toolRows) {
+    const list = unclaimedByCallId.get(row.toolCallId);
+    if (list) list.push(row);
+    else unclaimedByCallId.set(row.toolCallId, [row]);
+  }
+
   const out: OpenAIMessage[] = [];
   for (const message of history) {
     const role = (message as { role?: string }).role;
@@ -506,17 +605,29 @@ export function historyToOpenAI(history: Message[]): OpenAIMessage[] {
             }
           : {}),
       } as OpenAIMessage);
+      // The contract above: whatever the stored order was, this call's answers FLANKED it in
+      // history; they answer by id and land here, followed by a stub for what the interrupted
+      // turn never supplied.
+      for (const call of toolCalls ?? []) {
+        const candidates = unclaimedByCallId.get(call.id) ?? [];
+        const found = candidates.shift() ?? null;
+        if (candidates.length === 0) unclaimedByCallId.delete(call.id);
+        if (found) {
+          out.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: textOfMessage(found.message),
+          });
+        } else {
+          out.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: UNANSWERED_CALL,
+          });
+        }
+      }
     } else if (role === "tool") {
-      const { toolCallId } = message as { toolCallId?: string };
-      if (!toolCallId) continue;
-      out.push({
-        role: "tool",
-        tool_call_id: toolCallId,
-        content: textOfMessage(message),
-      });
     } else if (role === "system" || role === "developer") {
-      // Kept, unlike the old runtime which dropped these: skill instructions arrive as
-      // system rows, and dropping them silently un-teaches every skill.
       const text = textOfMessage(message);
       if (text) out.push({ role: "system", content: text });
     }
@@ -910,9 +1021,28 @@ export class RemiLoopAgent extends AbstractAgent {
         },
       );
 
-      return () => {
-        controller.abort();
-      };
+      /*
+       * THE RUN'S OWN SIGNAL IS NOT THIS SUBSCRIPTION'S TO ABORT, and it used to be.
+       *
+       * This teardown fired on unsubscribe, which made "nobody is watching any more" and "stop
+       * working" the same event. Everything that walks away from a run walks away from a
+       * subscription first: a browser closing a tab, the SSE connection dropping, a component
+       * unmounting, the metering wrapper detaching once it has read the usage it wanted. A person
+       * who closes a tab has not asked for their work to stop, and the run had already been
+       * designed to survive it — `threads/local.ts` says so in as many words, and the channel
+       * deliberately keeps executing for up to the run budget after the browser is gone. That
+       * promise was not true here.
+       *
+       * What a run ends on is now only what actually means it: `abortRun` and `abortRunWithReason`
+       * from a caller that means to stop it — the person at the keyboard, the loop breaker, the
+       * continuous-execution deadline. Those arrive as an abort on this same signal, because the
+       * budgets are enforced by cancelling, so the two paths that matter are untouched by this.
+       *
+       * THE SIGNAL IS NOT ABANDONED, which is the obvious wrong turn. A run with no subscriber
+       * still has to notice a stop, and it does: `emit` writes into an unsubscribed observer, which
+       * is a no-op, and the abort lands on the same `controller.signal` the loop is watching. So
+       * the run keeps working, keeps listening for a stop, and simply has nowhere to report to.
+       */
     });
   }
 
@@ -1104,15 +1234,38 @@ export class RemiLoopAgent extends AbstractAgent {
         return `Tool "${name}" was not started because this run reached its time budget.`;
       }
       const effectiveTimeoutMs = Math.min(toolTimeoutMs, remainingRunMs);
-      const timeout = new Promise<string>((resolve) =>
-        setTimeout(
-          () =>
-            resolve(
-              `Tool "${name}" timed out after ${Math.round(effectiveTimeoutMs / 1000)} seconds.`,
-            ),
-          effectiveTimeoutMs,
-        ),
-      );
+      /*
+       * A TOOL THAT TIMED OUT IS TOLD TO STOP, not merely walked away from.
+       *
+       * The run's own abort already reaches the tool through `signal`, but the timeout did not: the
+       * race below resolved with a sentence, the model read it, and the tool carried on regardless. On
+       * a computer that is the worst of the three outcomes. A `computer_click` that timed out had very
+       * probably already been sent — the timeout is the RESPONSE being late, not the action — so the
+       * click landed after the model had read "timed out", read the screen, seen no change, and clicked
+       * again. That is a double press caused by our own bookkeeping, and it is the same shape as the
+       * duplicate retries this file already had to reason about elsewhere.
+       *
+       * So a per-tool controller is derived from the run's signal and aborted when the deadline passes,
+       * which is the only signal the tool has to distinguish "the run is over" from "you took too long
+       * and must not act". It is a real cancellation for anything that honours a signal, and a no-op
+       * for anything that does not — the same bargain the run's own abort makes, so nothing new is
+       * being promised of a tool here.
+       */
+      const toolController = new AbortController();
+      const onRunAbort = () => toolController.abort();
+      if (signal.aborted) toolController.abort();
+      else signal.addEventListener("abort", onRunAbort, { once: true });
+      const toolSignal = toolController.signal;
+      let timedOut = false;
+      const timeout = new Promise<string>((resolve) => {
+        setTimeout(() => {
+          timedOut = true;
+          toolController.abort();
+          resolve(
+            `Tool "${name}" timed out after ${Math.round(effectiveTimeoutMs / 1000)} seconds. It may have partly run, so look at the screen before trying again rather than repeating the same action.`,
+          );
+        }, effectiveTimeoutMs);
+      });
       /*
        * STOP DOES NOT WAIT FOR THE TOOL.
        *
@@ -1144,7 +1297,7 @@ export class RemiLoopAgent extends AbstractAgent {
       else signal.addEventListener("abort", onAbort, { once: true });
       try {
         const result = await Promise.race([
-          tool.execute(parsed.data, signal),
+          tool.execute(parsed.data, toolSignal),
           timeout,
           stopped,
         ]);
@@ -1159,7 +1312,17 @@ export class RemiLoopAgent extends AbstractAgent {
          * abort is different: the run is over, there is no model left to read a workaround, and
          * swallowing it meant a stopped run kept going. Rethrown so the run's own abort handler
          * sees it, which is what reports the stop and closes the stream.
+         *
+         * A TIMEOUT is the third case, and it is not an abort of the RUN: `timedOut` says our own
+         * deadline fired rather than a person pressing Stop, so the run carries on and the model is
+         * waiting for an answer. The tool's abort surfaces here as a rejection, and answering it as
+         * "Error: The operation was aborted" would describe our bookkeeping rather than what
+         * happened — so the timeout sentence is returned instead, which is the one that tells the
+         * model to look before acting again.
          */
+        if (timedOut) {
+          return `Tool "${name}" timed out after ${Math.round(effectiveTimeoutMs / 1000)} seconds. It may have partly run, so look at the screen before trying again rather than repeating the same action.`;
+        }
         if (signal.aborted || (error as Error)?.name === "AbortError") {
           throw error;
         }
@@ -1168,6 +1331,7 @@ export class RemiLoopAgent extends AbstractAgent {
         return `Error: ${error instanceof Error ? error.message : String(error)}`;
       } finally {
         signal.removeEventListener("abort", onAbort);
+        signal.removeEventListener("abort", onRunAbort);
       }
     };
 
@@ -1199,6 +1363,21 @@ export class RemiLoopAgent extends AbstractAgent {
        * ask, `maxDurationMs` bounds how long one turn can occupy a channel.
        */
       let step = 0;
+      /*
+       * WHAT THE LOOP KNOWS ABOUT THE TASK, WHICH IS NOT THE SAME AS WHAT THE MODEL SAYS.
+       *
+       * `workedThisTurn` is the fact the whole continuation rule turns on: this run has actually
+       * done something, rather than answered in one step. It is set when a tool runs, which is a
+       * fact about the wire and not a judgement about the model — a model that called a tool and
+       * then said nothing has left something unfinished by definition, because the tool's result is
+       * sitting in its context unanswered.
+       *
+       * `continuations` is how many times this run has been asked to finish, and it is bounded
+       * because the alternative to a bound is a Bot that narrates "let me continue" until its time
+       * budget expires, which is a worse thing to watch than an honest early stop.
+       */
+      let workedThisTurn = false;
+      let continuations = 0;
       for (
         ;
         step < maxSteps && Date.now() - startedAt < maxDurationMs;
@@ -1251,7 +1430,47 @@ export class RemiLoopAgent extends AbstractAgent {
           },
         );
 
-        if (found.length === 0) break;
+        /*
+         * THE MODEL STOPPED ASKING FOR TOOLS, which is where a run used to end — silently, on the
+         * model's own judgement, with nothing on the wire to say whether the task was finished.
+         *
+         * THAT IS FINE FOR A CONVERSATION and wrong for a job. "Hi" produces no tool calls and
+         * nothing is outstanding; a model that has just read four files and then said no more has
+         * left its own work unanswered, and the browser cannot tell the two apart: both arrive as
+         * `RUN_FINISHED` with the same silence. So the distinction made here is whether this run has
+         * DONE anything, which is on the wire, rather than whether the answer looks finished, which
+         * is not something this loop can see.
+         *
+         * ASKED AT MOST `MAX_CONTINUATIONS` TIMES, and the continuation is a turn in the
+         * conversation rather than a message to the machinery — see `CONTINUE_AFTER_WORK` for why
+         * that wording is the load-bearing part. A model that cannot get further says so in the
+         * next step, which is the answer this whole change is after: a Bot that is stuck now says
+         * it is stuck, rather than going quiet and being read as finished.
+         */
+        if (found.length === 0) {
+          if (
+            !workedThisTurn ||
+            stepText.trim() !== "" ||
+            continuations >= MAX_CONTINUATIONS ||
+            step + 1 >= maxSteps ||
+            Date.now() - startedAt >= maxDurationMs
+          ) {
+            break;
+          }
+          continuations += 1;
+          /*
+           * AS A USER TURN, which is what it is: something the person has not said, standing in for
+           * the "and?" they are not there to type. A system turn would put machinery into the
+           * conversation and a model is far more likely to comply with a system instruction than
+           * with one wearing a person's clothes — so the words ask rather than instruct, and the
+           * rest of the message says what a person would have said, which is the question.
+           */
+          messages.push({
+            role: "user",
+            content: CONTINUE_AFTER_WORK,
+          });
+          continue;
+        }
 
         // The turn the model spoke, for the next request: text plus every call it made.
         messages.push({
@@ -1315,6 +1534,14 @@ export class RemiLoopAgent extends AbstractAgent {
           });
           emit({ type: EventType.REASONING_END, messageId: heartbeatId });
         };
+
+        /*
+         * THE FACT THE CONTINUATION RULE TURNS ON, recorded here because this is where "this run
+         * did something" becomes true. It is set the moment a tool is dispatched rather than when
+         * it returns, so a tool that throws — which is a result too, the Remi way — still counts as
+         * work and the run is still asked to finish what it started.
+         */
+        if (serverCalls.length > 0) workedThisTurn = true;
 
         const results = await Promise.all(
           serverCalls.map(async (call) => {
@@ -1400,6 +1627,31 @@ export class RemiLoopAgent extends AbstractAgent {
         }
       }
 
+      /*
+       * WHY THE RUN ENDED, in the words of whatever ended it.
+       *
+       * Every terminal path used to emit the same bare `RUN_FINISHED` with `finishReason: "stop"`,
+       * so a turn that ran out of steps, one that ran out of time, and one the model simply ended
+       * were the same event on the wire. The browser has one surface for "this turn ended without
+       * an answer" and prints whatever it is given, so a run cut short at a limit was drawn as a run
+       * that finished — which is the whole reason the client now treats a stated reason as something
+       * to show even when text came back.
+       *
+       * The step and time budgets are checked in this order because they are also the order a
+       * person can act on: "you ran out of room" is a different fact from "you ran out of time", and
+       * a run that ended because the model stopped asking for tools says neither.
+       */
+      const outOfSteps = step >= maxSteps;
+      const outOfTime = Date.now() - startedAt >= maxDurationMs;
+      /*
+       * A SUMMARY PASS THAT FAILED IS A RUN THAT ENDED WITHOUT SAYING, and it used to be a
+       * `RUN_FINISHED` with no text on it at all: the `catch` below swallowed the failure and the
+       * turn fell through to the finish event having produced nothing a person could read. That is
+       * the one terminal path that was genuinely silent rather than merely unexplained, and it is
+       * what a person meets when a provider refuses the closing request after a long job.
+       */
+      let summaryFailed = false;
+
       // Max steps reached mid-work: one final text-only pass so the turn ends on an answer,
       // not on a raw tool result. Pure Remi.
       const lastIsToolCall =
@@ -1407,7 +1659,7 @@ export class RemiLoopAgent extends AbstractAgent {
         messages[messages.length - 1]?.role === "assistant" &&
         ((messages[messages.length - 1] as { tool_calls?: unknown[] })
           .tool_calls?.length ?? 0) > 0;
-      if (step >= maxSteps && lastIsToolCall) {
+      if (outOfSteps && lastIsToolCall) {
         // Its own message: this is a turn of its own, and reusing the loop's last id would merge
         // this closing answer into whichever step happened to be last.
         const summaryMessageId = randomUUID();
@@ -1429,15 +1681,43 @@ export class RemiLoopAgent extends AbstractAgent {
             () => {},
           );
         } catch {
-          // A failed summary pass must not fail a turn that already did its work.
+          /*
+           * The turn's WORK must not be failed by its closing sentence — everything above stands.
+           * But the run did end without an answer, and this is the place that says so, because after
+           * this catch the finish event below is the only thing left the browser will see.
+           */
+          summaryFailed = true;
         }
       }
+
+      const finishReason = summaryFailed
+        ? "The work is done, but the Bot could not summarize it: its closing request failed. " +
+          "What it did is above."
+        : outOfSteps
+          ? `This turn used all ${maxSteps} steps of its budget and was ended. What it did is above, ` +
+            `and there may be more to do.`
+          : outOfTime
+            ? `This turn ran out of time (${Math.round(maxDurationMs / 60_000)} minutes) and was ` +
+              `ended. What it did is above, and there may be more to do.`
+            : `This turn ended before the Bot finished answering.`;
 
       emit({
         type: EventType.RUN_FINISHED,
         threadId: input.threadId,
         runId: input.runId,
         finishReason: "stop",
+        /*
+         * The sentence the browser prints under the transcript when a turn ends without an answer.
+         * Emitted only when the run genuinely has nothing to show: a turn that answered normally
+         * carries no message here, because a notice under every successful answer would be noise
+         * rather than information.
+         */
+        ...(assistantText.trim() === "" ||
+        summaryFailed ||
+        outOfSteps ||
+        outOfTime
+          ? { message: finishReason }
+          : {}),
         usage: [
           {
             provider: usedProvider,

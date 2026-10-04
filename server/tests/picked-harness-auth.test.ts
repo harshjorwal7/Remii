@@ -177,7 +177,6 @@ async function runPicked(options: {
         ]
       : rows;
   });
-  });
   let failed = false;
   try {
     const loaded = await createRuntimeAgentLoader(
@@ -256,9 +255,7 @@ test("an endpoint this deployment does not run receives no deployment token", as
     target: "elsewhere",
   });
   expect(result.requests.map((request) => request.status)).toEqual([200]);
-  expect(result.requests[0]?.headerNames).not.toContain(
-    "x-remii-agent-token",
-  );
+  expect(result.requests[0]?.headerNames).not.toContain("x-remii-agent-token");
 });
 
 /*
@@ -304,11 +301,6 @@ test.each([
     expect(result.failed).toBe(false);
   },
 );
-  expect(result.requests.map((request) => request.status)).toEqual([200]);
-  expect(result.requests[0]?.headerNames).not.toContain(
-    "x-remii-agent-token",
-  );
-});
 
 test("a picked installed harness requires a token even when the Bot in the box is omitted", () => {
   expect(() =>

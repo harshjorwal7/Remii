@@ -6,7 +6,7 @@ import {
   expect,
   test,
 } from "bun:test";
-import { type Message, type RunAgentInput } from "@ag-ui/core";
+import type { Message, RunAgentInput } from "@ag-ui/core";
 import { CopilotKitProvider, useCopilotKit } from "@copilotkit/react-core/v2";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -149,7 +149,9 @@ beforeAll(() => {
        * so it is asserted rather than assumed.
        */
       if (/\/stop\//.test(url.pathname)) {
-        const threadId = decodeURIComponent(url.pathname.split("/stop/")[1] ?? "");
+        const threadId = decodeURIComponent(
+          url.pathname.split("/stop/")[1] ?? "",
+        );
         stopRequests.push(threadId);
         runningInChannel = null;
         return NativeResponse.json({ stopped: true });

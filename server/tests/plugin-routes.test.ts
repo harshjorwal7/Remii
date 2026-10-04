@@ -468,18 +468,15 @@ describe("granting one Bot to another", () => {
   test("a grant on their own app is accepted", async () => {
     const { calls, app } = grantsApp();
 
-    const response = await app.request(
-      "http://remii.test/api/plugins/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: "bot",
-          ref: "knowledge",
-          agentId: "assistant",
-        }),
-      },
-    );
+    const response = await app.request("http://remii.test/api/plugins/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "bot",
+        ref: "knowledge",
+        agentId: "assistant",
+      }),
+    });
 
     expect(response.status).toBe(200);
     // The Bot named in the body got it, and the trail names the session's administrator: the row is
@@ -546,18 +543,15 @@ describe("granting one Bot to another", () => {
       (agentId) => agentId !== "assistant",
     );
 
-    const response = await app.request(
-      "http://remii.test/api/plugins/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: "bot",
-          ref: "knowledge",
-          agentId: "assistant",
-        }),
-      },
-    );
+    const response = await app.request("http://remii.test/api/plugins/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "bot",
+        ref: "knowledge",
+        agentId: "assistant",
+      }),
+    });
 
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({
@@ -570,18 +564,15 @@ describe("granting one Bot to another", () => {
   test("a kind nobody defined is refused rather than written", async () => {
     const { calls, app } = grantsApp();
 
-    const response = await app.request(
-      "http://remii.test/api/plugins/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: "anything",
-          ref: "x",
-          agentId: "assistant",
-        }),
-      },
-    );
+    const response = await app.request("http://remii.test/api/plugins/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "anything",
+        ref: "x",
+        agentId: "assistant",
+      }),
+    });
 
     expect(response.status).toBe(400);
     expect(calls).toEqual([]);
@@ -600,18 +591,15 @@ describe("granting a hop to a Bot that runs somewhere else", () => {
   test("is refused, and says why", async () => {
     const { calls, app } = grantsApp();
 
-    const response = await app.request(
-      "http://remii.test/api/plugins/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: "bot",
-          ref: "knowledge",
-          agentId: "at-an-endpoint",
-        }),
-      },
-    );
+    const response = await app.request("http://remii.test/api/plugins/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "bot",
+        ref: "knowledge",
+        agentId: "at-an-endpoint",
+      }),
+    });
 
     expect(response.status).toBe(403);
     expect((await response.json()).error).toContain("its own endpoint");
@@ -622,18 +610,15 @@ describe("granting a hop to a Bot that runs somewhere else", () => {
     // Undefined is "no such Bot", which must not read as "runs somewhere else" or as permission.
     const { calls, app } = grantsApp("admin", () => undefined);
 
-    const response = await app.request(
-      "http://remii.test/api/plugins/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: "bot",
-          ref: "knowledge",
-          agentId: "never-registered",
-        }),
-      },
-    );
+    const response = await app.request("http://remii.test/api/plugins/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "bot",
+        ref: "knowledge",
+        agentId: "never-registered",
+      }),
+    });
 
     expect(response.status).toBe(403);
     expect((await response.json()).error).toBe("There is no such Bot.");
@@ -643,18 +628,15 @@ describe("granting a hop to a Bot that runs somewhere else", () => {
   test("a Bot that does run here is granted as before", async () => {
     const { calls, app } = grantsApp();
 
-    const response = await app.request(
-      "http://remii.test/api/plugins/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: "bot",
-          ref: "knowledge",
-          agentId: "general-assistant",
-        }),
-      },
-    );
+    const response = await app.request("http://remii.test/api/plugins/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "bot",
+        ref: "knowledge",
+        agentId: "general-assistant",
+      }),
+    });
 
     expect(response.status).toBe(200);
     // A DIFFERENT BOT FROM THE TEST ABOVE, and the assertion says so: this case is about which Bot
@@ -692,14 +674,11 @@ describe("what a bot grant refusal reveals", () => {
     ref = "knowledge",
   ) => {
     const { calls, app } = grantsApp(role);
-    const response = await app.request(
-      "http://remii.test/api/plugins/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: "bot", ref, agentId }),
-      },
-    );
+    const response = await app.request("http://remii.test/api/plugins/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "bot", ref, agentId }),
+    });
     return { status: response.status, body: await response.json(), calls };
   };
 
@@ -753,18 +732,15 @@ describe("granting a Bot itself", () => {
   test("is refused rather than stored", async () => {
     const { calls, app } = grantsApp();
 
-    const response = await app.request(
-      "http://remii.test/api/plugins/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          kind: "bot",
-          ref: "general-assistant",
-          agentId: "general-assistant",
-        }),
-      },
-    );
+    const response = await app.request("http://remii.test/api/plugins/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "bot",
+        ref: "general-assistant",
+        agentId: "general-assistant",
+      }),
+    });
 
     expect(response.status).toBe(403);
     expect((await response.json()).error).toContain("cannot be granted itself");
@@ -2314,14 +2290,11 @@ function brokeredApp(
      * what a caller sends.
      */
     connectAt: (serverId: string) =>
-      app.request(
-        `http://remii.test/api/plugins/servers/${serverId}/connect`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({}),
-        },
-      ),
+      app.request(`http://remii.test/api/plugins/servers/${serverId}/connect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
     connect: (
       body: unknown,
       query = "",

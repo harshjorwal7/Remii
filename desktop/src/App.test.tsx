@@ -314,9 +314,7 @@ test("changing the Bot invalidates its completed installation", async () => {
   await userEvent.click(view.getByRole("button", { name: "Back" }));
   await userEvent.click(view.getByRole("button", { name: "Back" }));
   await userEvent.click(view.getByText("Choose the agent framework"));
-  await userEvent.click(
-    view.getByRole("radio", { name: /Mastra/ }),
-  );
+  await userEvent.click(view.getByRole("radio", { name: /Mastra/ }));
   await userEvent.click(view.getByRole("button", { name: "Continue" }));
   expect(
     view.queryByRole("button", { name: "Continue to sign in" }),
@@ -358,9 +356,7 @@ test.each([false, true])(
       return previous(command, args);
     };
     const view = await renderApp(strictMode);
-    expect(
-      view.getByRole("heading", { name: "Starting Remii" }),
-    ).toBeTruthy();
+    expect(view.getByRole("heading", { name: "Starting Remii" })).toBeTruthy();
     expect(
       view.queryByRole("heading", { name: "Connect to CopilotKit" }),
     ).toBeNull();
@@ -1252,9 +1248,7 @@ test("mount leaves setup visible when the shared port answers without selected r
   expect(
     await view.findByRole("button", { name: "Set up Remii" }),
   ).toBeTruthy();
-  expect(invokeCalls.some((call) => call.command === "show_remii")).toBe(
-    false,
-  );
+  expect(invokeCalls.some((call) => call.command === "show_remii")).toBe(false);
 });
 
 for (const staleProbe of [false, true]) {
@@ -1280,9 +1274,9 @@ for (const staleProbe of [false, true]) {
     );
     if (staleProbe) {
       await waitFor(() =>
-        expect(
-          invokeCalls.some((call) => call.command === "show_remii"),
-        ).toBe(true),
+        expect(invokeCalls.some((call) => call.command === "show_remii")).toBe(
+          true,
+        ),
       );
     }
     expect(view.getByRole("button", { name: "Set up Remii" })).toBeTruthy();
@@ -1549,9 +1543,7 @@ test.each([
         requests[0].response.resolve(savedOpenAiConfiguration()),
       );
     }
-    await user.click(
-      await view.findByRole("button", { name: "Set up Remii" }),
-    );
+    await user.click(await view.findByRole("button", { name: "Set up Remii" }));
     await user.click(await view.findByRole("button", { name: "Continue" }));
     await completeInstallation(view);
     await user.click(await view.findByRole("radio", { name: /OpenAI/ }));
@@ -2053,9 +2045,10 @@ for (const provider of [
     await userEvent.click(view.getByRole("button", { name: "Continue" }));
 
     await waitFor(() =>
-      expect(
-        view.getByRole("button", { name: "Start Remii" }),
-      ).toHaveProperty("disabled", false),
+      expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
+        "disabled",
+        false,
+      ),
     );
     await userEvent.click(view.getByRole("button", { name: "Start Remii" }));
 
@@ -2148,9 +2141,10 @@ for (const provider of [
         }),
       );
       await userEvent.click(view.getByRole("button", { name: "Continue" }));
-      expect(
-        view.getByRole("button", { name: "Start Remii" }),
-      ).toHaveProperty("disabled", true);
+      expect(view.getByRole("button", { name: "Start Remii" })).toHaveProperty(
+        "disabled",
+        true,
+      );
       await userEvent.click(
         view.getByRole("button", { name: "Use a saved connection" }),
       );
@@ -2167,9 +2161,7 @@ for (const provider of [
           /sign_in|start_stack|ask_the_bot/.test(call.command),
         ),
       ).toBe(false);
-      await userEvent.click(
-        view.getByRole("button", { name: "Start Remii" }),
-      );
+      await userEvent.click(view.getByRole("button", { name: "Start Remii" }));
       await view.findByText("Synthetic saved credential is unavailable.");
       expect(getStartStackPayload()).toMatchObject({
         apiKey: "",

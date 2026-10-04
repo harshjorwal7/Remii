@@ -1,4 +1,11 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 
@@ -99,7 +106,11 @@ async function mount(props: { driving: boolean; withTakeControl?: boolean }) {
       session={{ url: "https://6080-sbx-abc.e2b.app/vnc.html", authKey: "pw" }}
       {...(props.withTakeControl === false
         ? {}
-        : { takeControl: () => fetch("/api/computers/desktop/control/take").then(() => null), onControl })}
+        : {
+            takeControl: () =>
+              fetch("/api/computers/desktop/control/take").then(() => null),
+            onControl,
+          })}
     />,
   );
   await act(async () => {
@@ -117,22 +128,30 @@ describe("the live desktop while the Bot is driving it", () => {
   test("shows the live stream directly without text overlay or blocking button", async () => {
     const { container } = await mount({ driving: false });
 
-    await waitFor(() => expect(container.querySelector("iframe")).not.toBeNull());
+    await waitFor(() =>
+      expect(container.querySelector("iframe")).not.toBeNull(),
+    );
 
     const iframe = container.querySelector("iframe");
     expect(iframe?.className).toContain("pointer-events-none");
     expect(overlay(container)).toBeUndefined();
-    expect(container.textContent).not.toContain("The assistant is using the computer.");
+    expect(container.textContent).not.toContain(
+      "The assistant is using the computer.",
+    );
   });
 
   test("enables pointer events directly when the person holds the wheel", async () => {
     const { container } = await mount({ driving: true });
 
-    await waitFor(() => expect(container.querySelector("iframe")).not.toBeNull());
+    await waitFor(() =>
+      expect(container.querySelector("iframe")).not.toBeNull(),
+    );
 
     const iframe = container.querySelector("iframe");
     expect(iframe?.className).toContain("pointer-events-auto");
     expect(overlay(container)).toBeUndefined();
-    expect(container.textContent).not.toContain("The assistant is using the computer.");
+    expect(container.textContent).not.toContain(
+      "The assistant is using the computer.",
+    );
   });
 });

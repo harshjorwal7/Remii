@@ -301,9 +301,7 @@ describe("channel routes", () => {
       },
     });
 
-    const fetched = await appFor(store).request(
-      "http://remii.test/channel-1",
-    );
+    const fetched = await appFor(store).request("http://remii.test/channel-1");
 
     expect(fetched.status).toBe(200);
     expect(await json(fetched)).toEqual({

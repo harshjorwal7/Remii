@@ -733,8 +733,8 @@ function ComposioAppBrowser() {
     <div className="flex flex-col gap-3">
       <p className="text-sm text-muted-foreground">
         Add an app from Composio&apos;s directory. Adding it makes it available
-        to your Bots; you connect your own account on its page afterwards.
-        All apps are listed below; search to narrow them down.
+        to your Bots; you connect your own account on its page afterwards. All
+        apps are listed below; search to narrow them down.
       </p>
 
       <div className="relative">
@@ -774,61 +774,63 @@ function ComposioAppBrowser() {
           {(directory.data?.apps ?? [])
             .slice(0, shownComposioApps)
             .map((app) => (
-            <React.Fragment key={app.slug}>
-              <Item size="sm">
-                <RowMark>
-                  <AppMark
-                    serverId={`composio-${app.slug}`}
-                    logo={app.logo}
-                    className="size-4"
-                  />
-                </RowMark>
-                <ItemContent>
-                  <ItemTitle>{app.name}</ItemTitle>
-                  <ItemDescription>
-                    {app.description || app.slug}
-                    {app.actionCount > 0 ? ` · ${app.actionCount} actions` : ""}
-                  </ItemDescription>
-                </ItemContent>
-                <ItemActions>
-                  {app.enabled ? (
-                    <>
-                      <span
-                        aria-hidden="true"
-                        className="size-1.5 rounded-full bg-emerald-500"
-                      />
-                      <span className="text-muted-foreground text-xs">
-                        Added
-                      </span>
-                    </>
-                  ) : (
-                    <Button
-                      disabled={enable.isPending}
-                      onClick={() => {
-                        setNotice(null);
-                        enable.mutate(
-                          { slug: app.slug },
-                          {
-                            onSuccess: () => setNotice(null),
-                            onError: (error: Error) =>
-                              setNotice(
-                                `${app.name} could not be added: ${error.message}`,
-                              ),
-                          },
-                        );
-                      }}
-                      size="xs"
-                      type="button"
-                      variant="outline"
-                    >
-                      Add
-                    </Button>
-                  )}
-                </ItemActions>
-              </Item>
-              <Separator />
-            </React.Fragment>
-          ))}
+              <React.Fragment key={app.slug}>
+                <Item size="sm">
+                  <RowMark>
+                    <AppMark
+                      serverId={`composio-${app.slug}`}
+                      logo={app.logo}
+                      className="size-4"
+                    />
+                  </RowMark>
+                  <ItemContent>
+                    <ItemTitle>{app.name}</ItemTitle>
+                    <ItemDescription>
+                      {app.description || app.slug}
+                      {app.actionCount > 0
+                        ? ` · ${app.actionCount} actions`
+                        : ""}
+                    </ItemDescription>
+                  </ItemContent>
+                  <ItemActions>
+                    {app.enabled ? (
+                      <>
+                        <span
+                          aria-hidden="true"
+                          className="size-1.5 rounded-full bg-emerald-500"
+                        />
+                        <span className="text-muted-foreground text-xs">
+                          Added
+                        </span>
+                      </>
+                    ) : (
+                      <Button
+                        disabled={enable.isPending}
+                        onClick={() => {
+                          setNotice(null);
+                          enable.mutate(
+                            { slug: app.slug },
+                            {
+                              onSuccess: () => setNotice(null),
+                              onError: (error: Error) =>
+                                setNotice(
+                                  `${app.name} could not be added: ${error.message}`,
+                                ),
+                            },
+                          );
+                        }}
+                        size="xs"
+                        type="button"
+                        variant="outline"
+                      >
+                        Add
+                      </Button>
+                    )}
+                  </ItemActions>
+                </Item>
+                <Separator />
+              </React.Fragment>
+            ))}
         </PageRows>
       )}
       {!dirExpanded && (directory.data?.apps ?? []).length > 40 ? (

@@ -487,6 +487,70 @@ export function previewRepoMutationOptions() {
 }
 
 /**
+ * One skill the model drafted out of a repository, not yet a skill here.
+ *
+ * `existing` is the server's read of the slug, not a guess made in the browser: the slug is the key,
+ * so "this command is already taken" is a fact about this deployment's rows and nobody else can
+ * answer it. The three values are the ones `ownershipOf` in `lib/skills/proposal` already says out
+ * loud, so a draft and a chat proposal describe a clash in the same words.
+ */
+export type SkillDraft = {
+  slug: string;
+  title: string;
+  summary: string;
+  instructions: string;
+  /** The file inside the repository this was written from. Null when the model did not say. */
+  source: string | null;
+  existing: "yours" | "the deployment's" | "someone else's" | null;
+};
+
+export type SkillDrafts = {
+  drafts: SkillDraft[];
+  repository: {
+    url: string;
+    ref: string;
+    path: string;
+    fileCount: number;
+    truncated: boolean;
+  };
+};
+
+/**
+ * A draft as it arrives at the form, with the repository it came from attached.
+ *
+ * The server does not repeat the address on every draft — one repository produced all of them — so
+ * the screen joins it back on from what the person pasted. THEIR address rather than the resolved
+ * one, because the resolved one has silently replaced a named branch with the repository's default,
+ * and a skill that pins `main` when the person wrote `release/2.4` is a skill that will answer from
+ * the wrong code after the branch moves on.
+ */
+export type DraftedSkill = SkillDraft & { repo: string | null };
+
+/**
+ * Ask the model to write this repository's skills, and save none of them.
+ *
+ * NOT A QUERY AND NOT A WRITE, and the shape is deliberate: the request carries an address and the
+ * answer carries fields, so there is no slug on the wire for the server to install anything under.
+ * The person still presses Save, and `POST /skills` is still the only door a skill comes through —
+ * which is what keeps its ownership rule in one place instead of two.
+ *
+ * No `queryClient` for the same reason `previewRepoMutationOptions` takes none: nothing on the
+ * plugins surface changed, so there is nothing to refetch and no cache to invalidate.
+ */
+export function draftSkillsMutationOptions() {
+  return mutationOptions({
+    mutationFn: async (repo: string): Promise<SkillDrafts> => {
+      const response = await client("/api/plugins/skills/drafts", {
+        method: "POST",
+        body: { repo },
+        fallback: "That repository could not be read for skills.",
+      });
+      return response.json();
+    },
+  });
+}
+
+/**
  * Read the repository now rather than waiting for a run to notice it moved.
  *
  * Owns the index, and so is a button rather than something every read does: GitHub allows sixty

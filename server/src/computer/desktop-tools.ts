@@ -94,6 +94,44 @@ export type DesktopToolsOptions = {
   mayUseComputer?: () => Promise<
     { allowed: true } | { allowed: false; reason: string }
   >;
+  /**
+   * Told about every action this Bot takes on the computer, and how it ended.
+   *
+   * THE RECORD OF WHAT ACTUALLY HAPPENED, and it was missing from the one path that matters.
+   *
+   * `computer.action_allowed` / `_refused` / `_failed` already exist as vocabulary and the browser
+   * gateway wrote them — but that gateway is disabled in this deployment (`computerProvider` is
+   * `undefined`), so the only computer a model can reach is this one and it wrote NOTHING. Every click,
+   * keystroke and shell command the agent performed left no row.
+   *
+   * That is a debugging cliff rather than a missing feature. When a turn does the wrong thing, there
+   * was no way to ask what it clicked; the only evidence was the model's own account of itself, and
+   * the screen at the end. It also means the product's central claim — that every action is decided
+   * before it happens and recorded after — had no implementation on the path that was actually taken.
+   *
+   * A collaborator, never awaited by the tool, and never allowed to fail one. The record is worth
+   * having and is not worth a turn: a lost audit row is a gap in the trail, while an audit insert that
+   * fails the click would make the trail the reason the computer is slow.
+   *
+   * `effect: "read"` tools are included deliberately. Reading the screen is how an agent decides what
+   * to press next, so "what did it look at" is the context for every action that follows.
+   */
+  onAction?: (record: DesktopActionRecord) => void | Promise<void>;
+};
+
+/** One action on the computer, as handed to {@link DesktopToolsOptions.onAction}. */
+export type DesktopActionRecord = {
+  tool: string;
+  /** Reading or changing. Mirrors the tool's own `effect`, which is what a grant is decided on. */
+  effect: "read" | "write";
+  outcome: "allowed" | "refused" | "failed";
+  /**
+   * Why it was refused, or why it failed.
+   *
+   * Never the arguments themselves: a `computer_type` carries whatever the model decided to type,
+   * which is very often a credential it was asked to fill in, and this row goes to a table people read.
+   */
+  detail?: string;
 };
 
 /**
@@ -142,6 +180,19 @@ const READ_ONLY_TOOLS = new Set([
  */
 const MAX_OUTPUT_CHARS = 20_000;
 const MAX_LIST_ENTRIES = 200;
+
+/**
+ * How many controls a single `computer_screen` will name.
+ *
+ * A dense application — a spreadsheet, a settings pane, a mail client with a long thread list — puts
+ * hundreds of interactive nodes on screen, and this listing is text the model carries for the rest of
+ * the conversation. So it is capped.
+ *
+ * What matters is that the cap is VISIBLE. The listing names what it left out and how to see the rest,
+ * because a silently shortened list reads to a model as a complete one: it looks for a control that was
+ * cut, is not told it exists, and concludes the application does not have it.
+ */
+const MAX_SCREEN_NODES = 60;
 
 /** Trim to the cap and say so, because a truncated answer that looks whole is worse than a long one. */
 function bounded(text: string, limit = MAX_OUTPUT_CHARS): string {
@@ -249,11 +300,11 @@ function describeScreen(tree: { root?: TreeNode } | null | undefined): string {
     (node) =>
       interactive.has(String(node.role ?? "").toLowerCase()) || node.name,
   );
-  const shown = useful.slice(0, 60);
+  const shown = useful.slice(0, MAX_SCREEN_NODES);
   if (shown.length === 0) {
     return `The desktop is running with nothing named on it. ${nodes.length} nodes were on screen, none of them interactive or labelled.`;
   }
-  return shown
+  const listing = shown
     .map((node, index) => {
       const b = node.bounds ?? {};
       const at =
@@ -264,6 +315,108 @@ function describeScreen(tree: { root?: TreeNode } | null | undefined): string {
       return `${index}. ${node.role ?? "?"} "${String(node.name ?? "").slice(0, 80)}"${at}${value}`;
     })
     .join("\n");
+  /*
+   * Say what was left out.
+   *
+   * The cap is necessary — a dense application can produce hundreds of nodes and the listing is text
+   * the model pays for on every later turn of the conversation — but cutting the list silently is
+   * worse than a long one. A model that was told about 60 controls and is looking for the 61st is
+   * told, in effect, that the button it can see does not exist, and it goes and does something else
+   * instead. Naming the remainder turns a wrong conclusion into a next question, which is the only
+   * kind of truncation a model can act on.
+   */
+  const hidden = useful.length - shown.length;
+  return hidden > 0
+    ? `${listing}\n…and ${hidden} more control${hidden === 1 ? "" : "s"} further down or off this list. Scroll, or zoom in on a region, to see them.`
+    : listing;
+}
+
+/**
+ * A call that was stopped on purpose, carrying the sentence the model is given.
+ *
+ * A refusal is NOT an error and never was: a person holding the wheel, an exhausted allowance and a
+ * twenty-minute ceiling are all ordinary outcomes, and the model is handed a sentence it can act on
+ * rather than a stack trace. But "ordinary" was being paid for at the other end — because a refusal
+ * came back as a plain string, the only way for the audit wrapper to tell a deliberate stop from a
+ * genuine failure was to read the prose and guess, which put a regex on the critical path of every
+ * click.
+ *
+ * So the distinction is carried by the type instead. A refusal travels as one of these and is turned
+ * back into its sentence by the tool wrapper, so the model sees exactly what it saw before, and the
+ * record is right for the right reason.
+ */
+class DesktopRefusal extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "DesktopRefusal";
+  }
+}
+
+/** Whether a thrown value is a deliberate stop rather than something going wrong. */
+const isRefusal = (error: unknown): error is DesktopRefusal =>
+  error instanceof DesktopRefusal;
+
+/** Turn a refusal and a failure apart for the audit row, by type rather than by prose. */
+function outcomeFor(error: unknown): "refused" | "failed" {
+  if (isRefusal(error)) return "refused";
+  // A body that throws something else really did fail. Nothing is inferred from the message, because
+  // a message is written for a model to read and is free to change; the type is the contract.
+  return "failed";
+}
+
+/**
+ * ONE ACTING CALL AT A TIME, per computer.
+ *
+ * This is the fix for the most damaging failure the desktop had, and it is here rather than in the
+ * agent loop because the desktop is the thing that cannot be shared: one X display, one pointer, one
+ * keyboard, one focused field.
+ *
+ * The agent loop dispatches a step's tool calls with `Promise.all` and asks the model for parallel tool
+ * calls, which is correct for tools that touch different things. For a mouse it is actively harmful. A
+ * single `computer_click` is three operations on the display — move, press, release — so three clicks
+ * issued in one step became nine operations with no ordering guarantee between them, and a `computer_key`
+ * racing a `computer_type` landed wherever the pointer happened to be: a Ctrl+S in the middle of a typed
+ * URL, a click on a button the previous click had not yet revealed. The model then looked at the screen,
+ * saw the wrong thing, and tried again — so a class of task failed intermittently, in a way that looked
+ * like the model being unreliable rather than the framework interleaving its own input.
+ *
+ * The queue is also a SPEED fix, which is the less obvious half. Every one of those mis-landed actions
+ * cost a `computer_screen` to diagnose and another to retry, and each of those is several round trips to
+ * the machine. Not producing garbage is cheaper than detecting it.
+ *
+ * READS DO NOT QUEUE. `computer_screen` is what the agent does between actions, and it is safe to run
+ * alongside one: it only reads, so it cannot interleave with anything. Serialising reads behind a
+ * 30-second `computer_type` would add half a minute of dead time to every action and would defeat the
+ * point — so only calls that can move the pointer or press a key are ordered.
+ *
+ * Per user, because there is one computer per person and a queue is about a physical resource. Two
+ * people never wait on each other.
+ */
+const actingQueues = new Map<string, Promise<unknown>>();
+
+/** Run `work` after whatever else this person's desktop is already doing, and nothing else. */
+function serialiseActing<T>(
+  userId: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  const previous = actingQueues.get(userId) ?? Promise.resolve();
+  /*
+   * `catch` on the predecessor, so one failed action does not poison every action after it. A rejected
+   * promise left in the chain would reject the next caller before it ran anything, which would turn one
+   * transient sandbox error into a permanently broken computer.
+   */
+  const next = previous.then(work, work);
+  // The tail the NEXT caller waits on, and which must never be a rejection.
+  const tail = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  actingQueues.set(userId, tail);
+  void tail.then(() => {
+    // Drop the entry once this is the tail, so the map does not grow one entry per person forever.
+    if (actingQueues.get(userId) === tail) actingQueues.delete(userId);
+  });
+  return next;
 }
 
 export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
@@ -285,7 +438,7 @@ export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
      */
     const holder = await options.controlHolder?.();
     if (holder === "human" && !READ_ONLY_TOOLS.has(toolName)) {
-      return HUMAN_HAS_CONTROL;
+      throw new DesktopRefusal(HUMAN_HAS_CONTROL);
     }
     /*
      * The allowance, before anything is touched.
@@ -299,11 +452,15 @@ export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
      * person who paid for a computer being told they may not use it because a query timed out.
      */
     const permitted = await options.mayUseComputer?.().catch(() => null);
-    if (permitted && permitted.allowed === false) return permitted.reason;
+    if (permitted && permitted.allowed === false) {
+      throw new DesktopRefusal(permitted.reason);
+    }
 
     const computer = await options.resolve();
     if (!computer) {
-      return "This computer is not running. It may have been stopped; start it and try again.";
+      throw new DesktopRefusal(
+        "This computer is not running. It may have been stopped; start it and try again.",
+      );
     }
 
     /*
@@ -323,7 +480,9 @@ export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
           () => undefined,
         );
         sessionStartedAt.delete(options.botId);
-        return `You have been using this computer for more than ${options.maxSessionMinutes} minutes, so I have switched it off for you. Anything you have saved is still on disk — tell me what you were doing and we can start again.`;
+        throw new DesktopRefusal(
+          `You have been using this computer for more than ${options.maxSessionMinutes} minutes, so I have switched it off for you. Anything you have saved is still on disk — tell me what you were doing and we can start again.`,
+        );
       }
     }
 
@@ -355,10 +514,14 @@ export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
   ): Promise<string> => {
     const computer = await options.resolve();
     if (!computer) {
-      return "This computer is not running. It may have been stopped; start it and try again.";
+      throw new DesktopRefusal(
+        "This computer is not running. It may have been stopped; start it and try again.",
+      );
     }
     if (!computer.machine) {
-      return `This computer cannot reach its own files or run commands, so ${toolName} is unavailable here. Use computer_screen to work with what is on the screen instead.`;
+      throw new DesktopRefusal(
+        `This computer cannot reach its own files or run commands, so ${toolName} is unavailable here. Use computer_screen to work with what is on the screen instead.`,
+      );
     }
     markSessionStart();
     return render(await work(computer.machine));
@@ -382,6 +545,29 @@ export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
     }
   };
 
+  /*
+   * Reported for every call, once, from the one place all of them pass through.
+   *
+   * Wrapping rather than instrumenting each tool is what makes the record complete: there are eleven
+   * of these, they are added to and removed from over time, and a tool that forgot to report would be
+   * invisible rather than absent. The wrapper cannot be forgotten because it is the definition of the
+   * tool rather than part of its body.
+   *
+   * Fire-and-forget in all three outcomes. The whole point of this is that a call that works, a call
+   * that is refused and a call that throws are all worth a row, and none of them may wait on one.
+   */
+  const report = (record: DesktopActionRecord): void => {
+    try {
+      const sent = options.onAction?.(record);
+      // A reporter that returns a rejected promise is the ordinary failure (a full disk, a closed
+      // pool); one that throws synchronously is the same mistake written differently. Both are
+      // swallowed, because the record is worth having and is not worth a turn.
+      void Promise.resolve(sent).catch(() => undefined);
+    } catch {
+      // Nothing to do: the action has already happened and the trail is a record of it, not a gate.
+    }
+  };
+
   const tool = (
     name: string,
     description: string,
@@ -396,7 +582,39 @@ export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
     // to be stable — a tool that cannot be granted is a tool nobody can withhold.
     ref: `computer/${name}`,
     effect: READ_ONLY_TOOLS.has(name) ? "read" : "write",
-    execute,
+    execute: async (args: unknown) => {
+      const effect = READ_ONLY_TOOLS.has(name) ? "read" : "write";
+      /*
+       * Anything that can move the pointer or press a key is queued per computer; anything that only
+       * reads runs immediately. See {@link serialiseActing} for why the reads are let through — it is
+       * the difference between ordering the input and serialising the whole conversation.
+       */
+      const run = async (): Promise<ToolResult> => {
+        try {
+          const result = await execute(args);
+          report({ tool: name, effect, outcome: "allowed" });
+          return result;
+        } catch (error) {
+          const outcome = outcomeFor(error);
+          report({
+            tool: name,
+            effect,
+            outcome,
+            detail: error instanceof Error ? error.message : String(error),
+          });
+          /*
+           * A refusal goes back to the model as the sentence it always was. Throwing it would be a
+           * behaviour change the model can see — it retries a thrown tool and accepts a sentence — and
+           * the point of {@link DesktopRefusal} is that the type carries the distinction for the audit
+           * row while the model sees no difference at all.
+           */
+          if (isRefusal(error)) return error.message;
+          throw error;
+        }
+      };
+      if (effect === "read") return run();
+      return serialiseActing(options.actor.userId ?? options.actor.id, run);
+    },
   });
 
   return [
@@ -408,28 +626,38 @@ export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
         withComputer(
           "computer_screen",
           async (cu) => {
-            const tree = (await cu.accessibility
-              ?.getTree?.()
-              .catch(() => null)) as { root?: TreeNode } | null | undefined;
             /*
-             * The window list as well as the tree.
+             * The tree AND the window list, together.
              *
              * On a freshly booted desktop the tree is nearly empty — an XFCE panel and a window
              * manager and little else — so a Bot told to look at the screen would be told there is
              * nothing there even with three applications open. The window list is the one place
              * that reliably says what is actually open, so it is reported alongside rather than
              * instead: it answers "what is running", the tree answers "what can I press".
+             *
+             * They are independent reads of the same display, so they go out together rather than one
+             * after the other. That put two round trips on the critical path of the single most-used
+             * tool in the product — and `LOOK` is what the skills tell the model to do before every
+             * single action, so the second one was paid before every click. The failure handling is
+             * deliberately per-read rather than shared: a desktop with no AT-SPI still has a window
+             * list, and one with neither still answers with two nulls rather than rejecting.
              */
-            const windows = (await cu.display.getWindows().catch(() => null)) as
-              | {
-                  windows?: {
-                    id?: number;
-                    title?: string;
-                    isActive?: boolean;
-                  }[];
-                }
-              | null
-              | undefined;
+            const [tree, windows] = await Promise.all([
+              cu.accessibility?.getTree?.().catch(() => null) as Promise<
+                { root?: TreeNode } | null | undefined
+              >,
+              cu.display.getWindows().catch(() => null) as Promise<
+                | {
+                    windows?: {
+                      id?: number;
+                      title?: string;
+                      isActive?: boolean;
+                    }[];
+                  }
+                | null
+                | undefined
+              >,
+            ]);
             return { tree: tree ?? null, windows: windows?.windows ?? [] };
           },
           ({
@@ -877,7 +1105,7 @@ export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
 
     tool(
       "computer_read_file",
-      "Read a file from this computer and get its contents as text. Much faster and more reliable than opening it on screen. If it says the file does not exist, that is a real answer — do not retry, list the directory instead.",
+      "Read a file from this computer and get its contents as text. Much faster and more reliable than opening it on screen. If it says the file does not exist, that is a real answer — do not retry, list the directory instead. A long file comes back shortened, with a note saying so — read it in ranges rather than assuming you were given all of it.",
       z.object({
         path: z
           .string()
@@ -890,7 +1118,24 @@ export function desktopToolsFor(options: DesktopToolsOptions): GrantedTool[] {
         return withMachine(
           "computer_read_file",
           (machine) => machine.readFile(path),
-          (contents) => contents,
+          /*
+           * Bounded HERE, at the tool, rather than left to whatever trims tool output later.
+           *
+           * This was the one tool on the desktop that returned a file whole, so a large file went into
+           * the conversation unbounded and was cut somewhere further along the pipeline — where the cut
+           * keeps the head and the tail and drops the middle, and where the model is shown a character
+           * count rather than a file. The result was a model reasoning confidently from half a file and
+           * reporting it as the whole thing, which is the worst of the three failure modes available:
+           * a loud failure would have been better.
+           *
+           * Saying it here means the model is told the file is longer than what it can see, in the same
+           * sentence as the contents, and is told how to get the rest. `computer_shell` with `sed` or
+           * `tail` is the way to read a range, and the sentence says so.
+           */
+          (contents) =>
+            contents.length <= MAX_OUTPUT_CHARS
+              ? contents
+              : `${bounded(contents)}\n\n[This file is ${contents.length} characters and only the first ${MAX_OUTPUT_CHARS} are shown. Read the rest with computer_shell, e.g. \`sed -n '2001,4000p' ${path}\`.]`,
         );
       },
     ),

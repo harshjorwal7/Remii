@@ -82,9 +82,7 @@ test("splits route components without splitting loaders or providers", () => {
 test("uses explicit manual chunks for route components", () => {
   expect(routeBuildRollupOutputOptions.onlyExplicitManualChunks).toBe(true);
   expect(
-    selectRemiiManualChunk(
-      "/repo/app/src/routes/sign.tsx?tsr-split=component",
-    ),
+    selectRemiiManualChunk("/repo/app/src/routes/sign.tsx?tsr-split=component"),
   ).toBe("route-sign");
   expect(
     selectRemiiManualChunk(

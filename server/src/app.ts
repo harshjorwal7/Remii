@@ -46,10 +46,7 @@ import type { ComponentStore } from "./components/store";
 import type { ComputerGateway } from "./computer/gateway";
 import type { PageFrameStore } from "./computer/page-frames";
 import type { PolicyStore } from "./computer/policy-store";
-import {
-  createComputerRoutes,
-  createPolicyRoutes,
-} from "./computer/routes";
+import { createComputerRoutes, createPolicyRoutes } from "./computer/routes";
 import { configuredAuthProviders, type DeploymentConfig } from "./config";
 import type { CredentialInput, CredentialWriteService } from "./credentials";
 import type { Database } from "./db/client";
@@ -63,6 +60,7 @@ import {
 import type { HostAccessBroker } from "./host-access/broker";
 import { createHostAccessRoutes } from "./host-access/routes";
 import type { OnboardingStore } from "./people/onboarding";
+import { type SkillDrafts } from "./plugins/skill-drafter";
 import type { ComposioBroker } from "./plugins/broker";
 import { createPluginRoutes } from "./plugins/routes";
 import {
@@ -384,6 +382,14 @@ export function createApp(
    * door for this at all, not a locked one.
    */
   vaultStore?: VaultStore,
+  /**
+   * Drafts skills out of a repository on the deployment's own model.
+   *
+   * Appended last, like every collaborator above it: these parameters are positional, so inserting
+   * one anywhere else silently shifts every existing call site's arguments by one. Absent leaves the
+   * New-skill screen's drafter answering 503 rather than offering drafts nobody can grade.
+   */
+  skillDrafter?: (repo: string, signal?: AbortSignal) => Promise<SkillDrafts>,
 ) {
   /*
    * The optional collaborators, named once so the routes below can refer to them by name.
@@ -1392,6 +1398,7 @@ export function createApp(
           appUrl: config.appUrl,
         },
         composio,
+        skillDrafter,
       ),
     );
   }

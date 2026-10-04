@@ -579,13 +579,11 @@ describe("retiring the credentials a person owns", () => {
     await connect(askerId, askerRefreshToken);
 
     expect(
-      (await store.retireConnectionsFor(askerId, "admin@remii.local"))
-        .retired,
+      (await store.retireConnectionsFor(askerId, "admin@remii.local")).retired,
     ).toBeGreaterThan(0);
     // Already revoked is something an administrator can legitimately do twice.
     expect(
-      (await store.retireConnectionsFor(askerId, "admin@remii.local"))
-        .retired,
+      (await store.retireConnectionsFor(askerId, "admin@remii.local")).retired,
     ).toBe(0);
     // The empty actor is ANONYMOUS_ACTOR. It owns nothing, and must not match rows by being empty.
     expect(

@@ -32,10 +32,7 @@ describe("default agent selection", () => {
 
     expect(chosen?.id).toBe(PICKED_HARNESS_AGENT_ID);
     expect(
-      defaultAgentId([
-        agent(REMII_AGENT_ID),
-        agent(PICKED_HARNESS_AGENT_ID),
-      ]),
+      defaultAgentId([agent(REMII_AGENT_ID), agent(PICKED_HARNESS_AGENT_ID)]),
     ).toBe(PICKED_HARNESS_AGENT_ID);
   });
 
@@ -58,9 +55,9 @@ describe("default agent selection", () => {
   });
 
   test("falls back to the first agent when no picked harness or route fallback exists", () => {
-    expect(
-      defaultAgentId([agent(REMII_AGENT_ID), agent("researcher")]),
-    ).toBe(REMII_AGENT_ID);
+    expect(defaultAgentId([agent(REMII_AGENT_ID), agent("researcher")])).toBe(
+      REMII_AGENT_ID,
+    );
   });
 
   test("returns undefined when the roster is still absent", () => {

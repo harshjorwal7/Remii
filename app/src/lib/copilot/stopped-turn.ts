@@ -33,6 +33,50 @@ export function stoppedReason(reported: unknown): string {
 }
 
 /**
+ * DID THE SERVER SAY THIS RUN ENDED EARLY, whatever it managed to say on the way?
+ *
+ * The sentence is read off the run's own finish event, and only a sentence the SERVER wrote counts
+ * as one: a model that chose to end its turn says so in prose, and a deployment whose agent is
+ * remote may have written its own. An empty or absent `message` on a finish is the ordinary case —
+ * a turn that simply completed — and is deliberately NOT an early end, because inventing a reason
+ * for every successful turn would put a notice under every answer anybody ever got.
+ *
+ * THE CODES ARE NAMED, NOT COUNTED. `AGENT_STREAM_STALLED` is written by the stall watchdog
+ * (`server/src/channels/stall-guard.ts`) and the rest are the server's own; a code is the one thing
+ * that cannot be paraphrased away by an administrator rewording a policy message, which is exactly
+ * why the wording alone is not enough.
+ */
+function endedEarly(event: unknown): boolean {
+  if (typeof event !== "object" || event === null) return false;
+  const { code, message } = event as { code?: unknown; message?: unknown };
+  if (typeof message === "string" && message.trim() !== "") {
+    return true;
+  }
+  return typeof code === "string" && code.trim() !== "";
+}
+
+/**
+ * WHETHER A FINISH THAT PRODUCED TEXT STILL NEEDS SAYING IT ENDED EARLY.
+ *
+ * The rule used to be "a run that said anything is a finished run", and it was the reason a turn cut
+ * off halfway through a task was drawn as a turn that finished: a model killed at its hundredth tool
+ * call or its twentieth minute has usually said *something* on the way — "let me check that for
+ * you" is a sentence a working agent emits constantly — so the partial answer suppressed the only
+ * notice that would have explained it, and a person was left with a truncated reply and no reason.
+ *
+ * So the two conditions are separated rather than traded off. Text alone does not excuse a run the
+ * server says it ended early, and its absence alone does not condemn one: a finish with no sentence
+ * and no answer is still reported, which is what the callers did with it before.
+ */
+export function finishNeedsExplanation(
+  event: unknown,
+  answered: boolean,
+): boolean {
+  if (endedEarly(event)) return true;
+  return !answered;
+}
+
+/**
  * Watch one Bot's runs and hold on to the reason the last one ended, if it ended badly.
  *
  * Bound by agent id rather than handed an agent, so a caller that only renders the packaged chat
@@ -61,9 +105,10 @@ export function useStoppedTurn(agentId: string): string | null {
      * idempotent through the same "only a newer run clears it" rule as above: the last word about a
      * turn wins, and both words come from the turn itself.
      *
-     * A finish that produced a real answer is a finished turn and is left alone. A Bot that was cut
-     * off halfway is exactly the case this hook exists to catch, and its partial answer stays on
-     * screen underneath the sentence — the explanation sits under the transcript, not over it.
+     * A finish that produced a real answer is left alone UNLESS the run says it ended early. A Bot
+     * that was cut off halfway usually said something on the way there — "let me check that" is a
+     * sentence a working agent emits constantly — and treating any text as a finished turn is how a
+     * truncated answer reached the screen drawn as a whole one. See `finishNeedsExplanation`.
      */
     const answered = () =>
       agent.messages.some(
@@ -78,7 +123,7 @@ export function useStoppedTurn(agentId: string): string | null {
       onRunErrorEvent: ({ event }) => setStopped(stoppedReason(event?.message)),
       onRunFailed: ({ error }) => setStopped(stoppedReason(error)),
       onRunFinishedEvent: ({ event }) => {
-        if (answered()) return;
+        if (!finishNeedsExplanation(event, answered())) return;
         const stated =
           typeof event?.message === "string" ? event.message.trim() : "";
         setStopped(

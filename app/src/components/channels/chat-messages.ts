@@ -39,6 +39,43 @@ export type VisibleChatItem =
       kind: "attachments";
       id: string;
       attachments: readonly SentAttachment[];
+    }
+  /**
+   * WHAT THE MODEL WAS THINKING, as its own row.
+   *
+   * It has been arriving in the browser the whole time and being thrown away: a reasoning event is
+   * materialised into a `role: "reasoning"` message on `agent.messages`, and every role this
+   * projection did not name fell through to the bail at the bottom. A model that says "let me check
+   * the invoices" before it calls a tool was invisible, so the transcript went from a person's
+   * question straight to a grey tool line with no account of the gap.
+   *
+   * Not promoted into a `text` item, which is what the reasoning was before this branch existed in
+   * spirit: a thought is not an answer, it must not render as the Bot's prose, and it must not be
+   * sent back as one either. `historyToOpenAI` on the server reads only user, assistant and tool
+   * roles, so a reasoning message in the array costs the next run nothing.
+   */
+  | { kind: "thinking"; id: string; text: string }
+  /**
+   * ONE TURN'S WORK, as the single row it is drawn as.
+   *
+   * A turn that took three steps used to be three separate rows in the transcript: a shell command,
+   * a file read, a search — each explained in a line, each in the same voice, each staying on screen
+   * forever in the middle of a conversation whose answer was the only part anybody asked for. The
+   * grouping is what makes the working legible while it happens and unremarkable once it has: the
+   * rows keep their order and their identity inside `rows`, and what they stop being is eight
+   * separate claims on the reader's attention.
+   *
+   * `answered` is the whole of the collapse rule, and it is a fact about the projection rather than
+   * about time: the group's own answer has started arriving when the next item is assistant text.
+   * Before that it is work in progress and is drawn open and shimmering; from that moment on it is
+   * a record of how the answer was reached, and folds away.
+   */
+  | {
+      kind: "work";
+      id: string;
+      rows: readonly VisibleChatItem[];
+      /** The answer this work produced has started streaming. False for work still in flight. */
+      answered: boolean;
     };
 
 /** One file on a sent turn. `id` is unique across the transcript, so it is also the render key. */
@@ -451,6 +488,26 @@ export function toVisibleChatItems(
       return [{ kind: "activity", id: message.id, message }];
     }
 
+    /*
+     * THE MODEL'S OWN REASONING, which is a message on the array and was never drawn.
+     *
+     * The same shape as the activity branch above and for the same reason: a reasoning event is
+     * accumulated by the SDK into a real message with `role: "reasoning"` and `content` growing on
+     * every chunk, so there is something here to show and no renderer has ever claimed it.
+     *
+     * THE EMPTY-STRING CHECK IS NOT COSMETIC, because the loop emits one of these deliberately. A
+     * tool that takes minutes produces heartbeat reasoning events with an empty delta to keep the
+     * stall watchdog from reading the silence as a dead Bot (see `heartbeat` in the loop agent's
+     * step). Those are real messages with real ids, and projecting them unconditionally drew an
+     * empty paragraph for every fifteen seconds of a slow tool.
+     */
+    if (message.role === "reasoning") {
+      const text = message.content;
+      return typeof text === "string" && text.trim() !== ""
+        ? [{ kind: "thinking", id: message.id, text }]
+        : [];
+    }
+
     if (message.role !== "user") return [];
 
     if (
@@ -573,4 +630,78 @@ export function toVisibleChatItems(
 
     return items;
   });
+}
+
+/**
+ * WHAT COUNTS AS WORK, as opposed to something the person is meant to read as a turn of its own.
+ *
+ * A tool call and a thought are both things the Bot did on the way to an answer, and neither is the
+ * answer. Anything the reader sent, anything the Bot said back, and anything it drew stays where it
+ * is: those are the conversation, and a disclosure across them would be hiding the reply.
+ */
+function isWorkRow(item: VisibleChatItem): boolean {
+  return item.kind === "tool" || item.kind === "thinking";
+}
+
+/**
+ * FOLD EACH TURN'S WORK INTO ONE ROW, and leave everything else exactly where it was.
+ *
+ * THE GROUP IS A RUN OF ADJACENT WORK ROWS, which is the shape a turn actually arrives in. The loop
+ * agent emits, per step: some reasoning, then the calls, then their results. The results are not
+ * rows of their own — they pair back onto the call that asked — so what the transcript sees between
+ * one step's answer and the next step's work is nothing at all, and a three-step turn arrives as
+ * five or six adjacent rows.
+ *
+ * `answered` IS DECIDED BY WHAT FOLLOWS, NOT BY A CLOCK, because it has to be right on the very
+ * first frame after the answer starts streaming and wrong on none before it. The next item being
+ * assistant text IS that moment: the work is over and the reply has begun, so it folds. Work that is
+ * still in flight — a trailing run, a call whose result has not arrived — has nothing after it and
+ * is `answered: false`, so it stays open and keeps saying so.
+ *
+ * WHY A GROUP CAN ALSO END AT AN ACTIVITY. A Bot that draws an interface mid-turn produces one
+ * between a step's work and the next step's work, and a run broken by it would be two groups
+ * claiming to be one turn's thinking. The activity is its own row and stays outside; the work either
+ * side of it is folded with its own kind, and the reader sees the interface between two disclosures,
+ * which is the order things happened in.
+ *
+ * RETURNED UNTOUCHED WHEN THERE IS NOTHING TO FOLD, so a transcript with no tools in it takes the
+ * identical path it always did and this function cannot be the reason a plain conversation renders
+ * differently.
+ */
+export function groupChatWork(
+  items: readonly VisibleChatItem[],
+): VisibleChatItem[] {
+  const hasWork = items.some(isWorkRow);
+  if (!hasWork) return [...items];
+
+  const out: VisibleChatItem[] = [];
+  let index = 0;
+  while (index < items.length) {
+    if (!isWorkRow(items[index] as VisibleChatItem)) {
+      out.push(items[index] as VisibleChatItem);
+      index += 1;
+      continue;
+    }
+
+    const rows: VisibleChatItem[] = [];
+    while (index < items.length && isWorkRow(items[index] as VisibleChatItem)) {
+      rows.push(items[index] as VisibleChatItem);
+      index += 1;
+    }
+    const next = items[index];
+    out.push({
+      kind: "work",
+      // Keyed on the first row, which is a real id from the projection rather than one invented
+      // here: see `isDrawableMessage` on why an id that only existed within one render is worse
+      // than no row at all.
+      id: (rows[0] as VisibleChatItem).id,
+      rows,
+      answered:
+        next !== undefined &&
+        next.kind === "text" &&
+        next.role === "assistant" &&
+        next.text !== "",
+    });
+  }
+  return out;
 }

@@ -391,9 +391,7 @@ const OWNER_TRIES: Array<{
   {
     what: "GET /agent-items",
     request: (app) =>
-      app.request(
-        `http://remii.test/api/vault/agent-items?userId=${IMPOSTOR}`,
-      ),
+      app.request(`http://remii.test/api/vault/agent-items?userId=${IMPOSTOR}`),
   },
   {
     what: "POST /agent-items",
@@ -468,9 +466,7 @@ describe("no route on this router takes an owner from the request", () => {
 describe("reading the vault", () => {
   test("GET / answers with all four sections and no secrets in any of them", async () => {
     const store = fakeStore();
-    const response = await appFor(store).request(
-      "http://remii.test/api/vault",
-    );
+    const response = await appFor(store).request("http://remii.test/api/vault");
 
     expect(response.status).toBe(200);
     const text = await response.text();
@@ -717,14 +713,11 @@ describe("bodies", () => {
       JSON.stringify("nope"),
       "not json",
     ]) {
-      const response = await app.request(
-        "http://remii.test/api/vault/logins",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body,
-        },
-      );
+      const response = await app.request("http://remii.test/api/vault/logins", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
       expect(response.status).toBe(400);
       expect(store.calls).toEqual([]);
     }

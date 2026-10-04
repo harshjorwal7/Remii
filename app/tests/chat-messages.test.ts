@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { Message, ToolCall } from "@ag-ui/core";
-import { toVisibleChatItems } from "../src/components/channels/chat-messages";
+import {
+  groupChatWork,
+  toVisibleChatItems,
+} from "../src/components/channels/chat-messages";
 
 /**
  * What a channel transcript shows, out of the messages a run produced.
@@ -207,15 +210,42 @@ describe("toVisibleChatItems", () => {
     ]);
   });
 
-  // Roles the transcript has nothing to draw for are still dropped rather than rendered empty.
-  test("drops a role it has nothing to show", () => {
+  /*
+   * A REASONING MESSAGE IS A ROW, not a role with nothing to show.
+   *
+   * This test used to assert the opposite, and it was right about the code and wrong about the
+   * product: it pinned that a `role: "reasoning"` message was dropped, which is exactly the gap
+   * where a Bot's "let me check the invoices" vanished and the transcript went from a person's
+   * question straight to a tool line. The role is projected now, and this pins it so it cannot be
+   * dropped again by a well-meaning `message.role !== "user"` bail.
+   */
+  test("draws the model's reasoning as a row of its own", () => {
     const thinking: Message = {
       id: "reasoning-1",
       role: "reasoning",
       content: "considering the grouping",
     };
 
-    expect(toVisibleChatItems([thinking])).toEqual([]);
+    expect(toVisibleChatItems([thinking])).toEqual([
+      { kind: "thinking", id: "reasoning-1", text: "considering the grouping" },
+    ]);
+  });
+
+  /*
+   * THE EMPTY REASONING MESSAGE IS NOT A ROW, and this is the one that would otherwise put a blank
+   * paragraph in the transcript every fifteen seconds of a slow tool: the loop agent emits heartbeat
+   * reasoning with an empty delta so the stall watchdog does not read a long tool as a dead Bot
+   * (see `heartbeat` in `server/src/remi/loop-agent.ts`). They are real messages with real ids.
+   */
+  test("drops a reasoning message with no words in it", () => {
+    for (const content of ["", "   ", "\n\t"] as string[]) {
+      const beat: Message = {
+        id: "reasoning-beat",
+        role: "reasoning",
+        content,
+      };
+      expect(toVisibleChatItems([beat])).toEqual([]);
+    }
   });
 
   test("drops a malformed live user turn instead of throwing", () => {
@@ -1112,5 +1142,140 @@ describe("what a sent attachment is drawn as", () => {
         }),
       ).toBe("image");
     }
+  });
+});
+
+/**
+ * WHAT THE TRANSCRIPT DOES WITH THE WORK A TURN TOOK.
+ *
+ * A turn that ran three steps used to leave three permanent rows in the middle of a conversation,
+ * each one a full line in the same voice as the answer, and the answer was the only part anybody had
+ * asked for. These hold the folding shut: the work of a turn is one disclosure, it is open while
+ * the answer is still being produced, and it folds the moment the answer starts arriving.
+ */
+describe("a turn's work, folded", () => {
+  const tool = (id: string): ToolCall => ({
+    id,
+    type: "function",
+    function: { name: "computer_shell", arguments: "{}" },
+  });
+
+  const items = (messages: Message[]) =>
+    groupChatWork(toVisibleChatItems(messages));
+
+  test("a transcript with no work in it is handed back untouched", () => {
+    const conversation = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "how many issues?",
+      } satisfies Message,
+      PROSE,
+    ];
+
+    // Identity of shape, not of reference: the point is that a plain conversation takes exactly the
+    // path it always did, so this function cannot be the reason it renders differently.
+    expect(items(conversation).map((item) => item.kind)).toEqual([
+      "text",
+      "text",
+    ]);
+  });
+
+  test("the steps of one turn become one group, in order", () => {
+    const [group] = items([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [tool("call-1"), tool("call-2")],
+      },
+      { id: "reasoning-1", role: "reasoning", content: "two files first" },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        content: "",
+        toolCalls: [tool("call-3")],
+      },
+      PROSE,
+    ]);
+
+    expect(group?.kind).toBe("work");
+    if (group?.kind !== "work") throw new Error("expected a work group");
+    expect(group.rows.map((row) => row.kind)).toEqual([
+      "tool",
+      "tool",
+      "thinking",
+      "tool",
+    ]);
+  });
+
+  /*
+   * THE FOLD IS DECIDED BY THE ANSWER ARRIVING, NOT BY A TIMER, which is why it is asserted from
+   * both sides here: before the answer the work is in progress, and the frame the answer's first
+   * token arrives on it is already a record rather than something happening.
+   */
+  test("work followed by the answer is answered; work still running is not", () => {
+    const [answered] = items([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [tool("call-1")],
+      },
+      PROSE,
+    ]);
+    const [running] = items([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [tool("call-1")],
+      },
+    ]);
+
+    expect(answered?.kind === "work" ? answered.answered : null).toBe(true);
+    expect(running?.kind === "work" ? running.answered : null).toBe(false);
+  });
+
+  /*
+   * A PERSON'S OWN TURN ENDS A GROUP, and the work before it is not swallowed into their message.
+   * The reply is the conversation; a disclosure across it would hide the very thing being read.
+   */
+  test("a group stops at the person's next message", () => {
+    const [group, reply] = items([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [tool("call-1")],
+      },
+      { id: "user-2", role: "user", content: "actually, stop" },
+    ]);
+
+    expect(group?.kind === "work" ? group.answered : null).toBe(false);
+    expect(reply?.kind).toBe("text");
+  });
+
+  test("an activity drawn mid-turn keeps its own row between two groups", () => {
+    const drawn = items([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [tool("call-1")],
+      },
+      DRAWING,
+      {
+        id: "assistant-2",
+        role: "assistant",
+        content: "",
+        toolCalls: [tool("call-2")],
+      },
+      PROSE,
+    ]).map((item) => item.kind);
+
+    // The interface is drawn between two disclosures rather than absorbed into either of them,
+    // because it is not the Bot thinking and not the Bot working — it is the Bot showing something.
+    expect(drawn).toEqual(["work", "activity", "work", "text"]);
   });
 });

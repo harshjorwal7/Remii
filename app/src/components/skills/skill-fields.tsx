@@ -1,4 +1,5 @@
 import { useForm } from "@tanstack/react-form";
+import { useEffect, useRef } from "react";
 import { SkillRepo } from "@/components/skills/skill-repo";
 import { SkillTools } from "@/components/skills/skill-tools";
 import { Button } from "@/components/ui/button";
@@ -34,6 +35,7 @@ export function SkillFields({
   onCancel,
   footer,
   slugLocked = false,
+  values,
 }: {
   defaultValues: SkillFormValues;
   submitLabel: string;
@@ -51,6 +53,24 @@ export function SkillFields({
    * field is read-only here and the form says why.
    */
   slugLocked?: boolean;
+  /**
+   * A new set of values to put in the fields, for a form somebody else filled.
+   *
+   * WHY THIS EXISTS RATHER THAN NEW `defaultValues`. `useForm` reads `defaultValues` exactly once,
+   * when it builds its API — every later render calls `update`, which leaves the current values
+   * alone. So a parent that re-renders with a drafted skill in hand would change nothing on screen,
+   * and the save would write the empty form the person was shown before drafting. That is the
+   * failure this prop exists to make impossible.
+   *
+   * `form.reset`, not a field-by-field write, because a reset also re-runs the validators: a drafted
+   * slug that breaks the pattern should be shown as breaking it rather than sitting quietly invalid
+   * until Submit.
+   *
+   * IDENTITY, NOT DEEP EQUALITY. Each new object resets once, and the same object twice does
+   * nothing — which is what lets a caller pass a draft, watch a person edit it for a minute, and
+   * have the edits stay put.
+   */
+  values?: SkillFormValues;
 }) {
   const form = useForm({
     defaultValues,
@@ -59,6 +79,13 @@ export function SkillFields({
       await onSubmit(value);
     },
   });
+
+  const applied = useRef<SkillFormValues | null>(null);
+  useEffect(() => {
+    if (!values || values === applied.current) return;
+    applied.current = values;
+    form.reset(values);
+  }, [values, form]);
 
   return (
     <form

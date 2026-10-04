@@ -77,6 +77,15 @@ export type E2BDesktopLike = {
   moveMouse?(x: number, y: number): Promise<void>;
   mousePress?(button?: "left" | "right" | "middle"): Promise<void>;
   mouseRelease?(button?: "left" | "right" | "middle"): Promise<void>;
+  /**
+   * E2B's own one-shot clicks, when the SDK exposes them.
+   *
+   * Optional because the shape is structural and the deployment may be running against a sandbox
+   * handle that does not carry them; the click falls back to the composed move/press/release.
+   */
+  leftClick?(x?: number, y?: number): Promise<void>;
+  rightClick?(x?: number, y?: number): Promise<void>;
+  middleClick?(x?: number, y?: number): Promise<void>;
   doubleClick?(x?: number, y?: number): Promise<void>;
   scroll?(direction?: "up" | "down", amount?: number): Promise<void>;
   press?(key: string | string[]): Promise<void>;
@@ -128,13 +137,21 @@ const toBase64 = (bytes: Uint8Array): string =>
  * So the workspace is resolved rather than assumed, and the answer is cached per sandbox because the
  * adapter is built on every resolve and a round trip per tool call would be a real cost.
  *
+ * Cached BY ID, not by handle. This used to be a `WeakMap` keyed on the sandbox object — but
+ * `Sandbox.connect` returns a NEW instance on every call, and the adapter is rebuilt per resolve, so
+ * every tool call hit a miss: a workspace probe on every shell command, the pyatspi probe plus two
+ * `files.write` on every screen read, every time. The id is stable across the new handle each call
+ * builds and across a pause/resume — where the machine comes back with the same disk and the same
+ * apt-installed packages — so one entry per sandbox is exactly right, and it is the only keying under
+ * which the cache does any work at all.
+ *
  * Order matters. A mounted volume wins, because that is where a person's files are supposed to be and
  * changing the answer would lose them. The home directory is the fallback, and it is a real fallback
  * rather than a shrug: it is writable, it persists for the life of the sandbox exactly as the volume
  * did, and the volume name stays derived from the same user id so enabling volumes later points at the
  * same data.
  */
-const workspaceCache = new WeakMap<object, Promise<string>>();
+const workspaceCache = new Map<string, Promise<string>>();
 
 async function detectWorkspace(sandbox: E2BDesktopLike): Promise<string> {
   try {
@@ -162,10 +179,10 @@ async function detectWorkspace(sandbox: E2BDesktopLike): Promise<string> {
 
 /** This sandbox's workspace, resolved once. */
 function workspaceFor(sandbox: E2BDesktopLike): Promise<string> {
-  const existing = workspaceCache.get(sandbox as object);
+  const existing = workspaceCache.get(sandbox.sandboxId);
   if (existing) return existing;
   const detected = detectWorkspace(sandbox);
-  workspaceCache.set(sandbox as object, detected);
+  workspaceCache.set(sandbox.sandboxId, detected);
   return detected;
 }
 
@@ -387,7 +404,7 @@ except Exception as e:
  * all). Cached so every subsequent `computer_screen` costs exactly one exec, not a probe plus an exec,
  * and so a failed install is remembered as "no tree" rather than retried on every turn.
  */
-const atspiCache = new WeakMap<object, Promise<boolean>>();
+const atspiCache = new Map<string, Promise<boolean>>();
 
 async function ensureAtSpi(sandbox: E2BDesktopLike): Promise<boolean> {
   try {
@@ -416,10 +433,10 @@ async function ensureAtSpi(sandbox: E2BDesktopLike): Promise<boolean> {
 }
 
 function atSpiReady(sandbox: E2BDesktopLike): Promise<boolean> {
-  const existing = atspiCache.get(sandbox as object);
+  const existing = atspiCache.get(sandbox.sandboxId);
   if (existing) return existing;
   const ready = ensureAtSpi(sandbox);
-  atspiCache.set(sandbox as object, ready);
+  atspiCache.set(sandbox.sandboxId, ready);
   return ready;
 }
 
@@ -509,10 +526,10 @@ except Exception as e:
 `;
 
 /** Best-effort: both helper scripts into the sandbox, once per sandbox. */
-const scriptsCache = new WeakMap<object, Promise<void>>();
+const scriptsCache = new Map<string, Promise<void>>();
 
 function ensureSandboxScripts(sandbox: E2BDesktopLike): Promise<void> {
-  const existing = scriptsCache.get(sandbox as object);
+  const existing = scriptsCache.get(sandbox.sandboxId);
   if (existing) return existing;
   const written = (async () => {
     try {
@@ -520,12 +537,66 @@ function ensureSandboxScripts(sandbox: E2BDesktopLike): Promise<void> {
       await sandbox.files.write(DOM_DUMP_PATH, DOM_DUMP_SCRIPT);
     } catch (error) {
       // Retry next time: a sandbox mid-provisioned momentarily refuses writes.
-      scriptsCache.delete(sandbox as object);
+      scriptsCache.delete(sandbox.sandboxId);
       throw error;
     }
   })();
-  scriptsCache.set(sandbox as object, written);
+  scriptsCache.set(sandbox.sandboxId, written);
   return written.catch(() => undefined);
+}
+
+/**
+ * Retry a sandbox call that failed for a reason that will plausibly be gone in a moment.
+ *
+ * THE REASON THIS IS NARROW. There was no retry anywhere in this file, and adding a blanket one is
+ * actively dangerous here: the model retries too. Hand a failed tool call back and the model reissues
+ * it, which is right for "that did not work" and catastrophic for "that worked". A click whose response
+ * was lost looks exactly like a click that did not happen, so retrying everything would double-press
+ * buttons, re-submit forms and re-run shell commands.
+ *
+ * So this only covers failures where we can be confident NOTHING happened: the connection was refused or
+ * reset carrying no answer. A command reporting a non-zero exit is not retried — it ran and said no, and
+ * running it again would be a second command. A timeout is not retried, because a command that outlived
+ * its deadline is still running inside the sandbox.
+ *
+ * What it buys is the transient case that would otherwise become a failed task: E2B refusing a
+ * connection while a sandbox is resuming, an envd socket that resets under load. Those are common, they
+ * mean nothing to the model, and retrying costs one short backoff instead of a whole re-planned turn.
+ */
+async function withTransientRetry<T>(
+  work: () => Promise<T>,
+  opts: { attempts?: number; label: string },
+): Promise<T> {
+  const attempts = opts.attempts ?? 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await work();
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts || !isTransientSandboxError(error)) throw error;
+      // 150ms then 450ms. Long enough that a resuming machine is more likely to be up than thrashed,
+      // short enough that two retries cost less than the `computer_screen` the model would otherwise
+      // spend working out what went wrong.
+      await Bun.sleep(attempt * 150);
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Whether a failure is worth retrying, judged from what reached us rather than from a status code.
+ *
+ * Deliberately does NOT match a timeout's own name: `TimeoutError` appears here only because E2B raises
+ * it for a connection that never established. A command that exceeded its `timeoutMs` surfaces as a
+ * different error and must not be retried, because the process is still running.
+ */
+function isTransientSandboxError(error: unknown): boolean {
+  const text =
+    error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up|network error|fetch failed/i.test(
+    text,
+  );
 }
 
 /**
@@ -600,9 +671,52 @@ export function computerUseFor(sandbox: E2BDesktopLike): DesktopComputerUse {
           await sandbox.doubleClick?.(px, py);
           return;
         }
-        await sandbox.moveMouse?.(px, py);
-        await sandbox.mousePress?.(target);
-        await sandbox.mouseRelease?.(target);
+        /*
+         * One round trip where the SDK offers one.
+         *
+         * The composed `moveMouse` + `mousePress` + `mouseRelease` is three sequential calls to a
+         * machine roughly 300ms away, so a single click spent close to a second before the model was
+         * told it had happened — and the skills have it LOOK, click, VERIFY, so that second is paid
+         * again on every action of every task. E2B's own `leftClick`/`rightClick`/`middleClick` do the
+         * same thing in one call.
+         *
+         * The composition stays as the fallback and is not deleted: it is what runs against a handle
+         * without the one-shot methods, and the order (move, then press, then release) is load-bearing
+         * there — those three cannot be parallelised without the press landing before the move.
+         */
+        const oneShot =
+          target === "right"
+            ? sandbox.rightClick
+            : target === "middle"
+              ? sandbox.middleClick
+              : sandbox.leftClick;
+        /*
+         * Retried, and only on the narrow class in {@link withTransientRetry}.
+         *
+         * A click is the one action where a lost RESPONSE is indistinguishable from a click that did
+         * not happen, so this is where a transient error most often became a duplicate press: the model
+         * was told the click failed, reissued it, and the button was pressed twice. When the failure
+         * arrives as a refused or reset connection the request never reached the machine, so retrying is
+         * the difference between one press and two.
+         */
+        if (oneShot) {
+          await withTransientRetry(() => oneShot.call(sandbox, px, py), {
+            label: "click",
+          });
+          return;
+        }
+        // The composition is NOT retried as a unit: a failure part-way through may have left the button
+        // held down, and pressing again is not safe. The parts are individually retriable, and each is
+        // idempotent in the way that matters — a repeated move goes to the same place.
+        await withTransientRetry(async () => sandbox.moveMouse?.(px, py), {
+          label: "moveMouse",
+        });
+        await withTransientRetry(async () => sandbox.mousePress?.(target), {
+          label: "mousePress",
+        });
+        await withTransientRetry(async () => sandbox.mouseRelease?.(target), {
+          label: "mouseRelease",
+        });
       },
 
       async drag(startX, startY, endX, endY, button) {
@@ -620,21 +734,67 @@ export function computerUseFor(sandbox: E2BDesktopLike): DesktopComputerUse {
     },
 
     keyboard: {
-      async type(text) {
+      async type(text, delay) {
         if (!text) return;
-        // `write` is E2B's own typing, which chunks the text and paces it. Handing a whole string to
-        // `press` would be read as one key name and type nothing.
-        await (sandbox.write
-          ? sandbox.write(text, { chunkSize: 25, delayInMs: 20 })
-          : sandbox.press?.(text));
+        /*
+         * `write` is E2B's own typing, which chunks the text and paces it. Handing a whole string to
+         * `press` would be read as one key name and type nothing.
+         *
+         * The caller's `delay` is honoured rather than dropped. It used to be ignored — this signature
+         * took only `text`, so `computer_type`'s explicit `type(text, 0)` was silently discarded and
+         * every field was typed at the adapter's own pace. That is a correctness bug wearing a
+         * performance costume in both directions: at the default 20ms a 40-character URL took most of
+         * a second of keystrokes, during which a page could re-render and move focus out from under
+         * the text, and the characters landed in the wrong field while the tool reported success.
+         *
+         * `delay` of 0 means "no pause", not "no pacing": the chunking stays, because a single
+         * enormous key event is not what an application expects either, but the per-character pause
+         * goes. A caller that passes nothing keeps the adapter's own rate.
+         */
+        const { write, press } = sandbox;
+        if (write) {
+          await withTransientRetry(
+            () =>
+              write.call(sandbox, text, {
+                chunkSize: 25,
+                delayInMs: delay ?? 20,
+              }),
+            { label: "write" },
+          );
+          return;
+        }
+        if (press) {
+          await withTransientRetry(() => press.call(sandbox, text), {
+            label: "press",
+          });
+          return;
+        }
+        // Neither path exists, so nothing was typed. Saying so beats a tool result that reports
+        // characters typed when no key event was ever produced — the model would move on believing a
+        // field was filled.
+        throw new Error(
+          "This desktop cannot type, so nothing was typed. Use the on-screen keyboard or a shell command instead.",
+        );
       },
 
       async press(key) {
-        await sandbox.press?.(normaliseKey(key));
+        const press = sandbox.press;
+        if (!press) {
+          throw new Error(
+            "This desktop cannot send key presses, so the key was not sent. Nothing was typed.",
+          );
+        }
+        await press.call(sandbox, normaliseKey(key));
       },
 
       async hotkey(keys) {
-        await sandbox.press?.(normaliseKey(keys));
+        const press = sandbox.press;
+        if (!press) {
+          throw new Error(
+            `This desktop cannot send key presses, so "${keys}" was not sent. Nothing was typed.`,
+          );
+        }
+        await press.call(sandbox, normaliseKey(keys));
       },
     },
 

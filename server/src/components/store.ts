@@ -32,6 +32,9 @@ export type GrantedComponent = {
   name: string;
   /** The published description. A draft is never sent anywhere a model can read it. */
   description: string;
+  /** What a person sees in the gallery; lets the app preview it without a second read. */
+  title: string;
+  kind: string;
 };
 
 /**
@@ -227,6 +230,7 @@ export function createComponentStore(database: Database): ComponentStore {
         .select({
           name: components.name,
           description: components.publishedDescription,
+          title: components.title,
           kind: components.kind,
           sandboxOwner: sandboxedComponents.ownerUserId,
         })
@@ -265,7 +269,14 @@ export function createComponentStore(database: Database): ComponentStore {
           const owner = row.sandboxOwner ?? null;
           if (owner && owner !== bot?.ownerUserId) return [];
         }
-        return [{ name: row.name, description: row.description }];
+        return [
+          {
+            name: row.name,
+            description: row.description,
+            title: row.title,
+            kind: row.kind,
+          },
+        ];
       });
     },
 

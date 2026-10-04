@@ -30,6 +30,7 @@ import {
   type ChannelSummary,
   channelKeys,
 } from "@/lib/channels/queries";
+import { forgetLiveRun } from "@/lib/copilot/live-runs";
 import { queryClient } from "@/query-client";
 import { settleReactWork } from "./settle-react-work";
 
@@ -196,6 +197,12 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  /*
+   * The live-run store is module state and every test here opens the same channel, so a queue or a
+   * turn left behind by one test is still there in the next. Opening a conversation that has not
+   * happened yet is what this file means; see `forgetLiveRun`.
+   */
+  forgetLiveRun(channel.id);
   runs = [];
   deletes = [];
   uploads = [];

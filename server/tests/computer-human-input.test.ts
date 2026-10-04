@@ -51,14 +51,11 @@ function recordingGateway() {
 
 async function send(body: unknown, kind: string) {
   const { app, calls } = recordingGateway();
-  const response = await app.request(
-    `http://remii.test/bot-1/human/${kind}`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
+  const response = await app.request(`http://remii.test/bot-1/human/${kind}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
   return { response, calls };
 }
 

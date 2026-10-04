@@ -67,7 +67,7 @@ function profile(input: {
     avatarSeed: input.id,
     deletedAt: null,
     endpoint: input.id === "picked-harness" ? "http://127.0.0.1:4201" : null,
-    
+
     hidden: false,
     id: input.id,
     name: input.name,

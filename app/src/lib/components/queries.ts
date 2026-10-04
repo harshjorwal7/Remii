@@ -23,6 +23,9 @@ export type ComponentRecord = {
 export type GrantedComponent = {
   name: string;
   description: string;
+  /** Present from the current server; a cache from an older one may omit it. */
+  title?: string;
+  kind?: string;
 };
 
 export const componentKeys = {

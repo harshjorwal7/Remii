@@ -16,22 +16,16 @@ describe("running with no sign-in", () => {
   test("a configured provider always wins, whatever else is set", () => {
     // A provider means sign-in, so the flag cannot half-disable it. Asserted with the flag on,
     // because the dangerous reading is "the flag opens a deployment that has a provider".
-    expect(singleUserEnabled({ REMII_SINGLE_USER: "true" }, true)).toBe(
-      false,
-    );
+    expect(singleUserEnabled({ REMII_SINGLE_USER: "true" }, true)).toBe(false);
     expect(singleUserEnabled({}, true)).toBe(false);
   });
 
   test("no provider and the flag set runs open, because somebody said so", () => {
-    expect(singleUserEnabled({ REMII_SINGLE_USER: "true" }, false)).toBe(
-      true,
-    );
+    expect(singleUserEnabled({ REMII_SINGLE_USER: "true" }, false)).toBe(true);
   });
 
   test("the older name for the flag still works, so an existing .env keeps running", () => {
-    expect(singleUserEnabled({ REMII_DEV_NO_AUTH: "true" }, false)).toBe(
-      true,
-    );
+    expect(singleUserEnabled({ REMII_DEV_NO_AUTH: "true" }, false)).toBe(true);
   });
 
   test("no provider and no flag refuses to start", () => {

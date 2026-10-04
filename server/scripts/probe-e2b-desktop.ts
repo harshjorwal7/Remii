@@ -31,12 +31,16 @@ let sandbox: Awaited<ReturnType<typeof Sandbox.create>> | null = null;
 const verdicts: string[] = [];
 
 const ok = (label: string, pass: boolean, detail = "") => {
-  verdicts.push(`${pass ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`);
+  verdicts.push(
+    `${pass ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`,
+  );
   if (!pass) process.exitCode = 1;
 };
 
 try {
-  console.log(`default template: ${(Sandbox as unknown as { defaultTemplate: string }).defaultTemplate}`);
+  console.log(
+    `default template: ${(Sandbox as unknown as { defaultTemplate: string }).defaultTemplate}`,
+  );
   console.log("creating a desktop sandbox with no template argument…");
 
   sandbox = await Sandbox.create({
@@ -57,7 +61,11 @@ try {
   );
 
   const shot = await sandbox.screenshot("bytes");
-  ok("screenshot returns bytes", shot.byteLength > 1000, `${shot.byteLength} bytes`);
+  ok(
+    "screenshot returns bytes",
+    shot.byteLength > 1000,
+    `${shot.byteLength} bytes`,
+  );
 
   // 2. The reason for the migration.
   let egress = "unknown";
@@ -73,7 +81,11 @@ try {
       `example.com -> ${egress}`,
     );
   } catch (error) {
-    ok("sandbox has internet egress", false, `threw: ${String(error).slice(0, 200)}`);
+    ok(
+      "sandbox has internet egress",
+      false,
+      `threw: ${String(error).slice(0, 200)}`,
+    );
   }
 
   // DNS separately, because "curl worked" and "DNS resolves" are different facts and a
@@ -83,7 +95,11 @@ try {
       "getent hosts example.com || echo NO_DNS",
       { timeoutMs: 30_000 },
     );
-    ok("DNS resolves", !dns.stdout.includes("NO_DNS"), dns.stdout.trim().slice(0, 80));
+    ok(
+      "DNS resolves",
+      !dns.stdout.includes("NO_DNS"),
+      dns.stdout.trim().slice(0, 80),
+    );
   } catch (error) {
     ok("DNS resolves", false, String(error).slice(0, 150));
   }
@@ -91,14 +107,26 @@ try {
   // 3 + 4. The noVNC URL, and whether it is reachable and protected.
   console.log("starting the VNC stream with requireAuth: true…");
   await sandbox.stream.start({ requireAuth: true });
-  const streamUrl = sandbox.stream.getUrl({ autoConnect: true, viewOnly: false });
-  const authKey = sandbox.stream.getAuthKey();
-  console.log(`stream url: ${streamUrl.replace(/password=[^&]*/, "password=<redacted>")}`);
-  ok("requireAuth: true produced an auth key", Boolean(authKey), `len=${authKey?.length ?? 0}`);
-
-  const x11vnc = await sandbox.commands.run("pgrep -a x11vnc || echo NO_X11VNC", {
-    timeoutMs: 30_000,
+  const streamUrl = sandbox.stream.getUrl({
+    autoConnect: true,
+    viewOnly: false,
   });
+  const authKey = sandbox.stream.getAuthKey();
+  console.log(
+    `stream url: ${streamUrl.replace(/password=[^&]*/, "password=<redacted>")}`,
+  );
+  ok(
+    "requireAuth: true produced an auth key",
+    Boolean(authKey),
+    `len=${authKey?.length ?? 0}`,
+  );
+
+  const x11vnc = await sandbox.commands.run(
+    "pgrep -a x11vnc || echo NO_X11VNC",
+    {
+      timeoutMs: 30_000,
+    },
+  );
   ok(
     "x11vnc runs with a password, not -nopw",
     !x11vnc.stdout.includes("NO_X11VNC") && !x11vnc.stdout.includes("-nopw"),
@@ -109,7 +137,8 @@ try {
   // question, so it gets checked against the real host rather than reasoned about.
   const bare = new URL(streamUrl);
   const noAuth = new URL(bare);
-  for (const key of [...noAuth.searchParams.keys()]) noAuth.searchParams.delete(key);
+  for (const key of [...noAuth.searchParams.keys()])
+    noAuth.searchParams.delete(key);
   noAuth.searchParams.set("autoconnect", "true");
 
   for (const [label, target] of [
@@ -152,11 +181,17 @@ try {
     "echo persisted-marker-4711 > /tmp/probe-persist.txt && cat /tmp/probe-persist.txt",
     { timeoutMs: 30_000 },
   );
-  ok("wrote a marker file", before.stdout.includes("persisted-marker-4711"), before.stdout.trim());
+  ok(
+    "wrote a marker file",
+    before.stdout.includes("persisted-marker-4711"),
+    before.stdout.trim(),
+  );
 
   console.log("pausing…");
   await sandbox.pause();
-  console.log("resuming with Sandbox.connect (it resumes a paused sandbox in place)…");
+  console.log(
+    "resuming with Sandbox.connect (it resumes a paused sandbox in place)…",
+  );
   sandbox = await Sandbox.connect(sandbox.sandboxId, { apiKey });
   console.log(`reconnected, running=${await sandbox.isRunning()}`);
 
@@ -177,14 +212,18 @@ try {
     console.log(`killing probe sandbox ${sandbox.sandboxId}…`);
     await sandbox
       .kill()
-      .catch((error: unknown) => console.log("kill failed:", String(error).slice(0, 200)));
+      .catch((error: unknown) =>
+        console.log("kill failed:", String(error).slice(0, 200)),
+      );
   }
 }
 
 console.log("\n--- results ---");
 for (const line of verdicts) console.log(line);
 console.log(
-  process.exitCode ? "\nRESULT: E2B desktop did NOT satisfy every check" : "\nRESULT: E2B desktop satisfies every check",
+  process.exitCode
+    ? "\nRESULT: E2B desktop did NOT satisfy every check"
+    : "\nRESULT: E2B desktop satisfies every check",
 );
 
 /**
@@ -195,9 +234,15 @@ console.log(
  * reachability claim and nothing more — see the note at the call site for why it says nothing about
  * the password.
  */
-async function probeWebsocket(url: string): Promise<{ reachable: boolean; detail: string }> {
+async function probeWebsocket(
+  url: string,
+): Promise<{ reachable: boolean; detail: string }> {
   const WebSocketCtor = globalThis.WebSocket;
-  if (!WebSocketCtor) return { reachable: false, detail: "no WebSocket implementation available" };
+  if (!WebSocketCtor)
+    return {
+      reachable: false,
+      detail: "no WebSocket implementation available",
+    };
 
   return new Promise((resolve) => {
     let settled = false;
@@ -223,7 +268,9 @@ async function probeWebsocket(url: string): Promise<{ reachable: boolean; detail
         const bytes =
           typeof event.data === "string"
             ? event.data
-            : new TextDecoder("latin1").decode(new Uint8Array(event.data as ArrayBuffer));
+            : new TextDecoder("latin1").decode(
+                new Uint8Array(event.data as ArrayBuffer),
+              );
         socket.close();
         finish(true, `RFB banner ${JSON.stringify(bytes.slice(0, 12))}`);
       };

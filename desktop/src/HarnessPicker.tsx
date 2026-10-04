@@ -86,8 +86,8 @@ export function HarnessPicker({
         applies to will read it.
       */}
       <p className="lede">
-        Remii sets this up for you. If you write code, you can choose the
-        agent framework below.
+        Remii sets this up for you. If you write code, you can choose the agent
+        framework below.
       </p>
 
       <details open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>

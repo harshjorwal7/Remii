@@ -63,14 +63,11 @@ describe("POST /api/plugins/grants", () => {
     ["a whitespace agentId", { kind: "mcp", ref: "tool", agentId: "  " }],
   ])("refuses %s with 400 and never reaches the store", async (_n, body) => {
     const calls = { grants: [] as unknown[], toolCalls: [] as unknown[] };
-    const response = await appWith(calls).request(
-      "http://remii.test/grants",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
+    const response = await appWith(calls).request("http://remii.test/grants", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({

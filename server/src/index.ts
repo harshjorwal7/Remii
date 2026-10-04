@@ -147,6 +147,7 @@ import { useRoutineTools } from "./plugins/builtin-routines";
 import { useComposioClient } from "./plugins/composio";
 import { createComposioClient } from "./plugins/composio-adapter";
 import { redirectUriFor } from "./plugins/oauth";
+import { createSkillDrafter } from "./plugins/skill-drafter";
 import { createPluginStore } from "./plugins/store";
 import {
   grantedSkills,
@@ -886,6 +887,57 @@ const resolveDesktopFor = async (
 };
 
 /**
+ * The still frame each person is currently being served, or is having captured.
+ *
+ * The key is the person, so two people watching two computers never share a frame, and several
+ * components on one page share one capture. See the caller for why a still frame is worth guarding at
+ * all — the short version is that it costs several round trips to the machine the Bot is driving.
+ */
+const stillInFlight = new Map<
+  string,
+  Promise<{ base64: string; width: number; height: number } | null>
+>();
+
+/** The last frame taken for each person, with when it was taken. */
+const stillFreshness = new Map<
+  string,
+  { at: number; frame: { base64: string; width: number; height: number } }
+>();
+
+/**
+ * How long a captured frame is good enough to hand to a second caller.
+ *
+ * 400ms. Below the threshold at which anybody can see a still frame change, and comfortably above the
+ * jitter of a poll loop, so a card animating gets a new frame roughly twice a second instead of racing
+ * the sandbox for every one. It is a cap on the capture RATE, not a cache with a lifetime: nothing
+ * reads `stillFreshness` once the machine is stopped, so a paused desktop never serves a frozen frame
+ * as though it were live.
+ */
+const STILL_FRESH_MS = 400;
+
+const captureStillFor = async (
+  userId: string,
+  row: { displayWidth: number | null; displayHeight: number | null },
+): Promise<{ base64: string; width: number; height: number } | null> => {
+  if (!desktopProvisioner) return null;
+  const fresh = stillFreshness.get(userId);
+  if (fresh && Date.now() - fresh.at < STILL_FRESH_MS) return fresh.frame;
+  const sandbox = (await desktopProvisioner.sandboxFor({
+    key: userId,
+    userId,
+  })) as unknown as E2BDesktopLike;
+  const shot = await captureScreenshot(sandbox);
+  if (!shot) return null;
+  const frame = {
+    base64: shot.data,
+    width: row.displayWidth ?? DESKTOP_RESOLUTION.width,
+    height: row.displayHeight ?? DESKTOP_RESOLUTION.height,
+  };
+  stillFreshness.set(userId, { at: Date.now(), frame });
+  return frame;
+};
+
+/**
  * Open one person's live screen, for the viewer and the browser's noVNC client.
  *
  * Resumed here rather than in the route because opening the screen IS a request to use the computer,
@@ -1405,6 +1457,21 @@ const resolveRuntimeModelApiKey = () =>
 const hostAccessBroker = createHostAccessBroker();
 
 /**
+ * Drafting skills out of a repository, for the New-skill screen.
+ *
+ * Built on the deployment's own model and key, for the reason `chooseSkills` is: a second thing to
+ * configure would be a second thing to forget, and the person pasting a repository is asking the
+ * deployment to do a job the deployment's coworkers already do. The key resolves per call, so a
+ * credential rotated a moment ago is used by the next draft.
+ */
+const skillDrafter = createSkillDrafter({
+  complete: createModelCompleter({
+    model: runtimeModel,
+    resolveApiKey: () => resolveRuntimeModelApiKey(),
+  }),
+});
+
+/**
  * Whether this Bot is a supervisor, which is to say whether it is expected to
  * get work done by handing it to somebody rather than by doing it.
  *
@@ -1538,6 +1605,53 @@ const loadToolsForActor =
             ? desktopToolsFor({
                 resolve: () => resolveDesktopFor(actorId),
                 /*
+                 * Every action on the computer, on the record.
+                 *
+                 * The audit vocabulary for this (`computer.action_allowed`, `_refused`, `_failed`)
+                 * already existed and was written by the browser gateway — which this deployment has
+                 * switched off, leaving the E2B desktop as the only computer a model can reach and
+                 * therefore the only one leaving no trace. Without this, a turn that misclicked left
+                 * nothing to inspect but the model's own account of itself.
+                 *
+                 * Bound to the person and to the Bot that holds the computer, so a row answers both
+                 * "whose machine" and "which coworker drove it" without either being inferred later.
+                 * The payload carries the tool, whether it read or changed something, and how it ended
+                 * — never the arguments, because `computer_type` carries whatever the model was told to
+                 * type, which is regularly a credential.
+                 */
+                onAction: (record) => {
+                  const eventType =
+                    record.outcome === "allowed"
+                      ? "computer.action_allowed"
+                      : record.outcome === "refused"
+                        ? "computer.action_refused"
+                        : "computer.action_failed";
+                  return bootAuditStore.insert({
+                    eventType,
+                    targetType: "desktop",
+                    targetId: actorId,
+                    actorUserId: actorId,
+                    /*
+                     * A person, because that is whose authority was borrowed — the same answer the
+                     * browser gateway gives, and the initiator vocabulary has no `bot` kind to reach
+                     * for. Which coworker drove it is a fact about the action rather than about who
+                     * caused it, so it goes in the payload where it can be filtered on, next to the
+                     * tool and whether it read or changed something.
+                     *
+                     * The payload never carries the arguments: `computer_type` carries whatever the
+                     * model was told to type, which is regularly a credential, and this row goes to a
+                     * table people read.
+                     */
+                    initiator: PERSON_INITIATOR,
+                    payload: {
+                      tool: record.tool,
+                      effect: record.effect,
+                      botId,
+                      ...(record.detail ? { detail: record.detail } : {}),
+                    },
+                  });
+                },
+                /*
                  * Bound to the SIGNED-IN PERSON, not to the Bot.
                  *
                  * The computer belongs to a person and exactly one Bot holds it, so a secret request is
@@ -1593,23 +1707,14 @@ const loadToolsForActor =
                  * computer away, so the catch returns "allowed". The cost of being wrong here is a few
                  * cents on a plan; the cost of refusing wrongly is a person who paid for a computer being
                  * told they may not use it.
+                 *
+                 * Memoised for a minute — see {@link computerAllowance}. This runs on the way into every
+                 * single computer tool call, and it was asking a month-to-date aggregate each time.
                  */
-                mayUseComputer: async () => {
-                  const [plan, used] = await Promise.all([
-                    limitsForUser(database, actorId).catch(() => PLANS.pro),
-                    computerMeter.hoursThisMonth(actorId).catch(() => 0),
-                  ]);
-                  if (used < plan.computerHoursPerMonth) {
-                    return { allowed: true as const };
-                  }
-                  return {
-                    allowed: false as const,
-                    reason: outOfAllowance(
-                      "computer",
-                      periodEnd(new Date(), "month"),
-                    ),
-                  };
-                },
+                mayUseComputer: () =>
+                  computerAllowance(actorId).catch(
+                    (): AllowanceAnswer => ({ allowed: true }),
+                  ),
               })
             : computerGateway
               ? computerToolsFor({
@@ -3218,6 +3323,8 @@ const app = createApp(
   blobStore,
   // And now the vault, after everything else for the same positional reason.
   vaultStore,
+  // Drafting a skill out of a repository, last for that same reason.
+  skillDrafter,
 );
 
 /*
@@ -3527,17 +3634,39 @@ if (desktopProvisioner) {
         const row = await userComputerStore.get(userId);
         if (!row?.sandboxId || !desktopProvisioner) return null;
         if (row.status !== "RUNNING" && row.status !== "READY") return null;
-        const sandbox = (await desktopProvisioner.sandboxFor({
-          key: userId,
-          userId,
-        })) as unknown as E2BDesktopLike;
-        const shot = await captureScreenshot(sandbox);
-        if (!shot) return null;
-        return {
-          base64: shot.data,
-          width: row.displayWidth ?? DESKTOP_RESOLUTION.width,
-          height: row.displayHeight ?? DESKTOP_RESOLUTION.height,
-        };
+        /*
+         * One capture in flight per person, and a frame reused for a moment.
+         *
+         * The card behind a live turn polls this once a second, and every one of those polls used to
+         * resolve the whole desktop — a `Sandbox.connect` — and then run a `scrot | ffmpeg | base64`
+         * command inside the sandbox, plus a second call for the cursor position. That is several
+         * round trips to a machine roughly 300ms away, once a second, WHILE THE BOT IS DRIVING THAT
+         * SAME MACHINE. It was the largest single source of contention between the agent and its own
+         * screen, and it slowed the agent down in order to redraw a thumbnail that had barely
+         * changed.
+         *
+         * Two guards, because they solve different problems:
+         *
+         *  - In-flight sharing: several components on one page (the card, the transcript, a zoomed
+         *    still) ask at the same moment and must not each start a capture. The second caller is
+         *    given the first one's answer instead of queueing behind it.
+         *  - A short freshness window: a poll arriving just after another is answered with the frame
+         *    that was just taken. A still frame for a fraction of a second is indistinguishable, and
+         *    this is what actually caps the rate — a card that has settled stops asking entirely (the
+         *    view settles on identical bytes), so the window is only ever paid for by a card that IS
+         *    actively changing and genuinely wants the next frame.
+         *
+         * Deliberately short, and deliberately not cached across a pause: a stale frame served after
+         * the desktop went to sleep would be a confident lie, which is worse than a slow honest answer.
+         */
+        const existing = stillInFlight.get(userId);
+        if (existing) return existing;
+        const started = captureStillFor(userId, row);
+        stillInFlight.set(userId, started);
+        void started
+          .catch(() => undefined)
+          .finally(() => stillInFlight.delete(userId));
+        return started;
       },
       (userId: string) => openDesktopStream(userId),
       // Settings' "switch off" and "reset". Both per person, because the computer is: a pause is
@@ -3776,4 +3905,53 @@ function desktopConcurrencyLimit(): number {
  */
 function desktopIdleStopMinutes(): number {
   return effectiveIdleStopMinutes();
+}
+
+/**
+ * Whether this person's computer is affordable, memoised for a minute.
+ *
+ * The check is two queries — the plan's tier, and `sum(billable_seconds)` over every computer debit
+ * this month — and it ran on the way into EVERY `computer_*` tool call, so a task that looked at the
+ * screen a dozen times asked a monthly aggregate a dozen times to answer a yes/no that changes once
+ * a month. On the hot path between the model and the machine, which is the whole problem.
+ *
+ * A minute is far inside the resolution that matters. The number being compared is a month-to-date
+ * total against a monthly allowance, so a minute of staleness is a rounding error against a decision
+ * that cannot flip until the month rolls over; and the meter writes a debit when a session CLOSES,
+ * not as it accrues, so a live session's own usage is not even visible to this query yet.
+ *
+ * Fails OPEN exactly as the uncached version did, and for the same reason: a failed read of somebody's
+ * own allowance must not take their computer away. A stale allow is a few cents on a plan; a wrongly
+ * refused one is a person who paid for a computer being told they may not use it.
+ *
+ * Per process, which is the same scope as the rest of the memoisation in the provisioner: a
+ * single-server deployment is the target, and a stale minute across replicas is not a billing
+ * correctness problem because the authoritative total is recomputed at session close.
+ */
+const allowanceMemo = new Map<
+  string,
+  { at: number; answer: AllowanceAnswer }
+>();
+const ALLOWANCE_TTL_MS = 60_000;
+
+type AllowanceAnswer =
+  | { allowed: true }
+  | { allowed: false; reason: ReturnType<typeof outOfAllowance> };
+
+async function computerAllowance(userId: string): Promise<AllowanceAnswer> {
+  const warm = allowanceMemo.get(userId);
+  if (warm && Date.now() - warm.at < ALLOWANCE_TTL_MS) return warm.answer;
+  const [plan, used] = await Promise.all([
+    limitsForUser(database, userId).catch(() => PLANS.pro),
+    computerMeter.hoursThisMonth(userId).catch(() => 0),
+  ]);
+  const answer: AllowanceAnswer =
+    used < plan.computerHoursPerMonth
+      ? { allowed: true }
+      : {
+          allowed: false,
+          reason: outOfAllowance("computer", periodEnd(new Date(), "month")),
+        };
+  allowanceMemo.set(userId, { at: Date.now(), answer });
+  return answer;
 }

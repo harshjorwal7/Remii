@@ -185,9 +185,7 @@ describe("GET /", () => {
 
   test("refuses without a session, before the store is asked", async () => {
     const store = fakeStore();
-    const response = await appFor(store, denied).request(
-      "http://remii.test/",
-    );
+    const response = await appFor(store, denied).request("http://remii.test/");
 
     expect(response.status).toBe(401);
     expect(store.calls).toEqual([]);

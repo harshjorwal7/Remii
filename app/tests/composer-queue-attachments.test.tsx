@@ -24,6 +24,7 @@ import {
   attachmentUrl,
   MAX_ATTACHMENTS_PER_MESSAGE,
 } from "@/lib/channels/attachments";
+import { forgetLiveRun } from "@/lib/copilot/live-runs";
 import { settleReactWork } from "./settle-react-work";
 
 /**
@@ -159,6 +160,15 @@ let deletes: string[];
 let uploads: string[];
 
 beforeEach(() => {
+  /*
+   * THE QUEUE IS MODULE STATE NOW, and every test in this file opens the same conversation.
+   *
+   * That is the store doing its job — a parked message belongs to the channel rather than to the
+   * screen — and it means a queue parked by one test is still parked in the next. Forgetting the
+   * channel is the honest way to open a conversation that has not happened yet; without it a test
+   * inherits whatever the previous one left behind and asserts about both at once.
+   */
+  forgetLiveRun("channel-1");
   removeAttachmentCalls = [];
   consumeAttachmentsCallCount = 0;
   handedOut.removeAttachment.clear();
@@ -582,21 +592,23 @@ test("a drained turn whose send fails puts the queue back instead of releasing i
 });
 
 /**
- * THE THIRD WAY A PARKED ROW LOSES ITS LAST REFERENCE, and the one that used to say nothing.
+ /*
+ * WALKING AWAY DOES NOT GIVE THE ROWS BACK, AND THAT IS THE CHANGE.
  *
- * The two above go through the queue: a removal, and the cap re-check. A drained turn whose send
- * failed used to be a third — it is not one any more, because a failed run puts its messages back
- * rather than deleting what they were carrying; see the test above. This one goes through React.
- * The composer clears its strip as a message is parked, so the parked entry is the only thing
- * holding those rows — and walking to another channel unmounts the whole conversation, entry and
- * all, restored entries included.
+ * This test used to assert the opposite — that unmounting with something parked released the
+ * staged rows behind it — and the reasoning it carried was that `queue.ts` is candid that switching
+ * channels "takes anything parked in it with it". That sentence is about the person's WORDS, which
+ * they watched land on screen and can retype. The staged rows underneath them are not words: they
+ * are files somebody attached to a correction they meant to send, and they were being deleted by
+ * the gesture of looking at another conversation.
  *
- * `queue.ts` is candid that switching channels "takes anything parked in it with it", but that
- * sentence is about the person's WORDS, which they watched land on screen and can retype. The
- * staged rows underneath them are what `releaseStagedAttachment` exists for, and nothing was
- * releasing them here.
+ * So the queue lives where the conversation lives rather than where the screen does
+ * (`lib/copilot/live-runs.ts`), nothing is released on unmount, and the row is given back by the
+ * one gesture that means it: taking the parked message back by hand. Which is what is asserted
+ * here, and the second half of it is the part that matters — the row has to still be there to be
+ * released at all, or "we no longer delete it" would be satisfied by losing it.
  */
-test("walking away with a message still parked releases the rows it was holding", async () => {
+test("walking away keeps a parked message and its rows; taking it back releases them", async () => {
   const view = render(
     <ConversationView
       channelId="channel-1"
@@ -620,9 +632,33 @@ test("walking away with a message still parked releases the rows it was holding"
   expect(deletes).toEqual([]);
 
   // Another channel, a closed panel, a route change: whatever the gesture, this is what reaches the
-  // queue — a teardown with something still in it and nobody left to ask.
+  // queue — a teardown with something still in it.
   view.unmount();
 
+  // Nothing was given back. The person is coming back to this, and the files behind it are theirs.
+  await waitFor(() => expect(deletes).toEqual([]));
+
+  // And the queue is where they left it, so the next visit to this conversation shows the
+  // correction they typed rather than an empty composer and a mystery.
+  const returned = render(
+    <ConversationView
+      channelId="channel-1"
+      messages={[]}
+      onSubmit={() => {}}
+      pending
+      queueWhileBusy
+    />,
+  );
+  const remove = await waitFor(() => {
+    const found = returned.container.querySelector(
+      "[aria-label^='Remove queued message']",
+    );
+    expect(found).not.toBeNull();
+    return found;
+  });
+
+  // The one gesture that does mean it: the row goes back, and the message goes with it.
+  fireEvent.click(remove as HTMLElement);
   await waitFor(() =>
     expect(deletes).toEqual([attachmentUrl("stored-notes.txt")]),
   );

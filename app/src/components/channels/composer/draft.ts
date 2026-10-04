@@ -104,6 +104,12 @@ export type CommandOption = {
   prompt?: string;
   /** Side effect run when `kind` is `action`. */
   run?: () => void;
+  /**
+   * Left out of the `/` dropdown but still a known command, so a chip already in the text
+   * (inserted by a picker, or parked in a queued draft) resolves its instruction on send.
+   * The resolution table is the full list; the menu is the visible subset.
+   */
+  hidden?: boolean;
 };
 
 export type AppliedCommands = {

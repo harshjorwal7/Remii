@@ -128,6 +128,14 @@ export type ComposerProps = {
   agents?: readonly AgentOption[];
   commands?: readonly CommandOption[];
   /**
+   * Escape hatch to the editor's imperative handle, for screens that need to inject a chip
+   * without typing — a `/components` picker drops its pick straight into the draft here.
+   *
+   * An optional ref object, not a callback: the picker holds no lifecycle of its own, so a
+   * created callback would be a new function every render for the same ref.
+   */
+  editorRef?: { current: PromptAreaHandle | null };
+  /**
    * Receives the whole draft rather than a string, so a mention or a command reaches the caller as
    * structured data instead of something it would have to re-parse out of the text.
    */
@@ -323,6 +331,7 @@ export function Composer({
   stoppable,
   initialValue,
   droppedAttachments,
+  editorRef,
   // Nothing parked is the right answer for every caller without a queue, which is most of them.
   queuedAttachmentCount = 0,
 }: ComposerProps) {
@@ -332,6 +341,23 @@ export function Composer({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submitInFlight = useRef(false);
   const promptAreaRef = useRef<PromptAreaHandle>(null);
+  /*
+   * A CALLBACK REF, so the ref the rest of this file uses stays one stable object.
+   *
+   * `editorRef ?? promptAreaRef` would read more directly, but a ref chosen by a ternary is a new
+   * binding on every render that flips, and the exhaustive-deps rule is right to be suspicious of
+   * it. Writing to both here keeps this component reading its own ref and nothing else, and hands a
+   * caller's ref the same handle when one was passed.
+   */
+  const attachPromptArea = useCallback(
+    (handle: PromptAreaHandle | null) => {
+      promptAreaRef.current = handle;
+      if (editorRef) {
+        editorRef.current = handle;
+      }
+    },
+    [editorRef],
+  );
   /**
    * The composer's outer element, and the reason the hook's own `containerRef` is left on the
    * floor.
@@ -1451,7 +1477,7 @@ export function Composer({
               onImagePaste={canAttach ? stagePastedImage : undefined}
               onSubmit={submitDraft}
               placeholder="Ask anything"
-              ref={promptAreaRef}
+              ref={attachPromptArea}
               triggers={triggers}
               value={value}
             />
@@ -1528,7 +1554,7 @@ export function Composer({
             onImagePaste={canAttach ? stagePastedImage : undefined}
             onSubmit={submitDraft}
             placeholder="Ask anything"
-            ref={promptAreaRef}
+            ref={attachPromptArea}
             triggers={triggers}
             value={value}
           />

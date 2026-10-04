@@ -69,14 +69,11 @@ describe("POST /api/plugins/servers", () => {
     ["a whitespace instanceHost", { key: "k", instanceHost: "  " }],
   ])("refuses %s with 400 and never reaches the store", async (_n, body) => {
     const seen = calls();
-    const response = await appWith(seen).request(
-      "http://remii.test/servers",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
+    const response = await appWith(seen).request("http://remii.test/servers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
@@ -88,17 +85,14 @@ describe("POST /api/plugins/servers", () => {
 
   test("trims the key and optional fields on the happy path", async () => {
     const seen = calls();
-    const response = await appWith(seen).request(
-      "http://remii.test/servers",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          key: "  user-oauth  ",
-          credentialId: "  cred-1  ",
-        }),
-      },
-    );
+    const response = await appWith(seen).request("http://remii.test/servers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        key: "  user-oauth  ",
+        credentialId: "  cred-1  ",
+      }),
+    });
 
     expect(response.status).toBe(200);
     expect(seen.addServer).toHaveLength(1);

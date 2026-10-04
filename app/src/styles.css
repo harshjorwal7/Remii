@@ -242,6 +242,16 @@ body {
 }
 
 /*
+ * The same rule for a folded turn's work, which is drawn by `thought-process.tsx` rather than by
+ * `ToolLine`. One line rather than a shared class on both elements because they are different
+ * things: a tool line is one action with a disclosure, and a thought process is a whole turn's work
+ * with one. They agree on what an open disclosure looks like and nothing else.
+ */
+.thought-process[open] .thought-process-chevron {
+  transform: rotate(90deg);
+}
+
+/*
  * Row descriptions wrap on sense rather than on width.
  *
  * Here rather than on the `ItemDescription` primitive, which is where this started. The reason was

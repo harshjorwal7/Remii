@@ -23,7 +23,9 @@ import {
  * `connected-accounts-list.test.tsx`, which exports its own rule as a function for the same reason.
  */
 
-function skill(overrides: Partial<PluginSkill> & { slug: string }): PluginSkill {
+function skill(
+  overrides: Partial<PluginSkill> & { slug: string },
+): PluginSkill {
   return {
     id: `skill-${overrides.slug}`,
     ownerUserId: null,

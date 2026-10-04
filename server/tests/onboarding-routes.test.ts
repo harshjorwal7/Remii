@@ -67,14 +67,11 @@ describe("onboarding routes", () => {
     const { store, state } = memoryStore({ step: 0, completedAt: null });
     const app = appWith(store);
 
-    const response = await app.request(
-      "http://remii.local/api/me/onboarding",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ step: 2 }),
-      },
-    );
+    const response = await app.request("http://remii.local/api/me/onboarding", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ step: 2 }),
+    });
 
     expect(response.status).toBe(200);
     expect(state.step).toBe(2);
@@ -87,14 +84,11 @@ describe("onboarding routes", () => {
     const { store, state } = memoryStore({ step: 2, completedAt: null });
     const app = appWith(store);
 
-    const response = await app.request(
-      "http://remii.local/api/me/onboarding",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ completed: true }),
-      },
-    );
+    const response = await app.request("http://remii.local/api/me/onboarding", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ completed: true }),
+    });
 
     expect(response.status).toBe(200);
     expect(state.completedAt).not.toBeNull();
@@ -116,14 +110,11 @@ describe("onboarding routes", () => {
     const { store, state } = memoryStore({ step: 0, completedAt: null });
     const app = appWith(store);
 
-    const response = await app.request(
-      "http://remii.local/api/me/onboarding",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
+    const response = await app.request("http://remii.local/api/me/onboarding", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     expect(response.status).toBe(400);
     expect(state).toEqual({ step: 0, completedAt: null });
@@ -132,14 +123,11 @@ describe("onboarding routes", () => {
   test("answers 503 rather than pretending when there is no store", async () => {
     const app = appWith(undefined);
 
-    const response = await app.request(
-      "http://remii.local/api/me/onboarding",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ completed: true }),
-      },
-    );
+    const response = await app.request("http://remii.local/api/me/onboarding", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ completed: true }),
+    });
 
     expect(response.status).toBe(503);
   });

@@ -40,6 +40,7 @@ import {
   resolveAmbiguousRef,
   searchIndex,
 } from "./repo-index";
+import { DraftRefusedError, type SkillDrafts } from "./skill-drafter";
 import {
   CatalogueEntryUnknownError,
   CustomServerRefusedError,
@@ -147,7 +148,6 @@ const DEFAULT_DIRECTORY_ORDER = [
   "asana",
 ] as const;
 
-
 /**
  * The Plugins surface: what this deployment has added, and which Bots may use it.
  *
@@ -241,6 +241,15 @@ export function createPluginRoutes(
    * position on is optional, so a misplaced one typechecks and quietly does nothing.
    */
   composio?: { broker: ComposioBroker },
+  /**
+   * Drafts skills out of a repository on the deployment's own model.
+   *
+   * Optional, and last for the reason `composio` documents: every parameter from this position on is
+   * a trailing optional, so a misplaced one would typecheck and quietly do nothing. Absent means the
+   * New-skill screen's drafter answers 503 — a deployment with no model has no drafts to offer
+   * rather than offering ones it cannot grade.
+   */
+  draftSkills?: (repo: string, signal?: AbortSignal) => Promise<SkillDrafts>,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
 
@@ -896,9 +905,7 @@ export function createPluginRoutes(
           ),
         )
       : DEFAULT_DIRECTORY_ORDER.flatMap((slug) => {
-          const app = connectable.find(
-            (candidate) => candidate.slug === slug,
-          );
+          const app = connectable.find((candidate) => candidate.slug === slug);
           return app ? [app] : [];
         });
 
@@ -2633,6 +2640,87 @@ export function createPluginRoutes(
     } catch (error) {
       if (error instanceof RepoRefusedError) {
         return context.json({ error: error.message }, error.status);
+      }
+      throw error;
+    }
+  });
+
+  /**
+   * Draft skills out of a public repository, without saving any of them.
+   *
+   * The New-skill screen's bridge: a person pastes an address, this reads what is there, and the
+   * answer comes back as fillable fields — each draft still goes through `POST /skills` to become
+   * a skill, with that route's ownership rule the one that decides. INERT BY CONSTRUCTION — this
+   * handler never calls `installSkill`. That is why it asks nothing of `skillRefusal`: it builds
+   * no row, and a model that halves the prompt cannot write a capability.
+   *
+   * NO MODEL COLLABORATOR, NO DOOR. A deployment built without `draftSkills` — every test
+   * harness, a deployment with no model key wired — gets 503 here and nothing elsewhere, the
+   * same degraded shape `userInstructions` takes: there is no model to be quiet, so the route
+   * says so rather than pretending the field was left empty.
+   *
+   * THE EXISTING-SLUG READ IS THE ANSWER TO "IS THIS A VARIANT?". Each draft is annotated with
+   * whether its slug already names a skill here and whose it is — the same words the chat card
+   * uses for a replacement, because the trade is the same one — so the person sees "already
+   * stored, belongs to somebody else" before, not after, the save.
+   */
+  routes.post("/skills/drafts", requireUser, async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      repo?: unknown;
+    } | null;
+    if (typeof body?.repo !== "string" || !body.repo.trim()) {
+      return context.json({ error: "A repository URL is required." }, 400);
+    }
+    /*
+     * Parsed HERE as well as inside the drafter, so a mistyped address is refused before a model is
+     * asked anything. The drafter re-parses because it is callable on its own; the double parse
+     * costs nothing and is the same sentence either way, which is the property that matters — one
+     * parser, not two readings of "is this a GitHub address".
+     */
+    const parsed = parseRepoRef(body.repo);
+    if (!parsed.ok) {
+      return context.json({ error: parsed.error }, 400);
+    }
+    if (!draftSkills) {
+      return context.json(
+        {
+          error:
+            "Drafting skills needs a model, and this deployment has none configured.",
+        },
+        503,
+      );
+    }
+    try {
+      const result = await draftSkills(body.repo);
+      const actorId = context.var.actor?.id;
+      for (const draft of result.drafts) {
+        const owner = await store.skillOwner(draft.slug);
+        if (owner === undefined) {
+          draft.existing = null;
+        } else if (owner === null) {
+          draft.existing = "the deployment's";
+        } else if (owner === actorId) {
+          draft.existing = "yours";
+        } else {
+          draft.existing = "someone else's";
+        }
+      }
+      return context.json(result);
+    } catch (error) {
+      if (error instanceof DraftRefusedError) {
+        return context.json({ error: error.message }, 400);
+      }
+      if (error instanceof RepoRefusedError) {
+        return context.json({ error: error.message }, error.status);
+      }
+      if (error instanceof Error && error.message === "no model key") {
+        return context.json(
+          {
+            error:
+              "This deployment has no model key, so skills cannot be drafted here.",
+          },
+          503,
+        );
       }
       throw error;
     }

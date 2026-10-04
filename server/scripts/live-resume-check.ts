@@ -26,7 +26,9 @@ import { createUserComputerStore } from "../src/computer/user-computers";
 const USER = process.argv[2];
 const apiKey = process.env.E2B_API_KEY;
 if (!USER || !apiKey) {
-  console.error("usage: bun live-resume-check.ts <userId>   (with E2B_API_KEY set)");
+  console.error(
+    "usage: bun live-resume-check.ts <userId>   (with E2B_API_KEY set)",
+  );
   process.exit(2);
 }
 
@@ -77,7 +79,9 @@ const provisioner = createComputerProvisioner(store, {
 const started = Date.now();
 const startedRow = await provisioner.ensureDesktop({ key: USER, userId: USER });
 const elapsed = Date.now() - started;
-console.log(`ensureDesktop resolved in ${elapsed}ms, status=${startedRow.status}`);
+console.log(
+  `ensureDesktop resolved in ${elapsed}ms, status=${startedRow.status}`,
+);
 
 const infoAfter = await Sandbox.getInfo(sandboxId, connection);
 console.log(`sandbox state now=${infoAfter.state}`);
@@ -97,15 +101,20 @@ console.log(
  * `/workspace` is a desktop that came back and forgot everything, which is worse than one that
  * plainly did not come back because it looks working.
  */
-const listed = await sandbox.commands.run("ls -A /workspace 2>/dev/null | head -20 || true", {
-  timeoutMs: 30_000,
-});
+const listed = await sandbox.commands.run(
+  "ls -A /workspace 2>/dev/null | head -20 || true",
+  {
+    timeoutMs: 30_000,
+  },
+);
 console.log(
   `/workspace after resume -> ${listed.stdout.trim().split("\n").filter(Boolean).length} entries`,
 );
 
 const shot = await captureScreenshot(sandbox);
-console.log(`screenshot -> ${shot ? `${shot.data.length} base64 chars` : "NONE"}`);
+console.log(
+  `screenshot -> ${shot ? `${shot.data.length} base64 chars` : "NONE"}`,
+);
 
 const woke = infoAfter.state === "running";
 await finish(

@@ -162,4 +162,48 @@ describe("applyCommandChips", () => {
     const { segments } = applyCommandChips([command("search", "search")], []);
     expect(toDraft(segments).commandIds).toEqual(["search"]);
   });
+
+  /*
+   * A picker inserts these without typing, so the dropdown never being involved is the normal path.
+   * A hidden command left out of the resolution table would resolve to nothing on send, and the
+   * message would go out as prose with a chip drawn beside it.
+   */
+  test("resolves a hidden command's chip like any other", () => {
+    const hidden: CommandOption[] = [
+      {
+        id: "show-bar-chart",
+        name: "show-bar-chart",
+        kind: "chip",
+        hidden: true,
+        prompt: "Draw it with the `showBarChart` component.",
+      },
+    ];
+    const segments = [
+      command("show-bar-chart", "show-bar-chart"),
+      text(" last quarter"),
+    ];
+    const result = applyCommandChips(segments, hidden);
+
+    expect(result.segments).toBe(segments);
+    expect(toDraft(result.segments).commandIds).toEqual(["show-bar-chart"]);
+  });
+
+  test("does not treat hidden as unknown", () => {
+    // A hidden command keeps its chip; an unregistered one keeps its chip too, but for a different
+    // reason. Both survive, and only one of them still carries an instruction.
+    const segments = [command("show-bar-chart", "show-bar-chart")];
+    const registered = applyCommandChips(segments, []);
+    const hidden = applyCommandChips(segments, [
+      {
+        id: "show-bar-chart",
+        name: "show-bar-chart",
+        kind: "chip",
+        hidden: true,
+        prompt: "x",
+      },
+    ]);
+
+    expect(toDraft(registered.segments).commandIds).toEqual(["show-bar-chart"]);
+    expect(hidden.actions).toHaveLength(0);
+  });
 });

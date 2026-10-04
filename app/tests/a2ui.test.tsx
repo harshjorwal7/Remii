@@ -105,9 +105,7 @@ test("the public catalog renders a generated form and its action resolves the ed
       context: { destination: "Kyoto" },
     },
   });
-  expect(
-    view.container.querySelector('[data-remii-a2ui="Card"]'),
-  ).toBeTruthy();
+  expect(view.container.querySelector('[data-remii-a2ui="Card"]')).toBeTruthy();
 });
 
 test("disabled and unresolved deployments do not activate or advertise the A2UI catalog", () => {

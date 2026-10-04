@@ -95,10 +95,9 @@ describe("host-access ids", () => {
   });
 
   test("refuses a whitespace id on DELETE /grants/:id", async () => {
-    const response = await app().request(
-      "http://remii.test/grants/%20%20%20",
-      { method: "DELETE" },
-    );
+    const response = await app().request("http://remii.test/grants/%20%20%20", {
+      method: "DELETE",
+    });
     expect(response.status).toBe(400);
   });
 });
@@ -174,14 +173,11 @@ describe("channel ids", () => {
 
   test("refuses a whitespace id on POST /:channelId/busy", async () => {
     const calls: unknown[] = [];
-    const response = await app(calls).request(
-      "http://remii.test/%20%20/busy",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ busy: true }),
-      },
-    );
+    const response = await app(calls).request("http://remii.test/%20%20/busy", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ busy: true }),
+    });
     expect(response.status).toBe(400);
     expect(calls).toEqual([]);
   });

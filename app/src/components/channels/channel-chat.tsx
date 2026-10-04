@@ -9,6 +9,10 @@ import {
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { attachmentModality } from "@/components/channels/chat-messages";
+import {
+  ComponentCommandPicker,
+  RepoCommandPicker,
+} from "@/components/channels/command-picker";
 import { toAgentOptions } from "@/components/channels/composer";
 import { ConversationView } from "@/components/channels/conversation-view";
 import {
@@ -29,13 +33,23 @@ import {
   channelKeys,
   channelRunningQueryOptions,
 } from "@/lib/channels/queries";
+import { useComposerCommands } from "@/lib/commands/use-composer-commands";
 import { useActiveBot } from "@/lib/copilot/active-bot";
 import { ConversationProvider } from "@/lib/copilot/conversation";
 import { afterMs, joinWithin } from "@/lib/copilot/join-thread";
+import {
+  bumpRun,
+  bumpTurn,
+  liveRun,
+  patchLiveRun,
+  useLiveRun,
+} from "@/lib/copilot/live-runs";
 import { repairUnansweredToolCalls } from "@/lib/copilot/repair-history";
-import { stoppedReason } from "@/lib/copilot/stopped-turn";
+import {
+  finishNeedsExplanation,
+  stoppedReason,
+} from "@/lib/copilot/stopped-turn";
 import { readThreadMessages } from "@/lib/copilot/thread-messages";
-import { useSkillCommands } from "@/lib/plugins/skill-commands";
 import { queryClient } from "@/query-client";
 import { newId } from "../../lib/new-id";
 
@@ -256,10 +270,14 @@ export function ChannelChat({
    * First-message seed from the compose screen. It is taken once per mount and retained until the
    * agent has its own messages because joining a fresh thread can temporarily empty the agent.
    */
-  const [seed] = useState<Message | null>(() => {
-    const pending = takeFirstMessage(channel.id);
-    return pending ? seedMessage(pending, newId()) : null;
-  });
+  const [pendingFirst] = useState(() => takeFirstMessage(channel.id));
+  const [seed] = useState<Message | null>(() =>
+    pendingFirst ? seedMessage(pendingFirst.text, newId()) : null,
+  );
+  /** Resolved at stash time in channel/new; delivered with the seed so a `/` chip on the first message is real. */
+  const seedInstructionsRef = useRef<string[]>(
+    pendingFirst?.instructions ?? [],
+  );
 
   /** Cleared by the send-on-mount effect without restarting it. */
   const seedRef = useRef(seed);
@@ -555,7 +573,13 @@ export function ChannelChat({
   // Tool calls from this conversation act on this coworker's own computer.
   useActiveBot(runtimeAgentId);
 
-  const skillCommands = useSkillCommands(runtimeAgentId);
+  /*
+   * The whole `/` surface for this Bot: its skills, its components and its repositories. The send
+   * path resolves chips against this same list rather than a second query, so what a chip stands
+   * for cannot go missing between the menu being drawn and the message being sent.
+   */
+  const composerCommands = useComposerCommands(runtimeAgentId);
+  const commands = composerCommands.commands;
   const historyNotice = channelHistoryNotice({
     restoring,
     messageCount: agent.messages.length,
@@ -613,21 +637,25 @@ export function ChannelChat({
    * waits for the runtime agent, and a Stop drawn in that window aborts a controller nobody has
    * made yet.
    *
+   * Both are read from the tab-wide store rather than a local `useState` — they belong to the
+   * conversation, and the conversation outlives this mount. `lib/copilot/live-runs.ts` has the full
+   * note on why: a fresh mount starts this screen's facts at zero, which is the bug this whole
+   * indirection exists to stop.
+   *
    * `agent.isRunning` looks like both and is neither. It reports the run on the wire, and a turn
-   * that touches the browser is several runs in a row: the Bot asks for a click, the run ENDS so
-   * the browser can answer it, and another run starts carrying the answer. The agent reports itself
-   * idle in every one of those gaps — the truth about the wire and a lie about the turn. Remii
-   * registers every computer tool as a frontend tool, so the gaps open on ordinary work rather than
-   * on some edge case, and anything keyed on the turn ending fires in the middle of one instead.
+   * that is offered a frontend decision is several runs in a row: the Bot asks, the run ENDS so
+   * the browser can answer, and another run starts carrying the answer. The agent reports itself
+   * idle in every one of those gaps — the truth about the wire and a lie about the turn.
+   * Computer actions are server tools now (`server/src/computer/desktop-tools.ts`); the tools that
+   * genuinely split a turn in two are the gallery and decision tools the browser renders.
    *
    * Counters rather than booleans because nothing stops a second turn being started from a
    * component button while the first is still going, and two overlapping turns must not have the
    * first one to finish declare the conversation idle.
    */
-  const [turnsInFlight, setTurnsInFlight] = useState(0);
-  /* Authoritative once this screen unmounts, where `setTurnsInFlight` becomes a no-op. */
-  const turnsRef = useRef(0);
-  const [runsInFlight, setRunsInFlight] = useState(0);
+  const live = useLiveRun(channel.id);
+  const turnsInFlight = live.turns;
+  const runsInFlight = live.runs;
 
   /*
    * WHETHER THIS SCREEN IS STILL THERE.
@@ -639,9 +667,10 @@ export function ChannelChat({
    * then shows an idle conversation whose transcript is about to grow an answer nobody is watching, and
    * coming back shows a conversation with no Working line and no Stop button on a thread that is busy.
    *
-   * `turnsRef` above solves a different problem and cannot solve this one: it keeps a count accurate
-   * across unmount, but the question here is not how many turns there are, it is whether there is still
-   * a screen that has any business announcing anything.
+   * The live counters survive unmount — they live in the tab-wide store now — but the question this
+   * flag answers is a different one: is there still a SCREEN here that has any business announcing
+   * anything? It is what stops a `finally`, long after the person left the conversation, from telling
+   * the roster that a turn it is still finishing has ended.
    */
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -650,6 +679,22 @@ export function ChannelChat({
       mountedRef.current = false;
     };
   }, []);
+
+  /*
+   * THE LAST LIVE TRANSCRIPT, KEPT FOR THE RETURN TRIP.
+   *
+   * `agent.messages` is owned by this mount's `useAgent` and is discarded with it. The store is
+   * where a conversation's outline survives leaving it, so every change to the live transcript is
+   * mirrored there, and a returning screen can paint it before history or connect catches up.
+   */
+  useEffect(() => {
+    const subscription = agent.subscribe?.({
+      onMessagesChanged: ({ messages }) => {
+        patchLiveRun(channel.id, { messages });
+      },
+    });
+    return () => subscription?.unsubscribe();
+  }, [agent, channel.id]);
 
   /*
    * WHAT THE SERVER SAYS IS HAPPENING IN THIS CONVERSATION, which is not the same question as what this
@@ -717,7 +762,7 @@ export function ChannelChat({
    */
   const deliver = async (
     trimmed: string,
-    skillInstructions: string[],
+    instructions: string[],
     attachments: Attachment[],
   ) => {
     // Wait briefly for the runtime agent instance before adding the message.
@@ -763,7 +808,7 @@ export function ChannelChat({
      * `transcriptMessages` draws user and assistant turns, so this never appears on screen — the
      * chip is what says a skill was used, and it stays visible in the message they sent.
      */
-    for (const instruction of skillInstructions) {
+    for (const instruction of instructions) {
       target.addMessage({
         content: instruction,
         id: newId(),
@@ -784,11 +829,11 @@ export function ChannelChat({
       target.setMessages(repaired as typeof target.messages);
     }
 
-    setRunsInFlight((count) => count + 1);
+    bumpRun(channel.id, 1);
     try {
       await copilotkit.runAgent({ agent: target });
     } finally {
-      setRunsInFlight((count) => count - 1);
+      bumpRun(channel.id, -1);
     }
 
     /*
@@ -826,7 +871,7 @@ export function ChannelChat({
    */
   const say = async (
     text: string,
-    skillInstructions: string[] = [],
+    instructions: string[] = [],
     attachments: Attachment[] = [],
   ) => {
     const trimmed = text.trim();
@@ -835,16 +880,14 @@ export function ChannelChat({
     // enabled and inert.
     if (!trimmed && attachments.length === 0) return;
 
-    turnsRef.current += 1;
-    setTurnsInFlight(turnsRef.current);
-    if (turnsRef.current === 1) {
+    bumpTurn(channel.id, 1);
+    if (liveRun(channel.id).turns === 1) {
       void setChannelBusy({ channelId: channel.id, busy: true });
     }
     try {
-      await deliver(trimmed, skillInstructions, attachments);
+      await deliver(trimmed, instructions, attachments);
     } finally {
-      turnsRef.current -= 1;
-      setTurnsInFlight(turnsRef.current);
+      bumpTurn(channel.id, -1);
       /*
        * ONLY WHILE THIS SCREEN IS STILL HERE, and this is the point of `mountedRef`.
        *
@@ -855,11 +898,12 @@ export function ChannelChat({
        * one list: coming back shows a conversation with no Working line and no Stop button, on a thread
        * that is busy, and the next message goes into a run nobody can see.
        *
-       * The counter itself is still decremented above, unconditionally, because `turnsRef` is what stays
-       * correct across unmount and a count that leaked would be wrong on the next mount. Only the
-       * announcement is suppressed — there is no longer a screen here that has any business making one.
+       * The counter itself is still decremented above, unconditionally, because that count is what
+       * stays correct across unmount and a count that leaked would be wrong on the next mount. Only
+       * the announcement is suppressed — there is no longer a screen here that has any business
+       * making one.
        */
-      if (turnsRef.current === 0 && mountedRef.current) {
+      if (liveRun(channel.id).turns === 0 && mountedRef.current) {
         void setChannelBusy({ channelId: channel.id, busy: false });
       }
     }
@@ -898,8 +942,13 @@ export function ChannelChat({
          * neither an explanation nor an answer, which would clear the Working indicator and report
          * success for a turn that never had one — so it is reported for what it is.
          *
-         * A run that DID answer is left alone: the person asked something, they got something back,
-         * and a truncated turn still gets to show the partial answer it managed to produce.
+         * AND A RUN THAT DID ANSWER IS STILL REPORTED WHEN THE SERVER SAYS IT ENDED EARLY. It used
+         * to return early on any text at all, on the reasoning that a truncated turn still deserves
+         * to show the partial answer it managed to produce — which it does, and which is not a
+         * reason to withhold the one sentence explaining why it stopped. A working model says "let me
+         * check that" and is then killed at its hundredth tool call, so "said something" and
+         * "finished" are not the same claim. `finishNeedsExplanation` is the shared rule, so this
+         * surface and `/bot` cannot drift into telling people different things about one silence.
          */
         const reply = [...agent.messages]
           .reverse()
@@ -911,13 +960,28 @@ export function ChannelChat({
         const content = typeof reply?.content === "string" ? reply.content : "";
         if (content) {
           reportRef.current(content, runtimeAgentId);
-          return;
         }
 
-        // No answer and no explanation. `stoppedReason` supplies the honest sentence for it.
         const stated =
           typeof event?.message === "string" ? event.message.trim() : "";
-        fail(stated || "This turn ended before the Bot finished answering.");
+        const notice =
+          stated || "This turn ended before the Bot finished answering.";
+
+        /*
+         * A TURN THAT ANSWERED IS REPORTED, NOT FAILED, however it ended.
+         *
+         * These are two different claims and `fail` used to make both at once. The notice is what a
+         * person reads under the transcript; the throw is what puts their words back in the box and
+         * the parked message back in the queue, because the send did not happen. A turn cut short
+         * AFTER answering did happen — the answer is on screen and in the roster — so restoring a
+         * draft would ask them to send the same thing twice and read as though nothing had been
+         * said. Only a turn with nothing to show for itself is a send that did not happen.
+         */
+        if (content) {
+          if (finishNeedsExplanation(event, true)) setRunError(notice);
+          return;
+        }
+        fail(notice);
       },
     });
     return () => subscription?.unsubscribe();
@@ -954,7 +1018,10 @@ export function ChannelChat({
     // the seed has no box to go back into — it was typed on a screen that has already navigated
     // away. The transcript keeps the seeded message and the notice under it says what happened.
     void sayRef
-      .current(typeof pending.content === "string" ? pending.content : "")
+      .current(
+        typeof pending.content === "string" ? pending.content : "",
+        seedInstructionsRef.current,
+      )
       .catch(() => undefined);
 
     // Keep `seed` in state; transcriptMessages gives it up once the agent holds a user turn.
@@ -978,11 +1045,25 @@ export function ChannelChat({
            */
           activity={activity ?? serverActivity ?? null}
           busy={agent.isRunning || turnsInFlight > 0 || serverRunning}
-          // The `/` menu exposes only skills granted to this Bot.
-          commands={skillCommands}
+          // Skills granted to this Bot, its components, and its repositories.
+          commands={commands}
+          // Lets the `/components` and `/repo` pickers drop a chip into the draft.
+          editorRef={composerCommands.editorRef}
           // Readiness is handled by `say`; deletion is the only disabled-chat state.
           disabled={!channel.active}
-          messages={transcriptMessages(agent.messages, seed)}
+          /*
+           * THE AGENT'S TRANSCRIPT ONCE IT HOLDS ONE, THE STORE'S UNTIL THEN.
+           *
+           * A fresh mount renders nothing until connect and history restore catch up, which is
+           * exactly the gap a person coming back to a conversation in the middle of its answer
+           * should not have. The store is that mount's only other view of this thread, so it wins
+           * the while agent.messages is empty. The rows key on ids, and history merge dedupes on
+           * the same ids, so the swap from store to agent is a continuation, not a repaint.
+           */
+          messages={transcriptMessages(
+            agent.messages.length > 0 ? agent.messages : live.messages,
+            seed,
+          )}
           notice={
             /*
              * Two things can be worth saying at once — a deleted coworker and a history with holes in
@@ -1011,16 +1092,15 @@ export function ChannelChat({
             // typed. Resolved against the same list the menu was built from, so a chip left over from
             // a skill that has since been revoked resolves to nothing rather than to a stale
             // instruction — the menu is refetched, and this reads from it.
-            const skillInstructions = draft.commandIds
+            const instructions = draft.commandIds
               .map(
-                (id) =>
-                  skillCommands.find((command) => command.id === id)?.prompt,
+                (id) => commands.find((command) => command.id === id)?.prompt,
               )
               .filter((instruction): instruction is string =>
                 Boolean(instruction),
               );
 
-            await say(draft.text, skillInstructions, draft.attachments);
+            await say(draft.text, instructions, draft.attachments);
           }}
           /**
            * Stop through the core so the abort signal reaches frontend tools; `say` repairs any
@@ -1121,6 +1201,27 @@ export function ChannelChat({
            * run before closing it; see server/src/channels/stall-guard.ts.
            */
           stopped={runError ?? undefined}
+        />
+        {/*
+         * The `/components` and `/repo` pickers, which insert a chip and are otherwise invisible.
+         * A Dialog rather than a panel inside the composer because the pick is chosen from artwork,
+         * and artwork needs room the composer's two hundred pixels do not have.
+         */}
+        <ComponentCommandPicker
+          agentId={runtimeAgentId}
+          onOpenChange={(next) => {
+            if (!next) composerCommands.closePicker();
+          }}
+          onPick={composerCommands.insert}
+          open={composerCommands.picker === "components"}
+        />
+        <RepoCommandPicker
+          agentId={runtimeAgentId}
+          onOpenChange={(next) => {
+            if (!next) composerCommands.closePicker();
+          }}
+          onPick={composerCommands.insert}
+          open={composerCommands.picker === "repo"}
         />
       </ConversationProvider>
     </CopilotChatConfigurationProvider>

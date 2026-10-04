@@ -92,6 +92,7 @@ export function slashCommandTrigger(
     emptyMessage: "No matching commands",
     onSearch: (query): TriggerSuggestion[] =>
       commands
+        .filter((command) => !command.hidden)
         .filter((command) => matches(query, command.name, command.description))
         .map((command) => ({
           value: command.id,

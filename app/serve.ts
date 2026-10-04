@@ -262,7 +262,5 @@ if (import.meta.main) {
     },
   });
 
-  console.log(
-    `Remii app on http://127.0.0.1:${PORT} and http://[::1]:${PORT}`,
-  );
+  console.log(`Remii app on http://127.0.0.1:${PORT} and http://[::1]:${PORT}`);
 }

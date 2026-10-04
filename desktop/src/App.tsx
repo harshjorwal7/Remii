@@ -664,9 +664,7 @@ export function App() {
             invoke<string>("ask_the_bot", { root, question })
           }
           onOpen={() => {
-            invoke("show_remii").catch((error) =>
-              setFailure(asProblem(error)),
-            );
+            invoke("show_remii").catch((error) => setFailure(asProblem(error)));
           }}
           onBack={changeModelAfterAskFailure}
         />

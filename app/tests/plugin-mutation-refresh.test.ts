@@ -416,6 +416,8 @@ const NOT_A_REFUSABLE_WRITE: Record<string, string> = {
     "Starts a consent connection and hands back the vendor's URL for the browser to leave for. Nothing on this screen survives that navigation to be refetched, and this factory takes no QueryClient either — it takes which screen to come back to.",
   previewRepoMutationOptions:
     "Asks GitHub whether a repository address is real, public and holds the folder inside it. `POST /repos/preview` with a URL and no slug: there is nothing on the server to write, so there is nothing to invalidate, and the factory takes no QueryClient. Its answer is drawn beside the field it was typed into.",
+  draftSkillsMutationOptions:
+    "Asks the model to write the skills a repository contains. `POST /skills/drafts` with a URL and no slug: the handler builds no row and installs nothing, so there is nothing to invalidate, and the factory takes no QueryClient. Its answer is a set of fields to be reviewed, and the save that follows is `saveSkillMutationOptions`, which does refetch.",
 };
 
 test("every mutation factory `mutations.ts` exports is answered for by this file", () => {

@@ -122,6 +122,7 @@ export const POSITIONS = [
   "executionModes",
   "triggerIncoming",
   "vaultStore",
+  "skillDrafter",
 ] as const;
 
 /**

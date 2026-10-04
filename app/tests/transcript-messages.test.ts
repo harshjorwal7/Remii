@@ -57,7 +57,24 @@ describe("seedMessage", () => {
 describe("the first-message stash", () => {
   test("hands the message to the channel that was just created", () => {
     stashFirstMessage("channel_a", "hello");
-    expect(takeFirstMessage("channel_a")).toBe("hello");
+    expect(takeFirstMessage("channel_a")?.text).toBe("hello");
+  });
+
+  test("carries the commands' instructions with the text", () => {
+    // The bug this shape exists for: a `/` chip drawn beside the first message taught the Bot
+    // nothing, because the channel that reads the stash back was handed only the text.
+    stashFirstMessage("channel_commands", "/show-bar-chart draw it", [
+      "Draw it with the `showBarChart` component.",
+    ]);
+    expect(takeFirstMessage("channel_commands")).toEqual({
+      text: "/show-bar-chart draw it",
+      instructions: ["Draw it with the `showBarChart` component."],
+    });
+  });
+
+  test("has no instructions when none were invoked", () => {
+    stashFirstMessage("channel_bare", "hello");
+    expect(takeFirstMessage("channel_bare")?.instructions).toEqual([]);
   });
 
   test("gives it up only once", () => {
@@ -73,8 +90,14 @@ describe("the first-message stash", () => {
 
   test("keeps two channels' messages apart", () => {
     stashFirstMessage("channel_c", "for c");
-    stashFirstMessage("channel_d", "for d");
-    expect(takeFirstMessage("channel_d")).toBe("for d");
-    expect(takeFirstMessage("channel_c")).toBe("for c");
+    stashFirstMessage("channel_d", "for d", ["an instruction"]);
+    expect(takeFirstMessage("channel_d")).toEqual({
+      text: "for d",
+      instructions: ["an instruction"],
+    });
+    expect(takeFirstMessage("channel_c")).toEqual({
+      text: "for c",
+      instructions: [],
+    });
   });
 });

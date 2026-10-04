@@ -153,9 +153,7 @@ const PICKED_HARNESS = agent({
 });
 
 test("/bot defaults to the picked harness when this setup selected one", async () => {
-  const view = renderBot(
-    queryClientWithAgents([REMII, PICKED_HARNESS]),
-  );
+  const view = renderBot(queryClientWithAgents([REMII, PICKED_HARNESS]));
 
   expect(await view.findByRole("heading", { name: "LangGraph" })).toBeTruthy();
   expect(view.getByTestId("copilot-chat").dataset.agentId).toBe(
@@ -190,12 +188,8 @@ test("/bot preserves an explicit agent, including the built-in first agent", asy
     `/bot?agent=${REMII_AGENT_ID}`,
   );
 
-  expect(
-    await view.findByRole("heading", { name: "Remii" }),
-  ).toBeTruthy();
-  expect(view.getByTestId("copilot-chat").dataset.agentId).toBe(
-    REMII_AGENT_ID,
-  );
+  expect(await view.findByRole("heading", { name: "Remii" })).toBeTruthy();
+  expect(view.getByTestId("copilot-chat").dataset.agentId).toBe(REMII_AGENT_ID);
 });
 
 test("/bot preserves an explicit unknown agent as a clear missing-bot state", async () => {
@@ -277,14 +271,8 @@ test("/bot reports an explicit agent detail load failure", async () => {
 
 test("/bot still falls back to the first agent when no picked harness exists", async () => {
   const otherAgent = agent({ id: "researcher", name: "Researcher" });
-  const view = renderBot(
-    queryClientWithAgents([REMII, otherAgent]),
-  );
+  const view = renderBot(queryClientWithAgents([REMII, otherAgent]));
 
-  expect(
-    await view.findByRole("heading", { name: "Remii" }),
-  ).toBeTruthy();
-  expect(view.getByTestId("copilot-chat").dataset.agentId).toBe(
-    REMII_AGENT_ID,
-  );
+  expect(await view.findByRole("heading", { name: "Remii" })).toBeTruthy();
+  expect(view.getByTestId("copilot-chat").dataset.agentId).toBe(REMII_AGENT_ID);
 });

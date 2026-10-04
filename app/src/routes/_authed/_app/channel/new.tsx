@@ -3,6 +3,10 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { ChannelAvatar } from "@/components/channels/avatar";
+import {
+  ComponentCommandPicker,
+  RepoCommandPicker,
+} from "@/components/channels/command-picker";
 import { canSend, type Recipient } from "@/components/channels/compose-state";
 import { ConversationView } from "@/components/channels/conversation-view";
 import { seedMessage } from "@/components/channels/transcript-messages";
@@ -24,7 +28,7 @@ import {
 } from "@/lib/agents/queries";
 import { workspaceAgentId } from "@/lib/agents/workspace";
 import { useStartChannel } from "@/lib/channels/start";
-import { useSkillCommands } from "@/lib/plugins/skill-commands";
+import { useComposerCommands } from "@/lib/commands/use-composer-commands";
 import { queryClient } from "@/query-client";
 import { newId } from "../../../../lib/new-id";
 
@@ -92,7 +96,13 @@ function RouteComponent() {
   const recipients: Recipient[] = chosen
     ? [{ id: chosen.id, name: chosen.name }]
     : [];
-  const skillCommands = useSkillCommands(chosen?.id ?? "");
+  /*
+   * The chosen coworker's whole `/` surface, not only its skills. This screen used to build the
+   * skill menu and then throw away what a chip stood for, so a `/` chip drawn beside the first
+   * message was a decoration the Bot never saw.
+   */
+  const composerCommands = useComposerCommands(chosen?.id ?? "");
+  const commands = composerCommands.commands;
 
   if (profiles === undefined && !rosterError) return null;
 
@@ -164,7 +174,9 @@ function RouteComponent() {
         // lands in the composer the moment a recipient exists, whether picked here or in the URL.
         autoFocus
         // Commands must be loaded before the first channel message is sent.
-        commands={skillCommands}
+        commands={commands}
+        // Lets the `/components` and `/repo` pickers drop a chip into the draft.
+        editorRef={composerCommands.editorRef}
         disabled={
           Boolean(loadError) || waitingForUrlAgent || recipients.length === 0
         }
@@ -183,6 +195,17 @@ function RouteComponent() {
           setError(null);
           setSent(seedMessage(draft.text, newId()));
 
+          /*
+           * Resolve the `/` chips against the same list the menu was built from, the same way
+           * the running channel does, so a skill typed here actually reaches the Bot and is not
+           * mistaken for plain text.
+           */
+          const instructions = draft.commandIds
+            .map((id) => commands.find((command) => command.id === id)?.prompt)
+            .filter((instruction): instruction is string =>
+              Boolean(instruction),
+            );
+
           try {
             /*
              * A template is added to the workspace at the moment it is first spoken to: the
@@ -196,7 +219,7 @@ function RouteComponent() {
             );
             // Recorded, then started: a coworker picked here is as much a choice as an `@` on the
             // home screen, and the trail has to say so for both.
-            await startChosen(targetId, draft.text);
+            await startChosen(targetId, draft.text, instructions);
           } catch (caught) {
             // Preserve the unsent draft when channel creation fails.
             setSent(null);
@@ -209,6 +232,23 @@ function RouteComponent() {
           }
         }}
         pending={pending || duplicate.isPending}
+      />
+      {/* The `/components` and `/repo` pickers, which insert a chip and are otherwise invisible. */}
+      <ComponentCommandPicker
+        agentId={chosen?.id ?? ""}
+        onOpenChange={(next) => {
+          if (!next) composerCommands.closePicker();
+        }}
+        onPick={composerCommands.insert}
+        open={composerCommands.picker === "components"}
+      />
+      <RepoCommandPicker
+        agentId={chosen?.id ?? ""}
+        onOpenChange={(next) => {
+          if (!next) composerCommands.closePicker();
+        }}
+        onPick={composerCommands.insert}
+        open={composerCommands.picker === "repo"}
       />
     </div>
   );
