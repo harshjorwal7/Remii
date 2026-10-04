@@ -609,6 +609,8 @@ function agentDto(actor: AgentActor, agent: AgentProfile) {
     // quietly convert every seeded agent into a chosen one, and the person's "reset to random" would
     // stop working the first time they edited the name.
     mascot: agent.mascot,
+    pausedAt: agent.pausedAt,
+    pausedReason: agent.pausedReason,
     visibility: agent.visibility,
     hidden: agent.hidden,
     systemOwned: agent.systemOwned,

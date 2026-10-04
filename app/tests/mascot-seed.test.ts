@@ -2,11 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { REMII_AGENT_ID } from "@/lib/agents/default-agent";
 import {
   CHOOSABLE_COLOR_IDS,
-  DEFAULT_COLOR_SLOTS,
   mascotChoiceForSeed,
   mergeMascotChoice,
+  RESERVED_SEED_COLORS,
   RESTING_EXPRESSION_IDS,
   restingExpressionForSeed,
+  SEEDED_COLOR_SLOTS,
 } from "@/mascot/seed";
 import {
   MASCOT_COLOR_IDS,
@@ -60,10 +61,11 @@ describe("mascotChoiceForSeed", () => {
      * distinct colours is the number of distinct entries in that subset and the reachable
      * combinations are that times eight shapes times the resting faces.
      */
-    // Seven shapes by the eight seeded hues. The floor is below that on purpose: it is a claim that the
+    // Seven shapes by the seven seeded hues: pink is reserved for the named chief of staff and can
+    // no longer come out of a hash. The floor is below that on purpose: it is a claim that the
     // hash is spreading across the space it actually has, not that the space is large.
-    const reachable = DEFAULT_COLOR_SLOTS.length * MASCOT_SHAPE_IDS.length;
-    expect(reachable).toBe(56);
+    const reachable = SEEDED_COLOR_SLOTS.length * MASCOT_SHAPE_IDS.length;
+    expect(reachable).toBe(49);
     // Birthday-paradox expectation for 500 draws from that many combinations. Comfortably above it
     // still means the hash is spreading; a collapsed axis would push this into the hundreds.
     expect(collisions).toBeLessThan(seeds.length * 0.6);
@@ -92,7 +94,7 @@ describe("mascotChoiceForSeed", () => {
     for (const seed of agentIds(2_000))
       seen.add(mascotChoiceForSeed(seed).color);
 
-    for (const color of seen) expect(DEFAULT_COLOR_SLOTS).toContain(color);
+    for (const color of seen) expect(SEEDED_COLOR_SLOTS).toContain(color);
     expect(seen).not.toContain("ink");
     // `cream` was in the first cut and rendered a coworker as a ghost on the light surface; `grey` read
     // as dead rather than quiet, and has since left the palette altogether. `cream` is still choosable
@@ -103,13 +105,24 @@ describe("mascotChoiceForSeed", () => {
     expect(seen).not.toContain("brown");
   });
 
-  it("uses the whole vivid wheel, so a dozen coworkers are told apart by colour alone", () => {
+  it("never seeds a colour a named mascot is already wearing", () => {
+    // This is the whole reason for the reservation: a fresh coworker births itself with a colour
+    // the roster can read as its own, never with Remii's pink, so Coco and Remii can no longer land
+    // side by side in the same hue by accident.
+    expect(RESERVED_SEED_COLORS).toContain("pink");
+    for (const seed of agentIds(2_000)) {
+      expect(RESERVED_SEED_COLORS).not.toContain(
+        mascotChoiceForSeed(seed).color,
+      );
+    }
+  });
+
+  it("still hands out every seeded colour, so a dozen coworkers can differ on colour alone", () => {
     const seen = new Set<MascotColorId>();
     for (const seed of agentIds(2_000))
       seen.add(mascotChoiceForSeed(seed).color);
-    expect(seen.size).toBe(DEFAULT_COLOR_SLOTS.length);
-    // Every entry distinct, so the hash cannot waste a slot on a colour nobody distinguishes.
-    expect(new Set(DEFAULT_COLOR_SLOTS).size).toBe(DEFAULT_COLOR_SLOTS.length);
+    expect(seen.size).toBe(SEEDED_COLOR_SLOTS.length);
+    for (const color of seen) expect(seen.has(color)).toBe(true);
   });
 
   it("leaves no neighbour two rows apart on the same colour", () => {
@@ -122,8 +135,8 @@ describe("mascotChoiceForSeed", () => {
     for (let i = 1; i < agents.length; i++) {
       if (agents[i] === agents[i - 1]) sameAsNeighbour++;
     }
-    // Even weighting predicts about one in eight. The bar is generous, because this is about how a
-    // roster reads and not about how a hash behaves.
+    // Even weighting across seven seeded colours predicts about one in seven. The bar is generous,
+    // because this is about how a roster reads and not about how a hash behaves.
     expect(sameAsNeighbour / agents.length).toBeLessThan(0.2);
   });
 

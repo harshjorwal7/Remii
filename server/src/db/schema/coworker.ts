@@ -59,6 +59,13 @@ export const agentProfiles = pgTable(
      */
     mascotShape: text("mascot_shape"),
     mascotColor: text("mascot_color"),
+    /*
+     * Whether the Bot is paused. A null timestamp is the common case — not paused — the same "null
+     * means not chosen" reading the mascot columns use. Set means a coworker that will not take
+     * work until resumed; see `bot_pause`/`bot_resume`.
+     */
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    pausedReason: text("paused_reason"),
     visibility: agentVisibility("visibility").notNull(),
     /*
      * The credential this Bot's agent presents when it calls a tool back.

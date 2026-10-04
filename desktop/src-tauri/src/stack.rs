@@ -980,10 +980,7 @@ pub fn replace_windows_host_process_with(
 
 #[cfg(unix)]
 fn unix_ownership_problem(detail: impl Into<String>) -> Problem {
-    Problem::with(
-        "Remii could not verify its host process ownership.",
-        detail,
-    )
+    Problem::with("Remii could not verify its host process ownership.", detail)
 }
 
 #[cfg(unix)]
@@ -4995,12 +4992,8 @@ fn main() {
         )];
         let processes = [live_process(8636, 7000, "20260909010101.000000-420")];
 
-        let found = super::verified_remii_pids_listening_on(
-            listing,
-            &[3010, 3001],
-            &recorded,
-            &processes,
-        );
+        let found =
+            super::verified_remii_pids_listening_on(listing, &[3010, 3001], &recorded, &processes);
 
         assert_eq!(found, vec![8636]);
     }
@@ -5494,9 +5487,7 @@ fn main() {
             },
             live_process(42, 0, "reused"),
         ] {
-            assert!(
-                verified_remii_root_pids(std::slice::from_ref(&recorded), &[live]).is_empty()
-            );
+            assert!(verified_remii_root_pids(std::slice::from_ref(&recorded), &[live]).is_empty());
         }
     }
 
@@ -5940,10 +5931,7 @@ fn main() {
             PathBuf::from(r"C:\Users\me\Remii")
         );
         // And an ordinary path is handed back exactly as it was.
-        assert_eq!(
-            root_from("/home/me/Remii"),
-            PathBuf::from("/home/me/Remii")
-        );
+        assert_eq!(root_from("/home/me/Remii"), PathBuf::from("/home/me/Remii"));
     }
 
     #[test]
@@ -6516,10 +6504,7 @@ fn main() {
             return;
         }
         let path = PathFixture::with_fake_engine("computer-stop");
-        for (index, namespace) in ["remii", "", "  ", " fixture-selected "]
-            .iter()
-            .enumerate()
-        {
+        for (index, namespace) in ["remii", "", "  ", " fixture-selected "].iter().enumerate() {
             let (root, record) = computer_stop_root(
                 &path,
                 &format!("case-{index}"),

@@ -768,9 +768,7 @@ mod tests {
                 calls.push(args.iter().map(|arg| (*arg).to_string()).collect());
                 match args {
                     ["machine", "inspect", "remii"] => Ok(inspect.clone()),
-                    ["machine", "set", "--user-mode-networking=true", "remii"] => {
-                        Ok(String::new())
-                    }
+                    ["machine", "set", "--user-mode-networking=true", "remii"] => Ok(String::new()),
                     ["machine", "start", "remii"] => Ok(String::new()),
                     ["machine", "ssh", "remii", "getent", "ahostsv4", "host.containers.internal"] => {
                         Ok("192.168.127.254 STREAM host.containers.internal\n".into())

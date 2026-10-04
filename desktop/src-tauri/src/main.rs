@@ -981,14 +981,15 @@ async fn start_stack_inner<R: tauri::Runtime>(
      * the window says which Bot it will be while there is still a screen to say it on.
      */
     let requested_harness = harness.clone();
-    let harness =
-        match &credential {
-            remii_env::ModelCredential::ClaudePlan { .. } => harness::speaking_for("anthropic")
-                .map(|id| harness::HarnessChoice { id: id.into() }),
-            remii_env::ModelCredential::ChatGptPlan { .. } => harness::speaking_for("openai")
-                .map(|id| harness::HarnessChoice { id: id.into() }),
-            _ => harness,
-        };
+    let harness = match &credential {
+        remii_env::ModelCredential::ClaudePlan { .. } => {
+            harness::speaking_for("anthropic").map(|id| harness::HarnessChoice { id: id.into() })
+        }
+        remii_env::ModelCredential::ChatGptPlan { .. } => {
+            harness::speaking_for("openai").map(|id| harness::HarnessChoice { id: id.into() })
+        }
+        _ => harness,
+    };
     let picked = harness::picked(harness.as_ref(), &root).map_err(|error| {
         // Two registers, because one of these refusals is about a release and the other is
         // about a pick. "Remii v0.0.8 does not include agent-langgraph-agui" is the
@@ -2625,8 +2626,7 @@ async fn begin_intelligence_sign_in(app: tauri::AppHandle) -> Result<String, Str
 #[tauri::command]
 async fn finish_intelligence_sign_in(
     app: tauri::AppHandle,
-) -> Result<Vec<remii_desktop_lib::intelligence::Project>, remii_desktop_lib::problem::Problem>
-{
+) -> Result<Vec<remii_desktop_lib::intelligence::Project>, remii_desktop_lib::problem::Problem> {
     let signing = app
         .state::<Shell>()
         .signing_in_to_intelligence
@@ -3594,8 +3594,7 @@ mod tests {
             ),
         ] {
             if let Some(metadata) = metadata {
-                std::fs::write(root.join(remii_desktop_lib::saved_intent::FILE), metadata)
-                    .unwrap();
+                std::fs::write(root.join(remii_desktop_lib::saved_intent::FILE), metadata).unwrap();
             }
             for legacy in ["", "INTELLIGENCE_API_KEY=synthetic-cpk\nOPENAI_API_KEY=synthetic-openai\nANTHROPIC_API_KEY=synthetic-anthropic\nCLAUDE_CODE_OAUTH_TOKEN=synthetic-claude\n"] {
                 std::fs::write(root.join(".env"), format!("INTELLIGENCE_API_URL=https://synthetic.example\n{legacy}")).unwrap();
@@ -3948,12 +3947,8 @@ mod tests {
                 format!("MANAGED_AGENT_AG_UI_URL=https://agent-{label}.example\n"),
             )
             .unwrap();
-            remii_desktop_lib::vault::remember(
-                root,
-                "OPENAI_API_KEY",
-                &format!("openai-{label}"),
-            )
-            .unwrap();
+            remii_desktop_lib::vault::remember(root, "OPENAI_API_KEY", &format!("openai-{label}"))
+                .unwrap();
             remii_desktop_lib::vault::remember(
                 root,
                 "MANAGED_AGENT_TOKEN",
@@ -4323,10 +4318,7 @@ mod tests {
         let error = choice
             .into_credential_with(&root, |_, key| {
                 reads += 1;
-                assert_eq!(
-                    key,
-                    remii_desktop_lib::saved_intent::COMPATIBLE_CREDENTIAL
-                );
+                assert_eq!(key, remii_desktop_lib::saved_intent::COMPATIBLE_CREDENTIAL);
                 Ok(
                     r#"{"base_url":"https://other.example/v1","api_key":"synthetic-other-key"}"#
                         .into(),
@@ -5025,14 +5017,14 @@ fn main() {
                 crate::test_support::compile_fixture(&source, &path.bin().join("docker"));
                 std::fs::copy(path.bin().join("docker"), path.bin().join("podman")).unwrap();
                 std::env::set_var("REMII_TEST_ENGINE_RECORD", base.join("commands.log"));
-if case == "remote-stale-image" {
-            std::fs::write(
+                if case == "remote-stale-image" {
+                    std::fs::write(
                 root.join(".env"),
                 "PICKED_HARNESS_IMAGE=localhost/old-image@sha256:00\nPICKED_HARNESS_PORT=4206\n",
             )
             .unwrap();
-        }
-        let app = tauri::test::mock_builder()
+                }
+                let app = tauri::test::mock_builder()
                     .manage(Shell::default())
                     .invoke_handler(tauri::generate_handler![
                         start_stack,
@@ -5957,7 +5949,7 @@ if case == "remote-stale-image" {
             )
             .unwrap();
         }
-let app = tauri::test::mock_builder()
+        let app = tauri::test::mock_builder()
             .manage(Shell::default())
             .invoke_handler(tauri::generate_handler![start_stack, ask_the_bot])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))

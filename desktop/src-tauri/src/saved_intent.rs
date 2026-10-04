@@ -189,9 +189,7 @@ fn persist_configuration_with(
                 base_url: base_url.trim().to_string(),
                 api_key: api_key.trim().to_string(),
             })
-            .map_err(|_| {
-                Problem::plain("Remii could not prepare the endpoint key for saving.")
-            })?,
+            .map_err(|_| Problem::plain("Remii could not prepare the endpoint key for saving."))?,
         ),
         _ if SavedIntent::read(root)
             .categories

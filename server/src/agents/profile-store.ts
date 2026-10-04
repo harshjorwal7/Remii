@@ -85,6 +85,19 @@ export type AgentProfileStore = {
    * presenting a credential, and the credential is the whole of its claim.
    */
   agentForCallbackToken(hash: string): Promise<{ id: string } | null>;
+  /**
+   * Why this coworker is paused, or null when it is not.
+   *
+   * A dedicated read rather than `get`, because this sits on the run path: `get` joins four tables
+   * to build a whole profile to answer one yes/no question, and the answer gates whether a turn runs
+   * at all. One primary-key lookup is the difference between a pause check and a join on every
+   * message. Returns the reason too, so the refusal a person reads says why.
+   *
+   * Not scoped to an actor on purpose. The run path already proved the Bot belongs to the person
+   * asking — that check is above this one — and re-deriving an actor here to read a row about a Bot
+   * whose id we already hold would be ceremony.
+   */
+  pausedMessage(agentId: string): Promise<string | null>;
   setOnAgentCreated?(callback: (agentId: string) => Promise<void>): void;
 };
 
@@ -126,6 +139,8 @@ const joinedProjection = {
   avatarSeed: agentProfiles.avatarSeed,
   mascotShape: agentProfiles.mascotShape,
   mascotColor: agentProfiles.mascotColor,
+  pausedAt: agentProfiles.pausedAt,
+  pausedReason: agentProfiles.pausedReason,
   visibility: agentProfiles.visibility,
   ownerUserId: agentProfiles.ownerUserId,
   packageId: deploymentPackages.id,
@@ -175,6 +190,8 @@ function mapProfile(
     roleDescription: row.roleDescription,
     avatarSeed: row.avatarSeed,
     mascot: readMascot(row),
+    pausedAt: row.pausedAt ?? null,
+    pausedReason: row.pausedReason ?? null,
     // Strict per-user SaaS sandbox: the database enum still carries "public"
     // on old rows, but nothing above this line admits such a row for another
     // user, and the surface never offers it. Coerce here so no "public"
@@ -597,6 +614,20 @@ export function createAgentProfileStore(
               ...(input.mascot === undefined
                 ? {}
                 : mascotColumnValues(input.mascot)),
+              /*
+               * Paused is a switch, not a set-by-default field: absent leaves it exactly where it
+               * was, the same "do not touch what I did not say" contract the mascot and
+               * delegationOnly rows carry. Setting `true` marks the moment; `false` clears both the
+               * timestamp and the reason so a stale reason can never outlive its pause.
+               */
+              ...(input.paused === undefined
+                ? {}
+                : input.paused
+                  ? {
+                      pausedAt: updatedAt,
+                      pausedReason: input.pausedReason ?? null,
+                    }
+                  : { pausedAt: null, pausedReason: null }),
               updatedAt,
             })
             .where(eq(agentProfiles.agentId, id));
@@ -777,6 +808,37 @@ export function createAgentProfileStore(
 
     agentForCallbackToken(hash) {
       return findByTokenHash(database, hash);
+    },
+
+    async pausedMessage(agentId) {
+      /*
+       * A read that fails reads as "not paused", and that is the dangerous-looking choice made
+       * deliberately.
+       *
+       * The fail-closed reading is the obvious one — a switch whose purpose is to stop something
+       * should stop it even when it cannot check — but this method sits on the run path, so failing
+       * closed means a single bad query refuses EVERY coworker on the deployment at the moment it
+       * happens. That is a whole workspace answering nobody, in exchange for one paused bot doing
+       * one run during a database wobble.
+       *
+       * The asymmetry decides it: a pause that slips through costs one turn and is visible on the
+       * roster, while an outage costs everything and is visible only as the product appearing
+       * broken. The refusal that matters is at the handoff desk, where the roster read has already
+       * succeeded and the pause is a fact rather than a guess.
+       */
+      const [row] = await database
+        .select({
+          pausedAt: agentProfiles.pausedAt,
+          pausedReason: agentProfiles.pausedReason,
+        })
+        .from(agentProfiles)
+        .where(eq(agentProfiles.agentId, agentId))
+        .limit(1)
+        .catch(() => []);
+      if (!row || row.pausedAt === null) return null;
+      return row.pausedReason?.trim()
+        ? `${row.pausedReason.trim()}`
+        : "it is on hold";
     },
   };
 }

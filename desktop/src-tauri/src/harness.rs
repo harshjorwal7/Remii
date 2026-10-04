@@ -529,9 +529,7 @@ mod tests {
     }
 
     fn choice(id: &str) -> HarnessChoice {
-        HarnessChoice {
-            id: id.into(),
-        }
+        HarnessChoice { id: id.into() }
     }
 
     #[test]

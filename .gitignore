@@ -50,3 +50,6 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Runtime artifact scratch (repo transcripts written by runs), not source.
+server/.data/

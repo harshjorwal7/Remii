@@ -40,7 +40,7 @@ The message is ordinary AG-UI system content, so it works with any AG-UI-compati
 
 ## Mascot
 
-Every coworker has a mascot: a body silhouette and a colour. There are 7 × 10 of them, drawn by the
+Every coworker has a mascot: a body silhouette and a colour. There are 7 × 9 of them, drawn by the
 engine vendored at `app/src/mascot/bloub` (see `app/src/mascot/bloub/UPSTREAM.md` for the licence and
 for why that directory is not formatted or linted with the rest of the app).
 
@@ -102,7 +102,7 @@ not a face, it is a smudge, and every chip in a roster looks like the same smudg
 | Tier            | Sizes       | Face                          | Frame                       |
 | --------------- | ----------- | ----------------------------- | --------------------------- |
 | chip            | ≤ 20px      | none — silhouette only        | body fills 77% of the square |
-| avatar          | 21–47px     | eyes enlarged ×1.35, or ×1.15 below 28px | same            |
+| avatar          | 21–47px     | eyes enlarged ×1.2, or ×1.08 below 28px | same            |
 | hero            | ≥ 48px      | the engine's own proportions  | same, plus decor             |
 
 The frame is `±1.3` radii for all three, deliberately. A mascot that looked larger in a profile panel
@@ -176,10 +176,19 @@ swatches are static so twenty-four of them cost twenty-four paints rather than t
 ### Default colour
 
 An unchosen coworker is always a colour: `red`, `orange`, `amber`, `green`, `teal`, `blue`, `violet`,
-`pink`, evenly weighted. `ink`, `brown`, `grey` and `cream` are the only exclusions — the first because
-it is the black this list exists to remove, `brown` because it reads as mud, and the last two because
-`cream` rendered a coworker as a ghost on the light surface and `grey` reads as dead rather than quiet.
-All twelve stay in the customizer; this is a default, not a palette.
+`pink`, evenly weighted — **except a colour a named coworker already wears**. `ink`, `brown`, `grey`
+and `cream` are the only exclusions from the palette at all — the first because it is the black this
+list exists to remove, `brown` because it reads as mud, and the last two because `cream` rendered a
+coworker as a ghost on the light surface and `grey` reads as dead rather than quiet. All nine stay in
+the customizer; this is a default, not a palette.
+
+The reservation is derived from the named list rather than written here, so adding a named coworker
+takes its colour out of the seed automatically. It exists because the hue-band rule below could not be
+relied on for this case: `pink` has red and violet either side of it and nothing between, so its band
+is wide, and two coworkers both seeded pink stayed close enough to read as one another. It did happen
+— the email manager was born the same pink as Remii, because a hash of its generated id landed there
+and nothing was standing in the way. Colour is reserved; silhouette is not, because the band and the
+four per cent of lightness are enough to separate two bodies that differ in shape.
 
 Two earlier versions of this list were wrong and both were caught the same way — by rendering a
 twelve-row roster and looking at it. One was half `ink`, on the reasoning that a greyscale app should

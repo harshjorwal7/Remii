@@ -117,6 +117,19 @@ export function createHandoffDelivery(options: {
     fromBotId: string;
   }) => Promise<AbstractAgent | null>;
   /**
+   * Whether the addressed Bot is paused, so a hop that was queued before the pause still does not run.
+   *
+   * The desk already refuses to hand work to a paused Bot, and that is where the refusal belongs:
+   * the asking Bot is still talking and gets a sentence it can say out loud. This is the second
+   * half, for the gap the desk cannot close — work that was queued before the pause landed, or a
+   * hop that was in flight when it did. Between the two, a pause takes effect on the next hop rather
+   * than on the next one somebody happens to ask for.
+   *
+   * Bound rather than imported, because the delivery knows nothing about the profile store and
+   * reaching for one would make this module depend on a table it has no other business with.
+   */
+  pausedMessage?: (botId: string) => Promise<string | null>;
+  /**
    * The conversation so far, so the addressed Bot is not answering out of context.
    *
    * PASSED THROUGH UNTOUCHED, which is why its shape is the reader's rather than named here. The
@@ -204,6 +217,36 @@ export function createHandoffDelivery(options: {
 
   return {
     async deliver({ work, message, shown, assertion }) {
+      /*
+       * Checked before the Bot is built, because building one resolves grants, may provision a
+       * sandbox and costs real work — all of it for a run that is not going to happen. A pause that
+       * arrived while this hop sat in the queue is caught here rather than at the desk that queued it.
+       *
+       * The hop is released rather than retried: a pause is a state, not a fault, so retrying on the
+       * queue's schedule would keep re-reading the same row until somebody noticed and resumed the
+       * Bot. The refusal goes back as an answer, so the conversation that asked learns why nothing
+       * came back.
+       */
+      const paused = await options
+        .pausedMessage?.(work.toBotId)
+        .catch(() => null);
+      if (paused !== null && paused !== undefined) {
+        /*
+         * Said in the asking conversation, as a sentence rather than as an empty answer: the whole
+         * point of a pause is that somebody wanted this work to stop, and the person who asked for
+         * it is the one who needs to hear that it did.
+         */
+        const notice = `${work.toBotId} is paused${
+          paused ? ` — ${paused}` : ""
+        }, so this work was not delivered.`;
+        await announce?.({
+          actorId: work.actorId,
+          threadId: work.threadId,
+          agentId: work.toBotId,
+          text: notice,
+        }).catch(() => {});
+        return { answer: notice };
+      }
       const agent = await agentFor({
         actorId: work.actorId,
         botId: work.toBotId,

@@ -1,10 +1,5 @@
 import { useRenderTool } from "@copilotkit/react-core/v2";
-import {
-  IconArrowUpRight,
-  IconCheck,
-  IconLoader2,
-  IconRefresh,
-} from "@tabler/icons-react";
+import { IconArrowUpRight, IconCheck, IconX } from "@tabler/icons-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import { z } from "zod";
@@ -69,8 +64,8 @@ function ConnectionCard({
   given?: { app?: string; reason?: string };
 }) {
   const queryClient = useQueryClient();
-  const [checking, setChecking] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [discarded, setDiscarded] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
 
   const serverId =
@@ -79,7 +74,6 @@ function ConnectionCard({
 
   const checkConnection = useCallback(async () => {
     if (!serverId) return;
-    setChecking(true);
     setCheckError(null);
     try {
       const response = await client(
@@ -98,20 +92,18 @@ function ConnectionCard({
       }
     } catch (err) {
       setCheckError((err as Error).message || "Could not verify connection.");
-    } finally {
-      setChecking(false);
     }
   }, [serverId, queryClient]);
 
   // When window regains focus, auto-check if user just authorized in popup/tab
   useEffect(() => {
-    if (connected || !payload.connectUrl) return;
+    if (connected || discarded || !payload.connectUrl) return;
     const handleFocus = () => {
       void checkConnection();
     };
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
-  }, [connected, payload.connectUrl, checkConnection]);
+  }, [connected, discarded, payload.connectUrl, checkConnection]);
 
   if (payload.ok === false) {
     return (
@@ -146,50 +138,58 @@ function ConnectionCard({
             <IconCheck className="size-3" />
             Connected
           </span>
+        ) : discarded ? (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+            <IconX className="size-3" />
+            Discarded
+          </span>
         ) : null}
       </div>
 
       <div className="flex items-center gap-2 pt-1">
-        {(payload.connectUrl || payload.settingsUrl) && !connected ? (
-          <Button
-            size="sm"
-            className="px-3 text-xs"
-            onClick={() => {
-              const url = payload.connectUrl ?? payload.settingsUrl;
-              if (url) {
-                window.open(url, "_blank", "noopener,noreferrer");
-              }
-            }}
-          >
-            {payload.settingsUrl && !payload.connectUrl
-              ? "Open Connection Settings"
-              : "Connect Account"}
-            <IconArrowUpRight data-icon="inline-end" />
-          </Button>
-        ) : null}
-
-        {!connected && payload.connectUrl ? (
-          <Button
-            size="sm"
-            variant="outline"
-            className="px-2.5 text-xs text-muted-foreground"
-            disabled={checking}
-            onClick={() => void checkConnection()}
-          >
-            {checking ? (
-              <IconLoader2 className="animate-spin" data-icon="inline-start" />
-            ) : (
-              <IconRefresh data-icon="inline-start" />
-            )}
-            {checking ? "Checking…" : "Check Status"}
-          </Button>
-        ) : null}
-
-        {connected ? (
-          <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
-            Account connected! The coworker can now access this app.
+        {discarded ? (
+          <p className="text-[11px] text-muted-foreground">
+            Connection discarded.
           </p>
-        ) : null}
+        ) : (
+          <>
+            {(payload.connectUrl || payload.settingsUrl) && !connected ? (
+              <Button
+                size="sm"
+                className="px-3 text-xs"
+                onClick={() => {
+                  const url = payload.connectUrl ?? payload.settingsUrl;
+                  if (url) {
+                    window.open(url, "_blank", "noopener,noreferrer");
+                  }
+                }}
+              >
+                {payload.settingsUrl && !payload.connectUrl
+                  ? "Open Connection Settings"
+                  : "Connect Account"}
+                <IconArrowUpRight data-icon="inline-end" />
+              </Button>
+            ) : null}
+
+            {!connected ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="px-2.5 text-xs text-muted-foreground"
+                onClick={() => setDiscarded(true)}
+              >
+                <IconX data-icon="inline-start" />
+                Discard
+              </Button>
+            ) : null}
+
+            {connected ? (
+              <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                Account connected! The coworker can now access this app.
+              </p>
+            ) : null}
+          </>
+        )}
       </div>
 
       {checkError ? (
@@ -213,6 +213,7 @@ export function ConnectionTool() {
           label={payload.title ? `Connect ${payload.title}` : "Connect App"}
           detail={given?.app}
           running={running}
+          defaultOpen
         >
           {running ? (
             <p className="text-xs text-muted-foreground">

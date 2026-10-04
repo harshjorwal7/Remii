@@ -340,14 +340,23 @@ const stateRow = (size: number, note: string) =>
       )}<figcaption>${state}</figcaption></figure>`,
   ).join("")}</div>`;
 
-/** The product's real seeds, so the roster shows what people will actually see. */
+/**
+ * The product's real seeds, so the roster shows what people will actually see.
+ *
+ * UUID-shaped on purpose, because a coworker created in this product gets `agent_<uuid>` — see
+ * `profile-store.ts` — and the previous six ids here all differed only in their final character.
+ * That is the worst possible input for a hash: it produced two ids with an identical colour byte, so
+ * the roster this sheet exists to show came out as three of one colour and two of another. A sample
+ * chosen to flatter a hash is not a regression baseline, and the real inputs are UUIDs, so the
+ * sample is UUIDs.
+ */
 const ROSTER_SEEDS = [
-  "agent_01HX8QK2M4P",
-  "agent_01HX8QK2M4Q",
-  "agent_01HX8QK2M4R",
-  "agent_01HX8QK2M4S",
-  "agent_01HX8QK2M4T",
-  "agent_01HX8QK2M4U",
+  "agent_b921b1e0-def3-48b8-9d97-9d6ad2ccef30",
+  "agent_aa0e2b40-5a18-44b5-8c1f-27321b7d7c1d",
+  "agent_3f7c19ae-84b2-4d60-9e15-0c8ab2d3f611",
+  "agent_c14e0b77-2f39-4a81-b6de-91f5a7038e22",
+  "agent_77d2ea45-6c10-4b93-8fa1-3e60c9d54b07",
+  "agent_9a60cf18-37bd-42ea-8f75-c2109b6e4d83",
 ];
 
 /** The real sidebar row, at the real row metrics, for the two avatar sizes the roster has used. */

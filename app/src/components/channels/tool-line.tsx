@@ -17,6 +17,7 @@ export function ToolLine({
   refused,
   failed,
   children,
+  defaultOpen,
 }: {
   /** What was done, in a couple of words: "Searched Slack", "Filled in", "Read the page". */
   label: string;
@@ -29,6 +30,8 @@ export function ToolLine({
   failed?: boolean;
   /** Shown when the line is expanded. Without it the line is not expandable. */
   children?: ReactNode;
+  /** Whether the line starts in the expanded open state. */
+  defaultOpen?: boolean;
 }) {
   const tone = refused
     ? "text-destructive"
@@ -52,7 +55,7 @@ export function ToolLine({
   if (!children) return <div className="my-1.5">{text}</div>;
 
   return (
-    <details className="tool-line my-1.5 min-w-0">
+    <details className="tool-line my-1.5 min-w-0" open={defaultOpen}>
       {/*
        * Native <details> owns expansion because SDK tool renderers can be re-invoked independently
        * of this component's React state.

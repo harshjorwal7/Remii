@@ -22,10 +22,10 @@ import {
  * which colour.
  *
  * Every row is independent and the whole thing is optional, which is the design rather than an
- * accident. There are 96 mascots, so requiring a choice would mean picking one out of a list
- * nobody would otherwise touch, and an undressed coworker already looks distinct because it is seeded
- * from its own id. So the default state of this control is "no choice at all", and the reset button
- * gets you back to it.
+ * accident. There are 63 possible mascots — seven shapes by nine colours — so requiring a choice
+ * would mean picking one out of a list nobody would otherwise touch, and an undressed coworker
+ * already looks distinct because it is seeded from its own id. So the default state of this control
+ * is "no choice at all", and the reset button gets you back to it.
  *
  * That is also why it reports `undefined` for "nothing chosen" rather than an empty object. The
  * server reads a missing mascot as untouched and a present one as a replacement, so an empty object

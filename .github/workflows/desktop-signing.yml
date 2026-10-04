@@ -126,7 +126,7 @@ jobs:
         run: |
           $installers = @(Get-ChildItem 'desktop/src-tauri/target/release/bundle/nsis/*-setup.exe' -File)
           if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer.' }
-          & 7z e $installers[0].FullName '-odesktop/signed-app' '-r' '-y' 'openbot-desktop.exe'
+          & 7z e $installers[0].FullName '-odesktop/signed-app' '-r' '-y' 'remii-desktop.exe'
           if ($LASTEXITCODE -ne 0) { throw 'Could not extract signed app from NSIS installer.' }
       - name: Verify publisher, trust, and timestamp on both executables
         run: |
@@ -137,7 +137,7 @@ jobs:
         with:
           name: openbot-windows-signed-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            desktop/signed-app/openbot-desktop.exe
+            desktop/signed-app/remii-desktop.exe
             desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
             desktop/build-version.json
           if-no-files-found: error

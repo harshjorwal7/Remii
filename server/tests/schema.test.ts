@@ -318,6 +318,22 @@ describe("Remii database schema", () => {
         primary: false,
       },
       /*
+       * The pause, as a nullable timestamp rather than a boolean — the same "null means not chosen"
+       * reading as the two mascot columns above.
+       *
+       * A boolean defaulting to false cannot tell "never paused" from "written before the column
+       * existed", and that difference is the whole question when deciding whether a coworker that is
+       * not working is paused or simply idle. `paused_reason` rides along and is cleared with the
+       * pause, so a reason never outlives the pause it described.
+       */
+      { name: "paused_at", notNull: false, hasDefault: false, primary: false },
+      {
+        name: "paused_reason",
+        notNull: false,
+        hasDefault: false,
+        primary: false,
+      },
+      /*
        * Still in the schema because old rows still carry it, and no longer a decision anything makes.
        * `mapProfile` returns `visibility: "private"` whatever the column says, and `accessFilter`
        * reads `ownerUserId` and `isSystemTemplate` instead — public sharing was removed, so nothing

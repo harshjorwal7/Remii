@@ -113,3 +113,25 @@ export const markdownComponents = {
     );
   },
 };
+
+/**
+ * The MARKDOWN TEXT THE RENDERER IS ALLOWED TO SEE.
+ *
+ * A Bot's answer is usually short, but every so often it is a giant machine-written table — the
+ * ticker Bot does exactly this — and the markdown parser pays for every row: a table with tens of
+ * thousands of cells froze the whole tab, because `Streamdown` re-parses the full document on
+ * every call and a pathological table is parsed one way, a tr here, a td there, with the
+ * streaming wrapper no better.
+ *
+ * Rendering the whole thing is not worth one frozen page: the first chunk carries the answer,
+ * and the rest is past the fold or cut off, so it is replaced by a plain note. The limit is
+ * generous enough that an ordinary long answer never notices, and it matches what the server
+ * keeps for a tool result, so the two sides of a conversation do not disagree about which
+ * sentences count as shown.
+ */
+export const MARKDOWN_RENDER_CAP = 50_000;
+
+export function capMarkdown(text: string): string {
+  if (text.length <= MARKDOWN_RENDER_CAP) return text;
+  return `${text.slice(0, MARKDOWN_RENDER_CAP)}\n\n[… ${text.length - MARKDOWN_RENDER_CAP} more characters were too long to render in the chat. Open the raw result to see them.]`;
+}

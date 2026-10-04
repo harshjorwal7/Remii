@@ -47,7 +47,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { attachmentUrl } from "@/lib/channels/attachments";
 import { readFiring } from "@/lib/channels/routine-firing";
-import { markdownComponents } from "@/lib/markdown";
+import { capMarkdown, markdownComponents } from "@/lib/markdown";
 import { EASE_OUT, ENTRANCE_SECONDS } from "@/lib/motion";
 import { readToolName } from "@/lib/plugins/tool-name";
 import { asText, forDisplay, REFUSAL_MARKER } from "@/lib/plugins/tool-result";
@@ -634,7 +634,9 @@ const TranscriptMessage = memo(function TranscriptMessage({
                  * closing token arrives, so the answer visibly rewrites itself as it lands. This
                  * closes them for the duration.
                  */
-                <Streamdown components={markdownComponents}>{text}</Streamdown>
+                <Streamdown components={markdownComponents}>
+                  {capMarkdown(text)}
+                </Streamdown>
               )}
             </BubbleContent>
           </Bubble>
@@ -1380,7 +1382,7 @@ function ServerToolLine({
     >
       {body ? (
         <Streamdown components={markdownComponents}>
-          {forDisplay(body)}
+          {capMarkdown(forDisplay(body))}
         </Streamdown>
       ) : null}
     </ToolLine>

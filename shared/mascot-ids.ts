@@ -110,10 +110,14 @@ export interface MascotChoice {
 /**
  * What a mascot looks like before anybody chooses.
  *
- * `ink` rather than a colour, and `circle` rather than one of the seven other silhouettes, because
+ * `blue` rather than a grey, and `circle` rather than one of the seven other silhouettes, because
  * the unchosen case is the overwhelming majority: every agent that has never been customised, and
- * any agent whose stored choice predates this. It should look like a neutral blob that happens to
- * be a coworker, not like a mascot someone picked.
+ * any agent whose stored choice predates this. It should look like a plain coworker rather than a
+ * mascot someone picked.
+ *
+ * This is the last resort and almost never reached: a seeded agent gets its mascot from
+ * `mascotChoiceForSeed`, which is a hash of its own id rather than this. What this is for is a caller
+ * that has no seed at all to read — a shape drawn before any agent is known.
  */
 export const DEFAULT_MASCOT: MascotChoice = {
   shape: "circle",

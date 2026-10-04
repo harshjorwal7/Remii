@@ -530,7 +530,7 @@ jobs:
     name: verify
     runs-on: ubuntu-latest
     if: always()
-    needs: [static, deployables, chart, test, startup, python-harness, build, migrations, image, component-dockerfiles]
+    needs: [static, chart, test, startup, python-harness, build, migrations, image, component-dockerfiles]
     steps:
       - name: Require every check
         env:

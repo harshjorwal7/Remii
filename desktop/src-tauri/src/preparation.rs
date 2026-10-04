@@ -459,7 +459,9 @@ fn main() {
     #[test]
     fn changed_bot_lockfile_or_deleted_package_requires_installation() {
         let f = Fixture::new();
-        let chosen = Some(HarnessChoice { id: "langgraph".into() });
+        let chosen = Some(HarnessChoice {
+            id: "langgraph".into(),
+        });
         f.prepared(chosen.as_ref());
         require_with(&f.root, Some(&chosen), |_| Ok(())).unwrap();
         assert!(require_with(&f.root, Some(&None), |_| panic!(

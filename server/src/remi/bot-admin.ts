@@ -11,6 +11,15 @@ import type { ExecutionModeStore } from "../execution-mode";
 import type { PluginStore } from "../plugins/store";
 import type { GrantedTool } from "../plugins/tools";
 import type { UserInstructionsStore } from "../user-instructions";
+import {
+  isMascotColorId,
+  isMascotShapeId,
+  MASCOT_COLOR_IDS,
+  MASCOT_SHAPE_IDS,
+  type MascotColorId,
+  type MascotShapeId,
+} from "../../../shared/mascot-ids";
+import { mascotChoiceForSeed } from "../../../shared/mascot-seed";
 
 /**
  * The standing instructions a Bot made here may carry.
@@ -120,6 +129,9 @@ export const BOT_ADMIN_TOOL_NAMES = [
   "bot_read",
   "bot_list",
   "coworker_status",
+  "bot_stop",
+  "bot_pause",
+  "bot_resume",
   "bot_grant",
   "bot_revoke",
   "update_settings",
@@ -166,6 +178,21 @@ export type BotAdminStores = {
     constraints?: string;
     expecting?: string;
   }) => Promise<{ ok: boolean; answer: string }>;
+  /**
+   * End whatever run is live on a thread, by the thread the run is on.
+   *
+   * Bound by the caller rather than imported, for the same reason `delegateToOwnChannel` is: the
+   * runner that owns liveness is the process's, and a tool that reached for its own would be a
+   * second runner with a different idea of what is running.
+   *
+   * `runId` is optional and the answer says whether anything was actually stopped, because that is
+   * the difference between "I halted Coco's turn" and "Coco had already finished". Absent leaves
+   * `bot_stop` off rather than offering a control that silently does nothing.
+   */
+  stopRun?: (input: {
+    threadId: string;
+    runId?: string | null;
+  }) => Promise<boolean>;
 };
 
 export function botAdminToolsFor(options: {
@@ -195,6 +222,9 @@ export function botAdminToolsFor(options: {
       | "bot.updated"
       | "bot.duplicated"
       | "bot.deleted"
+      | "bot.stopped"
+      | "bot.paused"
+      | "bot.resumed"
       | "configuration.changed"
       | "mcp.account_disconnected",
     targetType: string,
@@ -214,6 +244,37 @@ export function botAdminToolsFor(options: {
       // The trail must never fail the change it records.
     }
   };
+
+  /**
+   * The mascot this coworker is actually wearing, in the words a model reads best in.
+   *
+   * A row can hold one axis, both, or neither, and "neither" is every coworker nobody has dressed —
+   * which draws from the seed rather than from the palette. So a report that only echoed the row
+   * would describe a mascot nobody can see, and Remii would go looking for a collision that was
+   * never on the screen. Resolving the seed here is what makes the roster it reports the roster a
+   * person is looking at.
+   */
+  const mascotOf = (
+    profile: AgentProfile,
+  ): {
+    shape: string;
+    color: string;
+    chosen: boolean;
+  } => {
+    const seeded = mascotChoiceForSeed(profile.avatarSeed || profile.id);
+    const chosen =
+      profile.mascot?.shape !== undefined ||
+      profile.mascot?.color !== undefined;
+    return {
+      shape: profile.mascot?.shape ?? seeded.shape,
+      color: profile.mascot?.color ?? seeded.color,
+      chosen,
+    };
+  };
+
+  /** The run states that mean this Bot is working right now, as opposed to waiting or finished. */
+  const isWorking = (state: string | undefined): boolean =>
+    state === "thinking" || state === "delegated";
 
   /** The Bot this run means, by id or by name as the roster spells it. */
   const resolveBot = async (
@@ -549,7 +610,7 @@ export function botAdminToolsFor(options: {
 
     tool(
       "bot_update",
-      "Update or iterate on an existing coworker: change their name, job title, role description, or standing instructions. Remii can refine any coworker's behavior, instructions, and responsibilities as their role evolves.",
+      "Update or iterate on an existing coworker: change their name, job title, role description, standing instructions, or its mascot shape and colour. Remii can refine any coworker's behavior, instructions, responsibilities, and appearance as their role evolves.",
       z.object({
         bot: z
           .string()
@@ -567,6 +628,18 @@ export function botAdminToolsFor(options: {
           .string()
           .optional()
           .describe("Additional or updated standing instructions."),
+        shape: z
+          .enum(MASCOT_SHAPE_IDS)
+          .optional()
+          .describe(
+            "A new body silhouette for the mascot. Leave it out to keep the current shape.",
+          ),
+        color: z
+          .enum(MASCOT_COLOR_IDS)
+          .optional()
+          .describe(
+            "A new colour for the mascot. Leave it out to keep the current colour. Pick one that is not already on the roster so nobody is confused about who is who.",
+          ),
       }),
       async (args) => {
         const a = args as {
@@ -575,6 +648,8 @@ export function botAdminToolsFor(options: {
           title?: string;
           job?: string;
           instructions?: string;
+          shape?: string;
+          color?: string;
         };
         const resolved = await resolveBot(a.bot);
         if (!resolved.ok) return resolved.refusal;
@@ -602,12 +677,47 @@ export function botAdminToolsFor(options: {
          */
         const role = boundRoleDescription(composed);
         const roleDescription = role.text;
+        /*
+         * The mascot is validated here rather than trusted, even though the schema already narrowed
+         * it: the model writes both the tool description and the arguments, so the enum is a
+         * convenience for it and not a guarantee, and a colour it invented would otherwise be stored
+         * as somebody's coworker's face and drawn as the palette's fallback.
+         *
+         * Refused out loud rather than dropped, because a silent drop is indistinguishable from the
+         * update having worked.
+         */
+        const before = mascotOf(current);
+        const shape = a.shape?.trim();
+        const color = a.color?.trim();
+        if (shape !== undefined && !isMascotShapeId(shape)) {
+          return `"${shape}" is not a mascot shape. The shapes are ${MASCOT_SHAPE_IDS.join(", ")}.`;
+        }
+        if (color !== undefined && !isMascotColorId(color)) {
+          return `"${color}" is not a mascot colour. The colours are ${MASCOT_COLOR_IDS.join(", ")}.`;
+        }
+        const wantsMascot = shape !== undefined || color !== undefined;
+        /*
+         * Both axes travel together, always — including the one nobody asked about.
+         *
+         * `profiles.update` treats a supplied mascot as a whole replacement, because a partial write
+         * would make clearing one axis impossible. So sending only the colour would reset the shape
+         * to whatever the seed says, which is exactly the bug this tool would have created the first
+         * time it was used to fix a colour. Carrying the resolved shape across keeps a recolour a
+         * recolour.
+         */
+        const mascot = wantsMascot
+          ? {
+              shape: (shape ?? before.shape) as MascotShapeId,
+              color: (color ?? before.color) as MascotColorId,
+            }
+          : undefined;
         try {
           await stores.profiles.update(actor, current.id, {
             name,
             title,
             roleDescription,
             visibility: current.visibility,
+            ...(mascot ? { mascot } : {}),
           });
         } catch {
           return `Could not update ${current.name} right now.`;
@@ -617,12 +727,25 @@ export function botAdminToolsFor(options: {
           name,
           title,
           roleDescription,
+          ...(mascot ? { mascot } : {}),
         });
         const changes: string[] = [];
         if (name !== current.name) changes.push(`name is now ${name}`);
         if (title !== current.title) changes.push(`title is now ${title}`);
         if (roleDescription !== current.roleDescription)
           changes.push("role and instructions updated");
+        if (mascot) {
+          const parts: string[] = [];
+          if (shape !== undefined && shape !== before.shape)
+            parts.push(`shape is now ${shape}`);
+          if (color !== undefined && color !== before.color)
+            parts.push(`colour is now ${color}`);
+          changes.push(
+            parts.length > 0
+              ? `mascot ${parts.join(" and ")}`
+              : "mascot asked for and already so",
+          );
+        }
         if (role.was > ROLE_DESCRIPTION_LIMIT) {
           changes.push(
             `standing role cut from ${role.was} to ${ROLE_DESCRIPTION_LIMIT} characters, so shorten it rather than appending again`,
@@ -634,7 +757,7 @@ export function botAdminToolsFor(options: {
 
     tool(
       "bot_read",
-      "Inspect an existing coworker in full: their role description, standing instructions, granted skills, tools, and handoff targets.",
+      "Inspect an existing coworker in full: its mascot shape and colour, whether it is paused and why, its role description, standing instructions, granted skills, tools, and handoff targets.",
       z.object({
         bot: z
           .string()
@@ -663,10 +786,23 @@ export function botAdminToolsFor(options: {
                 .catch(() => null)
             : Promise.resolve(null),
         ]);
+        const mascot = mascotOf(p);
         const lines = [
           `Coworker: ${p.name} (ID: ${p.id})`,
           `Title: ${p.title}`,
           `Kind: ${p.isSystemTemplate ? "Shared template" : "Workspace coworker"}`,
+          `Mascot: ${mascot.shape}, ${mascot.color}${
+            mascot.chosen
+              ? ""
+              : " (not chosen by anybody; this is what its id gives it)"
+          }`,
+          ...(p.pausedAt
+            ? [
+                `Paused: yes${
+                  p.pausedReason ? ` — ${p.pausedReason}` : ""
+                } (it will not take work until bot_resume)`,
+              ]
+            : []),
           `Role & Instructions:\n${p.roleDescription || "None set"}`,
         ];
         if (reachable.length > 0) {
@@ -687,7 +823,7 @@ export function botAdminToolsFor(options: {
 
     tool(
       "bot_list",
-      "List all coworkers and templates in the workspace, with their IDs, names, titles, and whether they are active workspace coworkers or shared templates.",
+      "List all coworkers and templates in the workspace, with their IDs, names, titles, mascot shape and colour, whether they are paused, and whether they are active workspace coworkers or shared templates. Read this before repainting anyone: two coworkers in the same colour are hard to tell apart on screen.",
       z.object({}),
       async () => {
         let roster: AgentProfile[];
@@ -706,8 +842,9 @@ export function botAdminToolsFor(options: {
           );
         } else {
           for (const b of workspaceBots) {
+            const mascot = mascotOf(b);
             lines.push(
-              `- ${b.name} (${b.title}) [id: ${b.id}] — ${b.roleDescription ? b.roleDescription.split("\n")[0] : ""}`,
+              `- ${b.name} (${b.title}) [id: ${b.id}] — mascot ${mascot.shape}, ${mascot.color}${b.pausedAt ? " [PAUSED]" : ""} — ${b.roleDescription ? b.roleDescription.split("\n")[0] : ""}`,
             );
           }
         }
@@ -716,8 +853,9 @@ export function botAdminToolsFor(options: {
             "\nAvailable Templates (can be summoned with bot_summon):",
           );
           for (const t of templates) {
+            const mascot = mascotOf(t);
             lines.push(
-              `- ${t.name} (${t.title}) [template id: ${t.id}] — ${t.roleDescription ? t.roleDescription.split("\n")[0] : ""}`,
+              `- ${t.name} (${t.title}) [template id: ${t.id}] — mascot ${mascot.shape}, ${mascot.color} — ${t.roleDescription ? t.roleDescription.split("\n")[0] : ""}`,
             );
           }
         }
@@ -727,7 +865,7 @@ export function botAdminToolsFor(options: {
 
     tool(
       "coworker_status",
-      "Ask or check what any coworker (or all coworkers) is currently working on: inspects their channel, whether they are busy running a turn, their latest messages and conversation summary, so you can report back to the user on what coworkers are doing.",
+      "Check what any coworker (or all coworkers) is currently doing: whether it is running a turn, waiting on the person, failed, or paused and why, its mascot, its channel's latest messages and topic. This is the first thing to call when asked how the workspace is doing, or what to stop.",
       z.object({
         bot: z
           .string()
@@ -759,19 +897,46 @@ export function botAdminToolsFor(options: {
             ch.agentIds.includes(target.id),
           );
           if (!matchingChannel) {
-            return `${target.name} (${target.title}) has not had any conversations opened yet in this workspace.`;
+            return `${target.name} (${target.title}) has not had any conversations opened yet in this workspace. It is${target.pausedAt ? " paused" : " not paused"}.`;
           }
-          const busyStatus = (matchingChannel as { busy?: boolean }).busy
-            ? "Currently running a turn"
-            : "Idle";
+          /*
+           * Read from `activity`, which is the one field on a channel summary that is a fact about a
+           * run. This used to read `channel.busy`, which no type here has ever declared and nothing
+           * has ever set — so the answer was always "Idle", for a coworker that was visibly working.
+           * A chief of staff that reports every coworker idle is worse than one that reports nothing:
+           * it is confidently wrong, and it is wrong about exactly the thing it was asked about.
+           */
+          const activity = matchingChannel.activity;
+          const busyStatus = !activity
+            ? "Idle"
+            : isWorking(activity.state)
+              ? `Working — ${activity.state}${activity.label ? `, ${activity.label}` : ""}`
+              : activity.state === "waiting_on_you"
+                ? `Waiting on the person${
+                    activity.label ? ` — ${activity.label}` : ""
+                  }`
+                : activity.state === "failed"
+                  ? `Last run failed${
+                      activity.detail ? ` — ${activity.detail}` : ""
+                    }`
+                  : "Idle";
           const lastActivityStr = matchingChannel.lastMessageAt
             ? matchingChannel.lastMessageAt instanceof Date
               ? matchingChannel.lastMessageAt.toISOString()
               : String(matchingChannel.lastMessageAt)
             : "None";
+          const mascot = mascotOf(target);
           const lines = [
             `Coworker: ${target.name} (${target.title})`,
             `Status: ${busyStatus}`,
+            ...(target.pausedAt
+              ? [
+                  `Paused: yes${
+                    target.pausedReason ? ` — ${target.pausedReason}` : ""
+                  } — this coworker will not take work until bot_resume.`,
+                ]
+              : []),
+            `Mascot: ${mascot.shape}, ${mascot.color}`,
             `Conversation topic: ${matchingChannel.summary || matchingChannel.name}`,
             `Last activity: ${lastActivityStr}`,
             `Latest message: ${matchingChannel.lastMessage || "None"}`,
@@ -806,16 +971,191 @@ export function botAdminToolsFor(options: {
           const ch = channelsPage.channels.find((c) =>
             c.agentIds.includes(b.id),
           );
-          const busy = (ch as { busy?: boolean } | undefined)?.busy
-            ? " [BUSY]"
-            : " [Idle]";
+          const busy =
+            ch?.activity?.state === "thinking"
+              ? " [working]"
+              : ch?.activity?.state === "delegated"
+                ? ` [with ${ch.activity.label ?? "another coworker"}]`
+                : ch?.activity?.state === "waiting_on_you"
+                  ? " [waiting on the person]"
+                  : ch?.activity?.state === "failed"
+                    ? " [last run failed]"
+                    : " [idle]";
+          const paused = b.pausedAt ? " [PAUSED]" : "";
+          const mascot = mascotOf(b);
           const last = ch?.lastMessage
             ? ` — Latest: "${ch.lastMessage.slice(0, 100)}"`
             : "";
           const summary = ch?.summary ? ` (Topic: ${ch.summary})` : "";
-          reports.push(`- ${b.name} (${b.title})${busy}${summary}${last}`);
+          reports.push(
+            `- ${b.name} (${b.title})${busy}${paused} — ${mascot.shape}, ${mascot.color}${summary}${last}`,
+          );
         }
         return reports.join("\n");
+      },
+    ),
+
+    ...(stores.stopRun
+      ? [
+          tool(
+            "bot_stop",
+            "Stop what a coworker is doing right now. Use this when a coworker is going the wrong way — the wrong task, the wrong recipient, something the person did not ask for — and the answer is to end the turn rather than wait for it. This ends the run in flight; it does not stop the coworker from being given work later, which is what bot_pause is for. Note what it cannot do: a tool the coworker has already called keeps going unless that tool honours cancellation, so anything already sent to an outside service stays sent.",
+            z.object({
+              bot: z
+                .string()
+                .describe(
+                  "The coworker's name or id, as the roster spells it.",
+                ),
+              reason: z
+                .string()
+                .optional()
+                .describe(
+                  "Why it is being stopped. Recorded, and shown to the person, so the channel explains itself later.",
+                ),
+            }),
+            async (args) => {
+              const a = args as { bot?: unknown; reason?: string };
+              const resolved = await resolveBot(a.bot);
+              if (!resolved.ok) return resolved.refusal;
+              const target = resolved.profile;
+              if (target.isSystemTemplate) {
+                return `${target.name} is a shared template and is not running anything.`;
+              }
+              if (target.id === botId) {
+                return "That is me. I stop myself by ending this turn — say so and stop.";
+              }
+              if (target.pausedAt) {
+                return `${target.name} is already paused, so it is not taking work. Use bot_resume to let it work again.`;
+              }
+              const channelsPage = await stores.channels
+                .list(await stores.loadActor(), { limit: 50 })
+                .catch(() => ({ channels: [] }));
+              const channel = channelsPage.channels.find((ch) =>
+                ch.agentIds.includes(target.id),
+              );
+              if (!channel?.threadId) {
+                return `${target.name} has no conversation of its own, so there is no run to stop.`;
+              }
+              const wasWorking = isWorking(channel.activity?.state);
+              /*
+               * The thread comes from the channel the person owns, never from the model. That is the
+               * whole authorisation: Remii can only ever name a thread it found by looking up a
+               * coworker's own channel through the owner's own roster, so there is no thread id in
+               * this tool's arguments that could point anywhere else.
+               */
+              const stopped = await stores
+                .stopRun?.({ threadId: channel.threadId })
+                .catch(() => false);
+              if (!stopped) {
+                return wasWorking
+                  ? `${target.name} looked busy but the stop did not take — it may have finished in the same moment. Check coworker_status before saying it is stopped.`
+                  : `${target.name} was not running anything, so nothing was stopped.`;
+              }
+              await audit("bot.stopped", "bot", target.id, {
+                bot: botId,
+                name: target.name,
+                reason: a.reason?.trim() || null,
+              });
+              return `${target.name}'s turn was stopped.${
+                a.reason?.trim() ? ` Reason: ${a.reason.trim()}` : ""
+              } If it must not be given work again, use bot_pause.`;
+            },
+          ),
+        ]
+      : []),
+
+    tool(
+      "bot_pause",
+      "Put a coworker on hold so it stops accepting work until it is resumed. Use this for a coworker that should not be running at all right now — one that keeps going the wrong way, or one whose work is no longer wanted. Work already in flight is not stopped by this; call bot_stop first if a turn is running. The person still sees its channel and history; it simply will not be given anything new.",
+      z.object({
+        bot: z
+          .string()
+          .describe("The coworker's name or id, as the roster spells it."),
+        reason: z
+          .string()
+          .optional()
+          .describe(
+            "Why it is being held. Shown on the roster and in bot_read.",
+          ),
+      }),
+      async (args) => {
+        const a = args as { bot?: unknown; reason?: string };
+        const resolved = await resolveBot(a.bot);
+        if (!resolved.ok) return resolved.refusal;
+        const target = resolved.profile;
+        if (target.isSystemTemplate) {
+          return `${target.name} is a shared template and cannot be paused.`;
+        }
+        if (target.id === botId) {
+          return "I am the one holding the roster. I cannot pause myself; ask the person.";
+        }
+        if (target.pausedAt) {
+          return `${target.name} is already paused${
+            target.pausedReason ? ` — ${target.pausedReason}` : ""
+          }.`;
+        }
+        const reason = a.reason?.trim() || null;
+        try {
+          await stores.profiles.update(await stores.loadActor(), target.id, {
+            name: target.name,
+            title: target.title,
+            roleDescription: target.roleDescription,
+            visibility: target.visibility,
+            paused: true,
+            pausedReason: reason,
+          });
+        } catch {
+          return `${target.name} could not be paused right now.`;
+        }
+        await audit("bot.paused", "bot", target.id, {
+          bot: botId,
+          name: target.name,
+          reason,
+        });
+        return `${target.name} is paused and will not take work${
+          reason ? ` — ${reason}` : ""
+        }. Resume it with bot_resume.`;
+      },
+    ),
+
+    tool(
+      "bot_resume",
+      "Release a paused coworker so it takes work again. Only a paused coworker can be resumed; on any other this does nothing and says so.",
+      z.object({
+        bot: z
+          .string()
+          .describe("The coworker's name or id, as the roster spells it."),
+      }),
+      async (args) => {
+        const resolved = await resolveBot((args as { bot?: unknown }).bot);
+        if (!resolved.ok) return resolved.refusal;
+        const target = resolved.profile;
+        if (target.isSystemTemplate) {
+          return `${target.name} is a shared template and cannot be paused or resumed.`;
+        }
+        if (!target.pausedAt) {
+          return `${target.name} is not paused; it is already taking work.`;
+        }
+        const reason = target.pausedReason;
+        try {
+          await stores.profiles.update(await stores.loadActor(), target.id, {
+            name: target.name,
+            title: target.title,
+            roleDescription: target.roleDescription,
+            visibility: target.visibility,
+            paused: false,
+          });
+        } catch {
+          return `${target.name} could not be resumed right now.`;
+        }
+        await audit("bot.resumed", "bot", target.id, {
+          bot: botId,
+          name: target.name,
+          wasPausedFor: reason,
+        });
+        return `${target.name} is working again${
+          reason ? `. It was paused because: ${reason}` : "."
+        }`;
       },
     ),
 

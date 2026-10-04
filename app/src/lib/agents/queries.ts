@@ -25,6 +25,9 @@ export type AgentProfile = {
    * shape — see `mergeMascotChoice`.
    */
   mascot: Partial<MascotChoice> | null;
+  /** When this coworker was paused, or null when it is running. */
+  pausedAt?: string | null;
+  pausedReason?: string | null;
   visibility: AgentVisibility;
   hidden: boolean;
   systemOwned: boolean;

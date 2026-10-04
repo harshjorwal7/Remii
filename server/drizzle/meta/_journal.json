@@ -526,6 +526,13 @@
       "when": 1791000000000,
       "tag": "0074_audit_retention_namespace",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1791152051751,
+      "tag": "0075_coworker_pause",
+      "breakpoints": true
     }
   ]
 }

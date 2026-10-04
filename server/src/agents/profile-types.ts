@@ -34,6 +34,9 @@ export type AgentProfile = {
    * Null means no axis is set at all, which is every row written before this feature existed.
    */
   mascot: Partial<MascotChoice> | null;
+  /** Why this coworker has been paused, when it has been. Null and `pausedAt` null is the normal case. */
+  pausedAt: Date | null;
+  pausedReason: string | null;
   visibility: AgentVisibility;
   ownerUserId: string | null;
   isSystemTemplate?: boolean;
@@ -79,4 +82,12 @@ export type CreateAgentInput = Pick<
    * same field be used by the create form and by an edit that only wants to change the name.
    */
   mascot?: Partial<MascotChoice> | null;
+  /**
+   * Paused means the Bot will not take work. Absent leaves the switch where it was, the same
+   * "do not touch what I did not say" contract `delegationOnly` and `mascot` use; resumed passes
+   * `false` to clear. `pausedReason` rides along and explains why, so a later look at the roster can
+   * see what happened without reading an audit row.
+   */
+  paused?: boolean;
+  pausedReason?: string | null;
 };

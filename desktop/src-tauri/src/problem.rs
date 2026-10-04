@@ -125,8 +125,7 @@ mod tests {
     /// The failure this whole file exists for.
     #[test]
     fn a_refused_pull_reads_as_a_missing_release_not_a_login_problem() {
-        let raw =
-            "Error response from daemon: pull access denied for remii-agent-langgraph-agui, \
+        let raw = "Error response from daemon: pull access denied for remii-agent-langgraph-agui, \
                    repository does not exist or may require 'docker login'";
         let said = said_about(raw);
         assert!(said.contains("could not download"), "{said}");

@@ -617,6 +617,49 @@ const setRunActivity = (
     });
   })().catch(() => {});
 };
+
+/**
+ * Told how a run ended, for every path that starts one: a person's chat turn, a routine, and a hop
+ * delivered to a coworker.
+ *
+ * THE LOOP IS THE ONLY THING THAT KNOWS, and the settlement cannot recover it: a run that was
+ * stopped and a run that finished look identical from outside the loop, because both are just "the
+ * run is over". The thread lock is told only that something ended, and it has no opinion about how.
+ *
+ * AND WHY IT USED TO BE WIRED FOR ROUTINES ONLY, which is the bug worth naming. The loop's report is
+ * what puts `stopped` on a run, and the lock's release is what puts `done` on one. Neither writer needs
+ * to go first: `transition` writes whatever it is told, and `finish` is guarded on the row still being
+ * open — so a run whose loop reported `stopped` keeps that whichever of the two lands first, and a run
+ * whose loop reported nothing is still finished as `done` by the release, exactly as before.
+ *
+ * What was actually broken is that the chat path and the hop path wired this to nobody. A stopped chat
+ * turn and a killed hop were both recorded as `done`, because the lock released and nothing had claimed
+ * the outcome first. So the roster said a run that was halted mid-sentence had succeeded — and
+ * `bot_stop`, which reports plainly when it stopped nothing, was reporting success over a row that said
+ * the opposite.
+ */
+const onRunEndedFor = (outcome: {
+  runId: string;
+  threadId: string;
+  outcome: "done" | "stopped" | "failed";
+  reason?: string;
+}) => {
+  setRunActivity(outcome.runId, outcome.outcome, {
+    /*
+     * BOTH FIELDS ALWAYS, AND NOT ONLY WHEN THEY HAVE SOMETHING TO SAY.
+     *
+     * `label` was already unconditional; `detail` was not, and the asymmetry was a trap rather than
+     * a saving. The store clears a field only when it is passed one — that is what lets a
+     * `waiting_on_you` resolve into `thinking` without still claiming to be waiting on somebody —
+     * so a conditional `detail` leaves whatever the last state wrote behind. A run that failed
+     * and was then reported stopped would keep saying why it failed, which is a claim about a
+     * different event.
+     */
+    label: null,
+    detail: outcome.reason ?? null,
+  });
+};
+
 /**
  * Which conversation a thread is shown in, or null when it is a scratch thread.
  *
@@ -2090,30 +2133,10 @@ const buildAgentFor = async ({
     undefined,
     undefined,
     memoryForActor(actor.id),
-    // How a run ended, recorded where a person can see it. The loop is the only
-    // thing that knows, and a run somebody stopped and a run that broke are not
-    // the same event to whoever was waiting on it.
-    (outcome) => {
-      setRunActivity(outcome.runId, outcome.outcome, {
-        /*
-         * BOTH FIELDS ALWAYS, AND NOT ONLY WHEN THEY HAVE SOMETHING TO SAY.
-         *
-         * `label` was already unconditional; `detail` was not, and the asymmetry was a trap rather
-         * than a saving. The store clears a field only when it is passed one — that is what lets a
-         * `waiting_on_you` resolve into `thinking` without still claiming to be waiting on somebody —
-         * so a conditional `detail` leaves whatever the last state wrote behind. A run that failed
-         * and was then reported stopped would keep saying why it failed, which is a claim about a
-         * different event.
-         *
-         * Unreachable today, because the loop reports one outcome per run and `finish` will not
-         * overwrite an ended row. It is written this way because the next caller should not have to
-         * know that, and because a field that is only cleared on purpose is a field that is
-         * eventually not cleared.
-         */
-        label: null,
-        detail: outcome.reason ?? null,
-      });
-    },
+    // How a run ended, recorded where a person can see it. Shared with the chat and hop paths — see
+    // `onRunEndedFor`, which is where the reason this used to be wired for routines alone is written
+    // down.
+    onRunEndedFor,
   );
   const agent = agents[agentId];
   if (!agent) {
@@ -2423,6 +2446,20 @@ const copilotRuntime = mountCopilotRuntime(
                   ? { ok: true, answer: outcome.toName }
                   : { ok: false, answer: outcome.refusal };
               },
+              /*
+               * The one runner that knows what is running.
+               *
+               * Liveness lives in a process-wide store keyed by thread, so this is the only object
+               * that can answer "is anything live here" for a coworker Remii is not itself. Bound
+               * without a runId, so it stops whatever is on that thread — and `bot_stop` tells Remii
+               * plainly when that turned out to be nothing, so "I stopped it" is never reported for
+               * a run that had already finished.
+               */
+              stopRun: ({ threadId }) =>
+                localRunner
+                  .stop({ threadId })
+                  .then((ok) => ok ?? false)
+                  .catch(() => false),
             },
           })
         : [];
@@ -2555,6 +2592,30 @@ const copilotRuntime = mountCopilotRuntime(
           if (!eligibility.allowed) {
             throw new Error(eligibility.message ?? eligibility.error);
           }
+        }
+        /*
+         * A paused coworker refuses the turn here, before any row is written.
+         *
+         * Thrown rather than answered, and at this exact point, for the reason the eligibility gate
+         * above is: a turn this deployment will not serve must not appear in the roster as working.
+         * A refusal returned as a sentence would still run the loop, still bill a model call, and
+         * still put a live dot next to the Bot for as long as it took to compose "I am paused".
+         *
+         * The other half of the pause lives at the handoff desk, which is where a hop is turned
+         * away. This covers the request path — a person opening a paused Bot's channel and typing at
+         * it — and it covers routines. Neither one is ever refused by the desk, because neither one
+         * goes through it.
+         *
+         * A read that cannot be made reads as "not paused": refusing every coworker on a transient database
+         * error would be a far worse failure than letting one paused bot slip a single turn.
+         */
+        const pause = await agentProfileStore.pausedMessage(botId);
+        if (pause !== null) {
+          throw new Error(
+            pause
+              ? `This coworker is paused and is not taking work: ${pause}. Ask the person to resume it.`
+              : "This coworker is paused and is not taking work.",
+          );
         }
         if (
           typeof input.runId !== "string" ||
@@ -2692,6 +2753,15 @@ const copilotRuntime = mountCopilotRuntime(
     threads: threadStore,
     lock: threadLock,
   },
+  /*
+   * How a run ended, for a person's own turn and for a hop alike.
+   *
+   * Wired last and wired here, because this is the option whose absence is invisible: without it both
+   * paths fall back to the thread lock releasing, which records `done` for a run that was stopped —
+   * and the person who stopped it, or the chief of staff that stopped it on their behalf, would be
+   * looking at a roster that says it worked. See `onRunEndedFor`.
+   */
+  () => onRunEndedFor,
 );
 
 /**
@@ -2780,6 +2850,15 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
           initiator: { kind: "handoff", id: fromBotId },
         });
       },
+      /*
+       * A pause that landed while this hop was queued still stops it.
+       *
+       * The desk refuses to queue for a paused Bot, which is where the asking model is still
+       * talking and can be told. This catches the two cases the desk cannot see: work queued before
+       * the pause, and a hop already in flight when it landed. Same read on both sides, so the two
+       * gates cannot disagree about what "paused" means.
+       */
+      pausedMessage: (botId) => agentProfileStore.pausedMessage(botId),
       history: copilotRuntime.history,
       lock: copilotRuntime.threadLock,
       /*

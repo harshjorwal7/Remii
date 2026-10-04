@@ -7,6 +7,7 @@ import { LLMock } from "@copilotkit/aimock";
 import { BuiltInAgent } from "@copilotkit/runtime/v2";
 import { EMPTY } from "rxjs";
 import {
+  CHIEF_OF_STAFF_GUIDANCE,
   COMPUTERLESS_GUIDANCE,
   MOTIVE_GUIDANCE,
   PROVENANCE_GUIDANCE,
@@ -276,12 +277,17 @@ describe("registered Copilot agents", () => {
        * All three unconditional blocks, so even a Bot with no tools and no computer carries them.
        * That Bot needs them most: nothing it says was read anywhere, and it has no approver to wait
        * on. Assembled from the named constants rather than restated, so losing one fails here.
+       *
+       * Plus the chief-of-staff block, because this Bot is Remii. It is the one block gated rather
+       * than unconditional, on the same flag as the tools it names — and the gate is what the test
+       * below it checks.
        */
       prompt: [
         "Be helpful.",
         PROVENANCE_GUIDANCE,
         MOTIVE_GUIDANCE,
         SOLE_PERSON_GUIDANCE,
+        CHIEF_OF_STAFF_GUIDANCE,
       ].join("\n\n"),
       apiKey: "openai-secret",
     });
@@ -1298,7 +1304,7 @@ describe("a person's standing instructions", () => {
 
       expect(prompt).not.toContain("standing instructions");
       /*
-       * The three unconditional blocks, and nothing else.
+       * The three unconditional blocks, and the one conditional on being Remii.
        *
        * WAS `Be helpful.\n\n${PROVENANCE_GUIDANCE}` — provenance alone. Two more blocks are now
        * carried by every Bot regardless of what a deployment has configured: `MOTIVE_GUIDANCE` (keep
@@ -1306,10 +1312,13 @@ describe("a person's standing instructions", () => {
        * `SOLE_PERSON_GUIDANCE` (the person in this conversation is the only grant there is, and there
        * is nobody to escalate to).
        *
+       * `CHIEF_OF_STAFF_GUIDANCE` is the fourth and the only conditional one: it is gated on the Bot
+       * holding the computer, because the tools it names are gated on the same Bot. This bot is Remii,
+       * so it is here. The gate itself is asserted below — the same tools must not appear in a
+       * coworker's prompt, or a model will reach for a tool it was never offered.
+       *
        * Assembled from the named constants rather than restated, so a Bot that stops carrying one of
-       * them fails here instead of quietly losing a rule every prompt in the product relies on. Both
-       * are unconditional in `builtInAgentConfiguration`, which is why an empty tool list, no computer
-       * and no standing instructions still leaves them in place.
+       * them fails here instead of quietly losing a rule every prompt in the product relies on.
        */
       expect(prompt).toBe(
         [
@@ -1317,10 +1326,31 @@ describe("a person's standing instructions", () => {
           PROVENANCE_GUIDANCE,
           MOTIVE_GUIDANCE,
           SOLE_PERSON_GUIDANCE,
+          CHIEF_OF_STAFF_GUIDANCE,
         ].join("\n\n"),
       );
     },
   );
+
+  test("the chief-of-staff block is Remii's alone", () => {
+    // The same tools, gated on the same flag, in `index.ts`. Naming them to a coworker would leave a
+    // model reaching for a `bot_pause` nobody handed it, and it would fill the gap the way it fills
+    // every other gap: with a plausible name for something that does not exist.
+    const coworker = builtInAgentConfiguration(
+      riskRow,
+      model,
+      "openai-secret",
+      [],
+      undefined,
+      [],
+      null,
+    ).prompt as string;
+
+    expect(coworker).not.toContain(CHIEF_OF_STAFF_GUIDANCE);
+    for (const tool of ["bot_stop", "bot_pause", "bot_resume"]) {
+      expect(coworker).not.toContain(tool);
+    }
+  });
 
   test("is read once for a whole roster, and only when somebody built-in will be told it", async () => {
     let reads = 0;

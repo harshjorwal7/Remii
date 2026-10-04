@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { desktopToolsFor } from "../server/src/computer/desktop-tools";
 import {
+  CHIEF_OF_STAFF_GUIDANCE,
   COMPUTER_GUIDANCE,
   COMPUTER_SLEEP_GUIDANCE,
   COMPUTERLESS_GUIDANCE,
   SOLE_PERSON_GUIDANCE,
 } from "./bot-prompt";
+import { BOT_ADMIN_TOOL_NAMES } from "../server/src/remi/bot-admin";
 import { botHoldsTheComputer, REMII_AGENT_ID } from "./remii";
 
 describe("COMPUTER_GUIDANCE", () => {
@@ -324,5 +326,84 @@ describe("the number the prompt quotes about sleeping", () => {
     expect(await withIdleStop(undefined)).toContain("about 4 minutes");
     expect(await withIdleStop("not-a-number")).toContain("about 4 minutes");
     expect(await withIdleStop("-5")).toContain("about 4 minutes");
+  });
+});
+
+/**
+ * The chief of staff, told what it is answerable for over the roster.
+ *
+ * This block exists because the powers are real and the prompt had to catch up: Remii could stop
+ * and pause coworkers and reshape them, and was still carrying the paragraph that says not to
+ * reason from the powers you hold. Left alone it would have read its own tool set, concluded that a
+ * supervisor therefore sits above it, and gone looking for the arrangement this deployment does not
+ * have — the exact failure SOLE_PERSON_GUIDANCE was written to prevent, arriving from the other
+ * direction.
+ */
+describe("CHIEF_OF_STAFF_GUIDANCE", () => {
+  test("names every tool it promises, and the promise is checkable", () => {
+    // The file header says a name in this file is a promise. This block adds six, so the names are
+    // asserted against the list the tools are actually built from rather than trusted.
+    for (const name of [
+      "coworker_status",
+      "bot_list",
+      "bot_read",
+      "bot_stop",
+      "bot_pause",
+      "bot_resume",
+      "bot_update",
+    ]) {
+      expect(BOT_ADMIN_TOOL_NAMES).toContain(name as never);
+      expect(CHIEF_OF_STAFF_GUIDANCE).toContain(name);
+    }
+  });
+
+  test("says the authority is over coworkers", () => {
+    expect(CHIEF_OF_STAFF_GUIDANCE).toContain("CHIEF OF STAFF");
+    expect(CHIEF_OF_STAFF_GUIDANCE).toMatch(/keep an eye on the whole roster/i);
+  });
+
+  test("draws the boundary with the person in the same breath, or it does nothing", () => {
+    /*
+     * The load-bearing sentence. Authority over coworkers read on its own becomes authority over
+     * the person — and then "the person told me to" becomes something the deployment has a view
+     * about, which is precisely the sovereign-user design this repository is built on.
+     */
+    expect(CHIEF_OF_STAFF_GUIDANCE).toMatch(
+      /OVER COWORKERS, NOT OVER THE PERSON/i,
+    );
+    expect(CHIEF_OF_STAFF_GUIDANCE).toMatch(/never about overruling them/i);
+  });
+
+  test("does not undo the paragraph above it", () => {
+    // The two blocks sit adjacent in Remii's prompt and agree: no administrator, and nothing above
+    // either of them. If either said otherwise the model would have two instructions to reconcile and
+    // would reach for whichever suited the question.
+    expect(CHIEF_OF_STAFF_GUIDANCE).toMatch(/still no administrator/i);
+    expect(CHIEF_OF_STAFF_GUIDANCE).not.toMatch(
+      /you are in charge of the person/i,
+    );
+  });
+
+  test("tells it to watch the roster before repainting it", () => {
+    // The reported bug, prevented rather than fixed: two coworkers in one colour read as one. A
+    // warning that is not attached to the tool that causes it is a warning nobody acts on.
+    expect(CHIEF_OF_STAFF_GUIDANCE).toMatch(/read the roster/i);
+    expect(CHIEF_OF_STAFF_GUIDANCE).toMatch(
+      /same colour are hard to tell apart/i,
+    );
+  });
+
+  test("does not promise that a stop undoes what a tool already did", () => {
+    // A model told only "it stopped" will offer a retraction it cannot perform.
+    expect(CHIEF_OF_STAFF_GUIDANCE).toMatch(
+      /keeps going unless that tool honours/i,
+    );
+  });
+
+  test("is not told to the whole roster — only to the Bot that holds the computer", () => {
+    // A coworker that believed it could pause other coworkers would reach for a tool it was never
+    // offered, and fill the gap with a plausible name for something that does not exist.
+    expect(COMPUTERLESS_GUIDANCE).not.toContain("bot_pause");
+    expect(SOLE_PERSON_GUIDANCE).not.toContain("bot_pause");
   });
 });

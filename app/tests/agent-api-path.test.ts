@@ -43,6 +43,8 @@ function boundary(id: string, refusal?: "unauthenticated" | "forbidden") {
     id,
     avatarSeed: id,
     mascot: null,
+    pausedAt: null,
+    pausedReason: null,
     ownerUserId: actor.id,
     systemOwned: false,
     hidden: false,
@@ -95,6 +97,9 @@ function boundary(id: string, refusal?: "unauthenticated" | "forbidden") {
     },
     async agentForCallbackToken() {
       throw new Error("unexpected callback lookup");
+    },
+    async pausedMessage() {
+      return null;
     },
   };
   const auth: Parameters<typeof createAgentRoutes>[1] = async (

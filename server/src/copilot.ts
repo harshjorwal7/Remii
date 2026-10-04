@@ -20,6 +20,7 @@ import {
 } from "rxjs";
 import { z } from "zod";
 import {
+  CHIEF_OF_STAFF_GUIDANCE,
   COMPUTER_GUIDANCE,
   COMPUTERLESS_GUIDANCE,
   MOTIVE_GUIDANCE,
@@ -486,6 +487,16 @@ export function builtInAgentPrompt(
      * for an administrator who does not exist. See `SOLE_PERSON_GUIDANCE`.
      */
     SOLE_PERSON_GUIDANCE,
+    /*
+     * And what the one Bot that holds the computer is answerable for over the rest of the roster.
+     *
+     * Gated on the same flag as the computer guidance, deliberately, and for a reason beyond
+     * symmetry. The chief of staff can stop and pause coworkers; a coworker that believed it could
+     * would reach for a tool it was never offered, and a model fills that gap the way it fills every
+     * other gap — by inventing a plausible name for something that does not exist. The tools are
+     * gated to the same Bot in `index.ts`; see `CHIEF_OF_STAFF_GUIDANCE`.
+     */
+    ...(botHoldsTheComputer(agent.id) ? [CHIEF_OF_STAFF_GUIDANCE] : []),
     ...(grantedToolGuidance(tools, connectedVendors)
       ? [grantedToolGuidance(tools, connectedVendors)]
       : []),
@@ -2186,6 +2197,25 @@ export function createRequestAgents(
    * last, positionally.
    */
   instanceForActor?: (actorId: string) => Promise<RemiInstance | null>,
+  /**
+   * Told how a run ended, resolved per person. Given to the request path and to `agentFor` alike,
+   * for the reason every collaborator above it is: a hop stopped by a chief of staff is a run like
+   * any other, and it is recorded the way any other run is.
+   *
+   * Appended last. Absent means a run's ending is inferred from its thread lock releasing, which
+   * cannot tell a stop from a success — see the note where this is wired in `index.ts`.
+   */
+  onRunEndedForActor?: (
+    actorId: string,
+  ) =>
+    | ((outcome: {
+        botId: string;
+        runId: string;
+        threadId: string;
+        outcome: "done" | "stopped" | "failed";
+        reason?: string;
+      }) => void)
+    | undefined,
 ) {
   return async ({ request }: { request: Request }) => {
     const actor = await identifyActor(request);
@@ -2225,6 +2255,7 @@ export function createRequestAgents(
       enforceTurnForActor?.(actor.id),
       onAfterRunForActor?.(actor.id),
       memoryForActor?.(actor.id),
+      onRunEndedForActor?.(actor.id),
     );
   };
 }
@@ -2418,6 +2449,24 @@ export function mountCopilotRuntime(
     threads: ThreadStore;
     lock: ThreadLock;
   },
+  /**
+   * Told how a run ended, resolved per person and given to the request path and to `agentFor` alike.
+   *
+   * Appended last. Absent means every run's ending is guessed from its thread lock releasing, and a
+   * stop is then recorded as a success — which is the one record a person would check after stopping
+   * a coworker themselves.
+   */
+  onRunEndedForActor?: (
+    actorId: string,
+  ) =>
+    | ((outcome: {
+        botId: string;
+        runId: string;
+        threadId: string;
+        outcome: "done" | "stopped" | "failed";
+        reason?: string;
+      }) => void)
+    | undefined,
 ) {
   if (!local) {
     throw new Error(
@@ -2487,6 +2536,12 @@ export function mountCopilotRuntime(
       enforceTurnForActor?.(actor.id),
       onAfterRunForActor?.(actor.id),
       memoryForActor?.(actor.id),
+      /*
+       * How this hop ended. Without it a hop the chief of staff stopped is recorded by its lock
+       * releasing, which says `done` for a run that was halted — the one run whose real ending
+       * somebody is relying on being told the truth about.
+       */
+      onRunEndedForActor?.(actor.id),
     );
     return agents[input.botId] ?? null;
   };
@@ -2564,6 +2619,8 @@ export function mountCopilotRuntime(
       enforceTurnForActor,
       onAfterRunForActor,
       memoryForActor,
+      instanceForActor,
+      onRunEndedForActor,
     ) as never,
   });
 

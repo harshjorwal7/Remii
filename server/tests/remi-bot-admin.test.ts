@@ -27,6 +27,8 @@ function template(id: string, name: string): AgentProfile {
     avatarSeed: id,
     visibility: "public",
     ownerUserId: null,
+    pausedAt: null,
+    pausedReason: null,
     isSystemTemplate: true,
     systemOwned: true,
     hidden: false,
@@ -46,7 +48,23 @@ function fakes(
     constraints?: string;
     expecting?: string;
   }) => Promise<{ ok: boolean; answer: string }>,
+  options?: {
+    /**
+     * Whether a run is live on `thread-1`, and therefore what `bot_stop` can actually stop.
+     *
+     * Defaults to "something is running", because every other harness in this file is about a
+     * healthy deployment and a stop that can never succeed is a stop nothing here would catch.
+     */
+    running?: boolean;
+    /** What the channel's one activity row says, so the status text can be asserted. */
+    activity?: {
+      state: string;
+      label: string | null;
+      detail: string | null;
+    } | null;
+  },
 ) {
+  const running = options?.running ?? true;
   const state = {
     roster: [
       template("tpl-1", "Research Desk"),
@@ -59,6 +77,8 @@ function fakes(
     delegations: [] as { bot: string; task: string }[],
     /** Every role description written, so a bound can be asserted rather than assumed. */
     roles: [] as string[],
+    /** Every thread a stop was asked to end, so the caller's resolution can be asserted. */
+    stopped: [] as { threadId: string }[],
   };
   let created = 0;
   const stores: BotAdminStores = {
@@ -85,7 +105,17 @@ function fakes(
         if (input.roleDescription !== undefined) {
           state.roles.push(input.roleDescription);
         }
+        /*
+         * The pause is a boolean in the input and two columns in the row, and the translation is
+         * the store's — so the fake does it too. Object.assign alone would set a `paused` key that
+         * nothing reads, and every assertion below would pass against a coworker that had not
+         * actually been paused.
+         */
         Object.assign(profile, input);
+        if (input.paused !== undefined) {
+          profile.pausedAt = input.paused ? new Date() : null;
+          if (!input.paused) profile.pausedReason = null;
+        }
         return profile;
       },
       softDelete: async (_actor, id) => {
@@ -198,8 +228,21 @@ function fakes(
             lastMessageAgentId: "bot-1",
             createdAt: "2026-09-24T01:00:00Z",
             pinned: false,
-            busy: false,
             active: true,
+            /*
+             * The real field, where the busy state actually lives. This fixture used to carry a
+             * `busy: false` instead, which no type has ever declared and nothing has ever set —
+             * and which the status tool was reading, so every coworker in every test read as idle.
+             */
+            activity:
+              options?.activity === undefined
+                ? {
+                    state: "thinking",
+                    label: null,
+                    detail: null,
+                    botId: "bot-1",
+                  }
+                : options.activity,
           },
         ],
         nextCursor: null,
@@ -235,6 +278,10 @@ function fakes(
     } as never,
     loadActor: async () => ACTOR,
     by: ACTOR.id,
+    stopRun: async ({ threadId }) => {
+      state.stopped.push({ threadId });
+      return running;
+    },
     delegateToOwnChannel:
       delegate ??
       (async (input) => {
@@ -760,7 +807,13 @@ describe("coworker_status", () => {
     const said = await tools.coworker_status.execute({ bot: "Helper" });
 
     expect(said).toContain("Coworker: Helper");
-    expect(said).toContain("Status: Idle");
+    /*
+     * "Working", not "Idle". This assertion used to be `Status: Idle` and it passed against a
+     * coworker that was visibly working, because the tool read a `busy` field no channel type has
+     * ever declared and nothing has ever set. The fixture now carries the activity the store really
+     * returns, so the honest answer is the one asserted.
+     */
+    expect(said).toContain("Status: Working");
     expect(said).toContain("Analyzing Q3 reports");
     expect(said).toContain("Finished reviewing the revenue numbers.");
     expect(said).toContain("Recent exchange:");
@@ -822,5 +875,395 @@ describe("update_settings action policy", () => {
     expect(state.settings.actionPolicy).toBe(
       'intent == "type" && contains(element.name, "password")',
     );
+  });
+});
+
+/**
+ * Remii repainting the roster.
+ *
+ * The reported bug is the first test here and it is worth reading as a story: the email manager was
+ * created at runtime, given a generated id, and drew its mascot by hashing that id. It hashed to
+ * pink, which is Remii's colour, and the two read as one coworker on the same screen. Nothing
+ * stopped it, because the seed had no idea a named coworker existed.
+ *
+ * These cover the three things that has to mean now. The whole roster is visible, so a collision can
+ * be seen before it happens; any one axis can be changed without the other moving; and a colour or
+ * shape that is not real is refused out loud rather than stored and drawn as something else.
+ */
+describe("a coworker's mascot", () => {
+  test("every coworker is listed with the shape and colour it actually wears", async () => {
+    // Resolved rather than echoed, because a row with nothing chosen draws from its own id — so
+    // echoing the row would describe a mascot nobody can see and Remii would go looking for a
+    // collision that was never on the screen.
+    const { tools } = fakes();
+    const said = await tools.bot_list.execute({});
+    expect(said).toContain("Helper");
+    // The seed is `bot-1`, so this is its hashed shape and colour rather than the shared default.
+    expect(said).toMatch(
+      /mascot [a-z]+, (red|orange|amber|green|teal|blue|violet)/,
+    );
+    // And the template roster is included, since two templates colliding is the same bug.
+    expect(said).toContain("Research Desk");
+  });
+
+  test("bot_read names the mascot and says whether anybody chose it", async () => {
+    const { tools } = fakes();
+    const said = await tools.bot_read.execute({ bot: "Helper" });
+    expect(said).toMatch(
+      /Mascot: [a-z]+, (red|orange|amber|green|teal|blue|violet)/,
+    );
+    expect(said).toContain("not chosen by anybody");
+  });
+
+  test("a chosen mascot reads as chosen rather than as seeded", async () => {
+    const { state, tools } = fakes();
+    state.roster[1]!.mascot = { shape: "hexagon", color: "amber" };
+    const said = await tools.bot_read.execute({ bot: "Helper" });
+    expect(said).toContain("Mascot: hexagon, amber");
+    expect(said).not.toContain("not chosen by anybody");
+  });
+
+  test("a colour can be changed on its own", async () => {
+    const { state, tools } = fakes();
+    const said = await tools.bot_update.execute({
+      bot: "Helper",
+      color: "teal",
+    });
+
+    expect(said).toContain("colour is now teal");
+    expect(state.roster[1]?.mascot?.color).toBe("teal");
+  });
+
+  test("changing only the colour does not throw the shape away", async () => {
+    /*
+     * The load-bearing assertion in this block. `profiles.update` treats a supplied mascot as a
+     * whole replacement — that is what makes clearing one axis possible — so sending only the colour
+     * would reset the shape to whatever the seed says. The tool therefore resolves the current
+     * shape and sends both axes every time.
+     */
+    const { state, tools } = fakes();
+    state.roster[1]!.mascot = { shape: "hexagon", color: "amber" };
+
+    await tools.bot_update.execute({ bot: "Helper", color: "teal" });
+
+    expect(state.roster[1]?.mascot).toEqual({
+      shape: "hexagon",
+      color: "teal",
+    });
+  });
+
+  test("a shape can be changed on its own, with the same guarantee", async () => {
+    const { state, tools } = fakes();
+    state.roster[1]!.mascot = { shape: "hexagon", color: "amber" };
+
+    await tools.bot_update.execute({ bot: "Helper", shape: "pebble" });
+
+    expect(state.roster[1]?.mascot).toEqual({
+      shape: "pebble",
+      color: "amber",
+    });
+  });
+
+  test("both axes can be set at once", async () => {
+    const { state, tools } = fakes();
+    // `teal` rather than `violet`: the seeded colour for this seed may already be violet, and the
+    // sentence reports what changed rather than what was asked for — so asking for what it already
+    // had would correctly say nothing changed.
+    const said = await tools.bot_update.execute({
+      bot: "Helper",
+      shape: "capsule",
+      color: "teal",
+    });
+    expect(said).toContain("shape is now capsule");
+    expect(said).toContain("colour is now teal");
+    expect(state.roster[1]?.mascot).toEqual({
+      shape: "capsule",
+      color: "teal",
+    });
+  });
+
+  test("asking for the mascot it already wears says so, rather than claiming a change", async () => {
+    // The sentence reports differences, not intentions, so a re-assertion is not reported as a
+    // change — otherwise every cosmetic no-op would read as something having happened.
+    const { state, tools } = fakes();
+    state.roster[1]!.mascot = { shape: "hexagon", color: "amber" };
+    const said = await tools.bot_update.execute({
+      bot: "Helper",
+      shape: "hexagon",
+      color: "amber",
+    });
+    expect(said).toContain("already so");
+    expect(state.roster[1]?.mascot).toEqual({
+      shape: "hexagon",
+      color: "amber",
+    });
+  });
+
+  test("a colour that is not real is refused out loud, not stored", async () => {
+    // A silent drop would be indistinguishable from the update having worked, and the row would draw
+    // the palette's fallback — a coworker wearing a colour nobody asked for.
+    const { state, tools } = fakes();
+    const said = await tools.bot_update.execute({
+      bot: "Helper",
+      color: "chartreuse" as never,
+    });
+    expect(said).toContain("is not a mascot colour");
+    expect(said).not.toContain("Updated");
+    expect(state.roster[1]?.mascot).toBeUndefined();
+  });
+
+  test("a shape that is not real is refused the same way", async () => {
+    const { state, tools } = fakes();
+    const said = await tools.bot_update.execute({
+      bot: "Helper",
+      shape: "octagon" as never,
+    });
+    expect(said).toContain("is not a mascot shape");
+    expect(state.roster[1]?.mascot).toBeUndefined();
+  });
+
+  test("a template is still protected from being repainted", async () => {
+    // A template is shared, so repainting it would change it for everybody. The refusal has to come
+    // before the mascot is read, or the sentence would be about something else entirely.
+    const { state, tools } = fakes();
+    const said = await tools.bot_update.execute({
+      bot: "Research Desk",
+      color: "teal",
+    });
+    expect(said).toContain("shared template");
+    expect(state.roster[0]?.mascot).toBeUndefined();
+  });
+
+  test("an update that touches nothing about the mascot leaves it alone", async () => {
+    const { state, tools } = fakes();
+    state.roster[1]!.mascot = { shape: "hexagon", color: "amber" };
+
+    await tools.bot_update.execute({ bot: "Helper", title: "Senior Analyst" });
+
+    expect(state.roster[1]?.mascot).toEqual({
+      shape: "hexagon",
+      color: "amber",
+    });
+  });
+});
+
+/**
+ * Remii stopping a coworker, and holding one.
+ *
+ * Two separate powers and the difference between them is the whole point of keeping them apart:
+ * a stop is a moment that is over, and a pause is a state somebody has to undo. A deployment that
+ * had only the first could end a run going the wrong way and leave the coworker free to be handed
+ * the same work again a second later.
+ */
+describe("stopping and holding a coworker", () => {
+  test("bot_stop ends the run on the coworker's own thread", async () => {
+    const { state, tools } = fakes();
+    const said = await tools.bot_stop.execute({ bot: "Helper" });
+    // The thread comes from the coworker's channel, never from the model — that is the entire
+    // authorisation, and it is what a thread id in a tool argument would take away.
+    expect(state.stopped).toEqual([{ threadId: "thread-1" }]);
+    expect(said).toContain("turn was stopped");
+  });
+
+  test("bot_stop says so when there was nothing running, rather than claiming success", async () => {
+    // The failure this guards is the worst kind: Remii telling a person it halted something, over a
+    // run that had already finished on its own. Idle activity as well as a stop that takes, because
+    // the two cases answer differently and neither may read as success.
+    const { tools } = fakes(undefined, { running: false, activity: null });
+    const said = await tools.bot_stop.execute({ bot: "Helper" });
+    expect(said).toContain("not running anything");
+    expect(said).not.toContain("turn was stopped");
+  });
+
+  test("and admits uncertainty when it looked busy but the stop did not take", async () => {
+    // The genuinely awkward case: a run that ended in the same moment the stop arrived. Claiming
+    // either outcome would be a guess, so it says what it saw and tells the model to check.
+    const { tools } = fakes(undefined, { running: false });
+    const said = await tools.bot_stop.execute({ bot: "Helper" });
+    expect(said).toContain("looked busy but the stop did not take");
+    expect(said).toContain("coworker_status");
+    expect(said).not.toContain("turn was stopped");
+  });
+
+  test("bot_stop explains that a tool already called is not undone", async () => {
+    // Stated in the tool description rather than discovered afterwards. The bargain is the same one
+    // the run's own abort makes, and a model told only "it stopped" will promise a retraction.
+    const { tools } = fakes();
+    expect(tools.bot_stop.description).toMatch(/already called keeps going/i);
+  });
+
+  test("bot_stop will not stop Remii, and says why in the sentence", async () => {
+    const { state, tools } = fakes();
+    // Remii is on its own roster, so the tool has to resolve itself before it can refuse it.
+    state.roster.push(workspace("remii", "Remii"));
+    const said = await tools.bot_stop.execute({ bot: "remii" });
+    expect(said).toContain("That is me");
+    expect(state.stopped).toEqual([]);
+  });
+
+  test("bot_pause will not pause Remii either", async () => {
+    // A chief of staff that could hold itself would report itself as paused and then refuse every
+    // request, with nobody able to find the switch that undoes it.
+    const { state, tools } = fakes();
+    state.roster.push(workspace("remii", "Remii"));
+    const said = await tools.bot_pause.execute({
+      bot: "remii",
+      reason: "on hold",
+    });
+    expect(said).toContain("cannot pause myself");
+    expect(state.roster.find((p) => p.id === "remii")?.pausedAt).toBeNull();
+  });
+
+  test("bot_pause holds a coworker and records why", async () => {
+    const { state, tools } = fakes();
+    const said = await tools.bot_pause.execute({
+      bot: "Helper",
+      reason: "going the wrong way on the last brief",
+    });
+    expect(said).toContain("is paused");
+    expect(said).toContain("going the wrong way on the last brief");
+    expect(state.roster[1]?.pausedReason).toBe(
+      "going the wrong way on the last brief",
+    );
+    expect(state.audit.some((row) => row.eventType === "bot.paused")).toBe(
+      true,
+    );
+  });
+
+  test("a paused coworker shows as paused everywhere it is read", async () => {
+    const { tools } = fakes();
+    await tools.bot_pause.execute({ bot: "Helper", reason: "on hold" });
+
+    expect(await tools.bot_list.execute({})).toContain("[PAUSED]");
+    expect(await tools.bot_read.execute({ bot: "Helper" })).toContain(
+      "on hold",
+    );
+    expect(await tools.coworker_status.execute({ bot: "Helper" })).toContain(
+      "will not take work",
+    );
+  });
+
+  test("pausing twice says it is already paused rather than pretending to act", async () => {
+    const { tools } = fakes();
+    await tools.bot_pause.execute({ bot: "Helper", reason: "on hold" });
+    const said = await tools.bot_pause.execute({
+      bot: "Helper",
+      reason: "changed my mind",
+    });
+    expect(said).toContain("already paused");
+    expect(said).toContain("on hold");
+  });
+
+  test("bot_resume releases a pause and says what it was paused for", async () => {
+    const { tools } = fakes();
+    await tools.bot_pause.execute({ bot: "Helper", reason: "on hold" });
+
+    const said = await tools.bot_resume.execute({ bot: "Helper" });
+
+    expect(said).toContain("working again");
+    expect(said).toContain("on hold");
+    expect(await tools.bot_list.execute({})).not.toContain("[PAUSED]");
+  });
+
+  test("resuming a coworker that was never paused does nothing and says so", async () => {
+    const { tools } = fakes();
+    const said = await tools.bot_resume.execute({ bot: "Helper" });
+    expect(said).toContain("not paused");
+  });
+
+  test("a stop does not pause, and a pause does not stop", async () => {
+    /*
+     * The pair of confusions that would make the two powers worse than one. If a stop implied a
+     * pause, Remii would quietly build a roster nobody could use; if a pause implied a stop, it
+     * would claim to have halted a run it never touched.
+     */
+    const { state, tools } = fakes();
+
+    await tools.bot_stop.execute({ bot: "Helper" });
+    expect(state.roster[1]?.pausedAt).toBeNull();
+
+    const { state: second, tools: tools2 } = fakes();
+    await tools2.bot_pause.execute({ bot: "Helper", reason: "on hold" });
+    expect(second.stopped).toEqual([]);
+  });
+
+  test("a paused coworker is told to resume rather than stopped a second time", async () => {
+    const { state, tools } = fakes();
+    await tools.bot_pause.execute({ bot: "Helper", reason: "on hold" });
+
+    const said = await tools.bot_stop.execute({ bot: "Helper" });
+
+    expect(said).toContain("already paused");
+    expect(state.stopped).toEqual([]);
+  });
+});
+
+/**
+ * The status tool, which used to report every coworker as idle.
+ *
+ * It read a `busy` field that no channel type has ever declared and nothing has ever set, so the
+ * answer was always "Idle" — for a coworker visibly working. A chief of staff that is confidently
+ * wrong about the one thing it was asked about is worse than one that says nothing.
+ */
+describe("what the roster is actually doing", () => {
+  test("reports a run in progress rather than idle", async () => {
+    const { tools } = fakes();
+    const said = await tools.coworker_status.execute({ bot: "Helper" });
+    expect(said).toContain("Working");
+    expect(said).not.toContain("Status: Idle");
+  });
+
+  test("names who a delegated run is waiting on", async () => {
+    const { tools } = fakes(undefined, {
+      activity: {
+        state: "delegated",
+        label: "With Research Desk",
+        detail: null,
+      },
+    });
+    const said = await tools.coworker_status.execute({ bot: "Helper" });
+    expect(said).toContain("With Research Desk");
+  });
+
+  test("distinguishes waiting on the person from working", async () => {
+    // Three states that all read "not idle" to a person and mean three different things to whoever
+    // is deciding whether to intervene.
+    const { tools } = fakes(undefined, {
+      activity: {
+        state: "waiting_on_you",
+        label: "Needs your answer",
+        detail: null,
+      },
+    });
+    expect(await tools.coworker_status.execute({ bot: "Helper" })).toContain(
+      "Waiting on the person",
+    );
+  });
+
+  test("reports a failure with its reason", async () => {
+    const { tools } = fakes(undefined, {
+      activity: {
+        state: "failed",
+        label: null,
+        detail: "the model call failed",
+      },
+    });
+    const said = await tools.coworker_status.execute({ bot: "Helper" });
+    expect(said).toContain("Last run failed");
+    expect(said).toContain("the model call failed");
+  });
+
+  test("says idle only when nothing is happening", async () => {
+    const { tools } = fakes(undefined, { activity: null });
+    expect(await tools.coworker_status.execute({ bot: "Helper" })).toContain(
+      "Status: Idle",
+    );
+  });
+
+  test("the whole-roster view marks each state rather than collapsing them", async () => {
+    const { tools } = fakes();
+    const said = await tools.coworker_status.execute({});
+    expect(said).toContain("[working]");
+    expect(said).not.toContain("[BUSY]");
   });
 });

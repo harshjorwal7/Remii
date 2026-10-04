@@ -377,6 +377,29 @@ export function createHandoffDesk(options: {
         );
       }
 
+      /*
+       * A paused coworker is held, not deleted.
+       *
+       * Checked here, at the desk, rather than only where a run would start, because this is the
+       * only point where the asking Bot is still talking and can be told. The alternative — accepting
+       * the hop and refusing it at delivery — spends a queue hop, a run row and a lock on work that
+       * was never going to happen, and answers the person with silence where a sentence would do.
+       *
+       * Refused rather than queued, deliberately. A queue would be simpler to the person and wrong
+       * for them: a pause usually means "stop doing this kind of thing", and everything queued
+       * during it is work they no longer want, firing all at once when the pause lifts.
+       */
+      if (found.pausedAt) {
+        return refuse(
+          from,
+          target,
+          "bot_paused",
+          `${found.name} is paused${
+            found.pausedReason ? ` — ${found.pausedReason}` : ""
+          } — so it will not be given work. Do the work yourself, or ask the person to resume it.`,
+        );
+      }
+
       // Read per hop and never held, so revoking a grant applies to the next hop rather than after a
       // restart.
       if (!(await mayAddress(from.botId, found.id))) {

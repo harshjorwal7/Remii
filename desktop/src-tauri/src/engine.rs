@@ -683,10 +683,7 @@ mod tests {
         let status = answering(Address::new(Engine::Podman, Some("remii".into())));
         assert!(status.responding);
         assert!(status.detail.contains("remii"), "{}", status.detail);
-        assert_eq!(
-            status.address.unwrap().connection.as_deref(),
-            Some("remii")
-        );
+        assert_eq!(status.address.unwrap().connection.as_deref(), Some("remii"));
     }
 }
 

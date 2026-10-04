@@ -455,6 +455,94 @@ describe("handing work to another Bot", () => {
   });
 });
 
+/**
+ * A paused coworker is not given work, and the asking Bot is told so rather than left waiting.
+ *
+ * The pause is checked at the desk rather than at delivery, and this is the whole argument for
+ * putting it there. A hop queued to a coworker somebody has just paused would otherwise be delivered,
+ * refused at the far end after a queue hop and a lock were spent, and answered to the person with
+ * silence — a run that looked like it had been accepted and produced nothing.
+ */
+describe("handing work to a paused coworker", () => {
+  const PAUSED = profile({
+    id: "researcher",
+    name: "Researcher",
+    pausedAt: new Date("2026-01-01T00:00:00Z"),
+    pausedReason: "going the wrong way on the last brief",
+  });
+
+  test("is refused at the desk, so no hop is queued at all", async () => {
+    const harness = desk({ roster: [PAUSED] });
+    const outcome = await harness.desk.send({
+      from: FROM,
+      target: "researcher",
+      envelope: { task: "check the filings" },
+    });
+    expect(outcome.ok).toBe(false);
+    // The load-bearing assertion: nothing was queued. A refusal that still queued would spend the
+    // run, the lock and the budget on work that is never going to happen.
+    expect(harness.rows).toEqual([]);
+  });
+
+  test("the refusal says which coworker and why, so the asking Bot can repeat it", async () => {
+    const harness = desk({ roster: [PAUSED] });
+    const outcome = await harness.desk.send({
+      from: FROM,
+      target: "researcher",
+      envelope: { task: "check the filings" },
+    });
+    const refusal = (outcome as { refusal: string }).refusal;
+    expect(refusal).toContain("Researcher");
+    expect(refusal).toContain("going the wrong way on the last brief");
+    // And it must not send the asking Bot off looking for an approver, which is the failure
+    // SOLE_PERSON_GUIDANCE exists to prevent and the failure this refusal is most likely to cause.
+    expect(refusal).toMatch(/do the work yourself, or ask the person/i);
+    expect(refusal).not.toMatch(/administrator/i);
+  });
+
+  test("records the refusal in the trail, under its own reason", async () => {
+    const harness = desk({ roster: [PAUSED] });
+    await harness.desk.send({
+      from: FROM,
+      target: "researcher",
+      envelope: { task: "check the filings" },
+    });
+    expect(harness.events[0]?.eventType).toBe("agent.handoff_refused");
+    expect(harness.events[0]?.payload).toMatchObject({
+      reason: "bot_paused",
+      bot: "assistant",
+    });
+  });
+
+  test("a coworker that is not paused is untouched by the check", async () => {
+    // The other direction of the same gate: adding a pause check that refused everything would be
+    // caught by nothing else in this file, because every other case uses a healthy coworker.
+    const harness = desk({
+      roster: [profile({ id: "researcher", name: "Researcher" })],
+    });
+    const outcome = await harness.desk.send({
+      from: FROM,
+      target: "researcher",
+      envelope: { task: "check the filings" },
+    });
+    expect(outcome.ok).toBe(true);
+    expect(harness.rows.length).toBe(1);
+  });
+
+  test("a pause is not a deletion: the coworker still reads as reachable by name", async () => {
+    // "It does not exist" would leak nothing but would be a lie — the person can see it in the
+    // roster, and a model told a coworker had vanished will go and create a replacement.
+    const harness = desk({ roster: [PAUSED] });
+    const outcome = await harness.desk.send({
+      from: FROM,
+      target: "researcher",
+      envelope: { task: "t" },
+    });
+    const refusal = (outcome as { refusal: string }).refusal;
+    expect(refusal).not.toMatch(/no bot called/i);
+  });
+});
+
 /*
  * Where the answer goes comes from the signed assertion, never from the model. A Bot naming its own
  * thread would be a Bot able to drop a turn into a conversation it was never part of.

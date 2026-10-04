@@ -360,6 +360,19 @@ export const auditEventTypes = [
   "bot.hidden",
   "bot.unhidden",
   "bot.deleted",
+  /*
+   * Remii exercising its authority over a coworker.
+   *
+   * Three rows for three acts, because they are three different facts and merging them would lose
+   * the answer to whichever question is being asked. A stop is a moment and is over; a pause is a
+   * state somebody has to undo, so the pair of them is the record of a coworker being held on
+   * purpose. `reason` rides on all three and is the only record of why — the roster shows a paused
+   * coworker with a reason beside it, and the trail is what a question three weeks later is
+   * answered from.
+   */
+  "bot.stopped",
+  "bot.paused",
+  "bot.resumed",
   "bot.callback_token_issued",
   "bot.callback_token_revoked",
 
