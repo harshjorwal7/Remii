@@ -256,7 +256,10 @@ function readSessionCookie(header: string | null): string | undefined {
     // Both names, because a deployment that has just been moved behind TLS has cookies written under
     // the unprefixed one, and reading only the prefixed name would sign every existing person out at
     // the moment the switch was made. See the note on the constant above.
-    if (name !== NEON_AUTH_SESSION_COOKIE && name !== NEON_AUTH_SESSION_COOKIE_INSECURE) {
+    if (
+      name !== NEON_AUTH_SESSION_COOKIE &&
+      name !== NEON_AUTH_SESSION_COOKIE_INSECURE
+    ) {
       continue;
     }
     return part.slice(separator + 1).trim();
@@ -410,6 +413,118 @@ export function createNeonAuth(
         status: upstream.status,
         headers,
       });
+    },
+
+    /*
+     * Finish an OAuth sign-in, once the browser is back on THIS origin.
+     *
+     * This exists because the proxy cannot finish an OAuth flow, and the reason is structural rather
+     * than a bug in it. Google redirects to `{NEON_AUTH_BASE_URL}/callback/google`, which is the
+     * PROVIDER's host, so the provider sets its session cookie there and the browser returns to this
+     * application holding nothing for this origin. Every proxied call above works, because every one
+     * of them is this server talking to the provider; the OAuth round trip is the one flow where the
+     * browser is the one talking, and it talks to somebody else.
+     *
+     * This route is the shape of the answer and is not yet reachable. The blocker is written down at
+     * the `fetchNeon` call below and in `docs/deployment.md`: the browser cannot hand over the
+     * provider's session cookie, because that cookie is `HttpOnly` and belongs to the provider's host.
+     *
+     * THE TOKEN IS NOT TRUSTED, and the round trip is what makes that true rather than merely
+     * intended. A token that arrived in a request body is a string somebody chose, so it is presented
+     * to the provider and the provider's answer is what is acted on. A cheaper version of this exists
+     * — the provider also issues a JWT, and verifying its signature against the published JWKS needs no
+     * network at all — and it is the wrong one here: it would make this the only place in the codebase
+     * that decides who somebody is without asking the provider, and a hand-rolled session validation
+     * is a thing that drifts from the provider and fails open.
+     *
+     * The cookie written is the provider's own opaque session token under this origin's name, so from
+     * here on the whole flow above applies unchanged and `getSession` reads it as it reads any other
+     * session. Nothing about a request's authentication depends on this route.
+     */
+    completeSocialSignIn: async (request) => {
+      let token: string;
+      try {
+        const body = (await request.json()) as { token?: unknown };
+        if (typeof body?.token !== "string" || body.token === "") {
+          return Response.json(
+            { error: "A session token is required to finish signing in." },
+            { status: 400 },
+          );
+        }
+        token = body.token;
+      } catch {
+        return Response.json(
+          { error: "A session token is required to finish signing in." },
+          { status: 400 },
+        );
+      }
+
+      /*
+       * Who that token belongs to, according to the provider.
+       *
+       * The same call `getSession` makes, with the same cookie, and deliberately so: there is one
+       * place in this file that asks the provider what a session is, and a sign-in completing is the
+       * same question as a request arriving. Two code paths would be two chances to disagree about
+       * what counts as signed in.
+       *
+       * THE TOKEN ARRIVES AS THE PROVIDER ISSUED IT, which is not the same as what
+       * `GET /get-session` reports. A cookie value is `<session-token>.<signature>`; the response's
+       * `session.token` is the first half alone, and the provider does not accept that as a session —
+       * checked rather than assumed, because it is the shape a reading of that endpoint suggests and
+       * the one thing here that would fail silently.
+       *
+       * So what arrives here has to be the signed form. HOW IT GETS HERE IS NOT SOLVED, and that is
+       * why this route is not wired to anything: the cookie is `HttpOnly` and scoped to the provider's
+       * host, so a page on this origin cannot read it and cannot send it here either. The provider's
+       * own `callbackURL` mechanism is the one that puts a browser back on this origin, and it does so
+       * without the cookie.
+       */
+      let user: SessionUser | null = null;
+      try {
+        const response = await fetchNeon("/get-session", {
+          method: "GET",
+          cookie: `${NEON_AUTH_COOKIE}=${token}`,
+        });
+        if (response.ok) {
+          const payload = (await response.json()) as {
+            user?: SessionUser;
+          } | null;
+          user = payload?.user ?? null;
+        }
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            type: "neon-auth-session-exchange-failed",
+            error: String(error),
+            note: "Neon Auth could not be reached to confirm a session presented after an OAuth redirect, so no cookie was issued and the person must sign in again.",
+          }),
+        );
+      }
+
+      if (!user?.email) {
+        /*
+         * 401, and it says nothing about which of the reasons it was. A caller that could tell "the
+         * token was unknown" from "the provider was unreachable" could work through them one at a
+         * time; the reasons went to the log, where an operator can read them.
+         */
+        return Response.json(
+          { error: "That sign-in could not be completed." },
+          { status: 401 },
+        );
+      }
+
+      const local = await ensureLocalUser(database, user, auditStore);
+      if (!local) {
+        return Response.json(
+          { error: "That sign-in could not be completed." },
+          { status: 503 },
+        );
+      }
+
+      return Response.json(
+        { ok: true, user: { id: local.id, email: local.email } },
+        { headers: { "Set-Cookie": rewriteSetCookie(token, secureOrigin) } },
+      );
     },
 
     api: {

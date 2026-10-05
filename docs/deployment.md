@@ -126,6 +126,7 @@ and everything else here.
 | Variable | |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL with the `vector` extension. Not needed with `EMBEDDED_POSTGRES=on` |
+| `DATABASE_URL_UNPOOLED` | The same database without a connection pooler, for `LISTEN` and the retention sweeps' advisory locks. Falls back to `DATABASE_URL`. See [Neon](#neon) |
 | an identity provider | `NEON_AUTH_BASE_URL`, the address Neon Auth is reached at. `neon link` then `neon deploy` writes it into `.env`. See [configuration](configuration.md#authentication) |
 | `EMBEDDED_POSTGRES` | `on` to run the database inside the container. Off by default |
 | `KEY_ENCRYPTION_KEY` | base64 32 bytes. `openssl rand -base64 32`. The example key is refused in production |
@@ -142,8 +143,9 @@ reachable from this container. Unset it if your `.env` still has the laptop defa
 
 **Authentication is required.** With no identity provider configured, the deployment refuses to start,
 because a public URL where every visitor gets an account of their own fails silently: it looks like
-it works. Configure Google, Microsoft or Okta, or set `REMII_SINGLE_USER=true` to say you meant an
-open deployment. `NODE_ENV` does not affect this.
+it works. Point `NEON_AUTH_BASE_URL` at your provider's address, or set `REMII_SINGLE_USER=true` to say
+you meant an open deployment. `NODE_ENV` does not affect this. See [Neon](#neon) for how to get that
+address.
 
 **Put TLS in front of it.** Not only for the cookies. A page served from `http://<address>` is not a
 secure context, which removes a set of browser APIs that are present on `http://localhost` and so
@@ -180,6 +182,117 @@ TypeScript config. Asked to migrate here it exits 1 without saying why, and the 
 against an empty database. The script uses the migrator inside `drizzle-orm`, which is a runtime
 dependency, and keeps the same journal, so a database migrated by either is migrated. It is what
 this image's own start-up path and the Helm chart's migration Job both run.
+
+## Neon
+
+This deployment runs on [Neon](https://neon.com), and Neon is also its identity provider. Two things
+come from that, and they are worth reading separately because they fail differently.
+
+### The database
+
+```sh
+neon login
+neon link --project-id <your-project-id> --branch production --no-env-pull
+```
+
+`--no-env-pull` matters. `link` writes the branch's variables into `.env`, and this project's `.env`
+also holds `DATABASE_URL_UNPOOLED` — which exists because a pooler cannot hold a `LISTEN` connection
+or a session advisory lock. A `link` without that flag rewrites `DATABASE_URL` and leaves the unpooled
+one pointing at the old database, so four listeners quietly stop firing.
+
+Then take the two connection strings from `neon env pull` and put them in `.env`:
+
+```
+DATABASE_URL=<the pooled string>
+DATABASE_URL_UNPOOLED=<the string without "-pooler" in the host>
+```
+
+**Both, or the pooled one for everything.** The application pool is fine on the pooled endpoint. The
+four `LISTEN` listeners and the two retention sweeps are not: a notification delivered to a backend
+session nobody is listening on is silence rather than an error, and a session advisory lock released
+by the pool before the sweep ends lets a second replica start the same sweep. `DATABASE_URL_UNPOOLED`
+falls back to `DATABASE_URL`, so a deployment with only one string runs and quietly loses
+notifications.
+
+**`?sslmode=require` on both.** The pooled endpoint refuses an unencrypted connection, and the
+unpooled one is a plain public Postgres. `?channel_binding=require` is Neon's default and is carried
+by the strings the CLI prints.
+
+**Set the search_path.** A pooled backend that was opened before `ALTER ROLE ... SET search_path`
+keeps the empty path it started with, and every query against this schema fails with `relation
+"users" does not exist` on some connections and not others:
+
+```sql
+ALTER ROLE neondb_owner IN DATABASE neondb SET search_path = public;
+ALTER DATABASE neondb SET search_path = public;
+```
+
+Both, not either. The role setting covers new backends; the database setting covers everything.
+
+**The migrating role must own the `vector` extension.** Migration `0000` runs `CREATE EXTENSION IF NOT
+EXISTS vector` and migration `0010` runs `DROP EXTENSION IF EXISTS "vector"`. That second one is an
+ownership check, and `IF EXISTS` does not waive it. Neon pre-installs `vector` owned by
+`neon_superuser`, so `neondb_owner` fails with `must be owner of extension vector`. Drop it first and
+let the migrating role create it:
+
+```sql
+DROP EXTENSION IF EXISTS vector CASCADE;
+CREATE EXTENSION vector;   -- as neondb_owner, from DATABASE_URL
+```
+
+**Migrations run the same way as anywhere else** — see [Migrations](#migrations) above. Nothing about
+Neon changes the command.
+
+### The identity provider
+
+`auth: true` in `neon.ts` at the repository root, then:
+
+```sh
+neon deploy
+```
+
+That provisions Managed Better Auth on the linked branch and writes `NEON_AUTH_BASE_URL` into `.env`
+(it writes `NEON_AUTH_JWKS_URL` beside it, which this deployment does not read — see below).
+
+**A Google sign-in does not work, and the reason is structural.** Google redirects to the *provider's*
+host, the provider sets its session cookie there, and the browser returns to this application holding
+nothing for your origin — so a proxy of `/api/auth/*` cannot finish it, and a person who signs in with
+Google lands back on the sign-in screen looking like Google refused them. Nothing errors.
+
+The cookie cannot be handed to this deployment to fix that. It is `HttpOnly`, so no script on any page
+can read it, and it is scoped to the provider's host, so a page on this origin cannot send it here
+either. The provider also refuses to accept a bare `session.token` — `GET /get-session` reports the
+first half of a two-part signed value, and posting that is answered `null`, which is verified rather
+than assumed.
+
+Two ways out, neither of them built:
+
+- **Register a Google OAuth client against this application's origin**, so Google's redirect lands
+  here. The provider then has to exchange an authorization code it holds the secret for, so this
+  deployment would need its own Google client rather than the provider's — the shared credentials
+  cannot be pointed at a different host.
+- **Run the provider's own callback on this origin** by proxying `/callback/*` as well, so the cookie is
+  set through a route this origin controls. Whether the provider's session cookie can then be reissued
+  here is the question that has not been answered.
+
+Email and password sign-in is unaffected and verified working. Until one of these is done, **the
+sign-in screen should not offer Google** — a button that returns to the same screen is worse than no
+button, because it reads as a rejected account rather than as an unfinished feature. `NEON_AUTH_PROVIDERS`
+is the lever: set it to an empty-ish list to draw no social buttons on a deployment that has not
+settled this.
+
+**Add your deployment's origin to the branch's trusted list.** The provider answers CORS from an
+allowlist it keeps per branch, and `REMII_PUBLIC_URL` is what the deployment sends as its `Origin`.
+`localhost` is pre-configured; anything else has to be added.
+
+### What is still worth doing before real traffic
+
+The `memories.embedding` HNSW index is in place and correct, and the planner ignores it at the row
+counts this database holds now — a sequential scan of a few thousand 1024-dimension vectors beats
+building a graph to search one. It matters when a person has more memories than `hnsw.ef_search`
+(40). Past roughly fifty people per table the planner abandons the index entirely, and the fix is
+partitioning `memories` on `user_id` with a per-partition index. Both facts are written down in
+migration `0077`, which is where anyone changing it will look.
 
 ## Replicas
 

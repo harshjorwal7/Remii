@@ -214,14 +214,130 @@ describe("the auth proxy", () => {
     expect(reached()).toBe(true);
   });
 
+  /*
+   * `/api/auth/oauth-complete` is this server's own route, and the reason is structural.
+   *
+   * A social sign-in completes on the PROVIDER's host: Google redirects there, the provider sets its
+   * cookie there, and the browser returns to this application holding nothing for this origin. The
+   * wildcard proxy above cannot help, because the browser is the one talking during that leg and it
+   * talks to somebody else. So the browser comes back here with a token, and this route turns it into
+   * a cookie for this origin.
+   *
+   * Named `oauth-complete` rather than `callback/google` on purpose. A path shaped like Google's
+   * callback invites registering it as the OAuth redirect URI — which would put this route INSIDE the
+   * handshake it follows, and it has no code to exchange because the provider holds the OAuth client.
+   */
+  describe("POST /api/auth/oauth-complete", () => {
+    function appWithCompletion(
+      completeSocialSignIn: (request: Request) => Response,
+    ) {
+      const app = createApp(loadConfig(testEnvironment()), {
+        handler: () => new Response(null, { status: 200 }),
+        completeSocialSignIn,
+        api: { getSession: async () => null },
+      } as never);
+      return app;
+    }
+
+    test("is answered by this server rather than forwarded to the provider", async () => {
+      let reached = false;
+      let completed = false;
+      const app = createApp(loadConfig(testEnvironment()), {
+        handler: () => {
+          reached = true;
+          return new Response(null, { status: 200 });
+        },
+        completeSocialSignIn: () => {
+          completed = true;
+          return Response.json({ ok: true });
+        },
+        api: { getSession: async () => null },
+      } as never);
+
+      const response = await app.request(
+        "http://remii.test/api/auth/oauth-complete",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token: "a.b.c" }),
+        },
+      );
+
+      expect(response.status).toBe(200);
+      expect(completed).toBe(true);
+      // The provider has no such route, so forwarding would have answered 404 with a message about
+      // the provider's API rather than anything about signing in.
+      expect(reached).toBe(false);
+    });
+
+    test("is POST only, so a stray GET cannot spend a token", async () => {
+      let completed = false;
+      const app = appWithCompletion(() => {
+        completed = true;
+        return Response.json({ ok: true });
+      });
+
+      const response = await app.request(
+        "http://remii.test/api/auth/oauth-complete",
+      );
+
+      // The wildcard catches it instead, so this asserts the narrower route did not: a token in a
+      // query string is a token in a log, and this route should never be reachable that way.
+      expect(completed).toBe(false);
+    });
+
+    test("answers 501 when the sign-in cannot be completed out of process", async () => {
+      // A sign-in that finishes inside this server has nothing to hand over, so it has no such
+      // method. Saying 501 rather than forwarding names the gap instead of hiding it behind a 404
+      // from a provider that has never heard of the route.
+      const app = createApp(loadConfig(testEnvironment()), {
+        handler: () => new Response(null, { status: 200 }),
+        api: { getSession: async () => null },
+      } as never);
+
+      const response = await app.request(
+        "http://remii.test/api/auth/oauth-complete",
+        { method: "POST" },
+      );
+
+      expect(response.status).toBe(501);
+    });
+
+    test("answers 503 when no provider is configured at all", async () => {
+      const app = createApp(
+        loadConfig(
+          testEnvironment({
+            NEON_AUTH_BASE_URL: undefined,
+            REMII_SINGLE_USER: "true",
+          }),
+        ),
+      );
+
+      const response = await app.request(
+        "http://remii.test/api/auth/oauth-complete",
+        { method: "POST" },
+      );
+
+      expect(response.status).toBe(503);
+    });
+  });
+
   test("answers 503 when no provider is configured", async () => {
     const app = createApp(
-      loadConfig(testEnvironment({ NEON_AUTH_BASE_URL: undefined, REMII_SINGLE_USER: "true" })),
+      loadConfig(
+        testEnvironment({
+          NEON_AUTH_BASE_URL: undefined,
+          REMII_SINGLE_USER: "true",
+        }),
+      ),
     );
 
-    const response = await app.request("http://remii.test/api/auth/get-session", {
-      method: "GET",
-    });
+    const response = await app.request(
+      "http://remii.test/api/auth/get-session",
+      {
+        method: "GET",
+      },
+    );
 
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({

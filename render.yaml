@@ -1,0 +1,117 @@
+# Remii on Render.
+#
+# ONE web service, running the image, because the image is the whole deployment: the API and the
+# app it serves, on one port. There is deliberately no separate static site for `app/` and no
+# separate service for the API — `server/src/app.ts` has no CORS anywhere, on purpose, so the app
+# reaches `/api` on its own origin. Splitting them would put the app and the API on different hosts,
+# which is the one shape this server does not support.
+#
+# Render builds with BuildKit, so the `TARGETARCH` build arg that `Dockerfile` needs to fetch the
+# right s6-overlay tarball is filled in automatically. Passing it by hand, as a local `docker build`
+# without buildx requires, is not needed here and would be wrong.
+#
+# Region `frankfurt` because the Neon project is `eu-west-2`. The pooled connection string carries
+# `channel_binding=require`, so it has to reach a Postgres that speaks it, and eu-west-2 is the
+# nearest region that does.
+
+services:
+  - type: web
+    name: remii
+    runtime: docker
+    region: frankfurt
+    branch: main
+
+    # NOT `free`. Two reasons, and the second is not a preference.
+    #
+    # A free web service spins down after 15 minutes without inbound traffic, and spinning down kills
+    # every one of the four Postgres LISTEN subscriptions this process holds. The symptom of a dead
+    # LISTEN is silence rather than an error, so the roster stops updating and nothing says why.
+    # It also cannot attach a persistent disk, so `WORKSPACE_DIR` and `PROFILES_DIR` would be lost
+    # on every redeploy — and the idle sweep that stops billable E2B sandboxes is a 60-second timer,
+    # which a process that is asleep for 15 minutes at a time cannot be trusted to run.
+    #
+    # 2 GB is what `docs/deployment.md` asks for on every platform: this process holds agent runs,
+    # streaming buffers and the plugin registry at once.
+    plan: standard
+
+    # `Dockerfile`'s own HEALTHCHECK is `http://127.0.0.1:3001/health`, and this is that same
+    # endpoint. Without an explicit `healthCheckPath`, Render falls back to bare TCP port-binding,
+    # which reports an instance ready before the database pool has initialised — the first requests
+    # after every deploy would then hit a server with no database.
+    healthCheckPath: /health
+
+    # The server installs SIGINT/SIGTERM handlers (server/src/index.ts) that stop every listener and
+    # sweep before exiting. Render's default 30-second grace period is not much longer than a 60-second
+    # database round trip, and 300 is the maximum. Zero-downtime deploys need this to be long enough
+    # for that handler to finish.
+    maxShutdownDelaySeconds: 120
+
+    # Migrations, as a release step rather than a start step, which is what
+    # `docker/s6/scripts/migrate.sh` already decides: it exits 0 immediately unless
+    # EMBEDDED_POSTGRES=on, because "an external database is somebody else's release process — two
+    # replicas starting together would race".
+    #
+    # So with Neon this is currently a no-op — the database is already at 78 of 78 journal entries —
+    # but WITHOUT it every future migration is silently never applied, and the deployment comes up
+    # against a schema the code has moved past. Render runs this once, after the image is built and
+    # before the new instance takes traffic.
+    #
+    # `scripts/migrate.ts`, not `drizzle-kit migrate`: the CLI needs esbuild to read its TypeScript
+    # config, which `bun install --production` leaves out of this image, so it exits 1 there without
+    # printing why.
+    #
+    # `/command/s6-setuidgid`, the full path, because `s6-overlay` does not put it on PATH for a
+    # process it did not start itself. Render runs this command directly rather than through s6, so
+    # the bare name fails with "command not found" and the deploy fails before the instance is ever
+    # handed traffic.
+    preDeployCommand: /bin/bash -c 'cd /app/server && HOME=/home/apiuser /command/s6-setuidgid apiuser /usr/local/bin/bun scripts/migrate.ts'
+
+    envVars:
+      # `Bun.serve` defaults to 0.0.0.0, which is what Render requires, so nothing here sets a host.
+      # Render injects `PORT` itself; this states the same number explicitly so a mistake in the
+      # dashboard is visible in the diff rather than silent.
+      - key: PORT
+        value: 3001
+
+      # The built app, served by the API on this same origin.
+      - key: APP_DIST_DIR
+        value: /app/app/dist
+
+      # Draws the password form on the sign-in screen. Whether one actually works is the provider's
+      # answer, not this variable's: `server/src/index.ts` overwrites it from
+      # `neon_auth.project_config` at boot, so the form and the provider cannot disagree.
+      - key: AUTH_EMAIL_PASSWORD
+        value: "true"
+
+      # NO `EMBEDDED_POSTGRES` HERE, and that is deliberate. A database inside the container dies
+      # with the container, and the audit trail is the product. `DATABASE_URL` points at Neon.
+      #
+      # NO `NODE_ENV=production` HERE EITHER: the image sets it, and it has to stay, because
+      # `server/src/config.ts` refuses to start on the example `KEY_ENCRYPTION_KEY` under it. That
+      # refusal is what stops a public key from encrypting the credential vault.
+
+      # Secrets go in the Render dashboard (or `render services create --env-vars-secret`), never in
+      # this file — it is committed. These are the ones that have to be set:
+      #
+      #   DATABASE_URL            Neon pooled endpoint (`...-pooler....neon.tech`)
+      #   DATABASE_URL_UNPOOLED   Neon DIRECT endpoint, no `-pooler`
+      #   KEY_ENCRYPTION_KEY      `openssl rand -base64 32` — the example one is refused
+      #   NEON_AUTH_BASE_URL      from `neon.ts` / the Neon console, must be https
+      #   REMII_PUBLIC_URL        https://remii.onrender.com — see below
+      #   E2B_API_KEY             if Bots get a computer
+      #   DEEPSEEK_API_KEY        the model this deployment is DeepSeek-only
+      #
+      # `DATABASE_URL_UNPOOLED` must NOT be the pooler endpoint. All four LISTEN subscriptions run
+      # over it, and a LISTEN through PgBouncer never fires — the failure is silence, not an error, so
+      # it presents as "no live updates" with nothing in the logs to explain it.
+      #
+      # `REMII_PUBLIC_URL` is not optional in practice. `config.ts` defaults it to
+      # `http://localhost:3010`, and that value becomes Neon Auth's CORS allowlist and every OAuth
+      # `redirect_uri`. Left unset, sign-in completes and then redirects the person to their own
+      # laptop.
+
+# The worker is deliberately absent. Routines fire from a scheduler calling an authenticated HTTP
+# route — `/api/internal/routines/run` and `/api/internal/cron/tick`, guarded by
+# `WORKER_SHARED_SECRET` — which `docs/deployment.md` describes and any cron reaches equally well,
+# including Render's own cron jobs. A Render background worker is also a valid home for
+# `worker/src/index.ts`, which loops every 30s and does the same work plus a Telegram long-poll.

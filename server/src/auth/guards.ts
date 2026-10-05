@@ -26,6 +26,14 @@ export type AuthenticatedActor = {
 
 export type AuthService = {
   handler: (request: Request) => Response | Promise<Response>;
+  /**
+   * Finish an OAuth sign-in, given the token the browser was handed by the provider.
+   *
+   * Optional because only the hosted provider needs it: a sign-in that completes inside this server
+   * has nothing to hand over. A deployment whose service cannot finish a social sign-in says so by
+   * having no such method, and `app.ts` answers 501 rather than pretending.
+   */
+  completeSocialSignIn?: (request: Request) => Response | Promise<Response>;
   api: {
     getSession: (input: {
       headers: Headers;

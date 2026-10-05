@@ -163,7 +163,7 @@ per branch, so the configuration here is an address rather than a set of credent
 | `REMII_SINGLE_USER`   | One fixed local user and no sign-in. **Required** when `NEON_AUTH_BASE_URL` is unset, or the deployment refuses to start. Ignored when it is set. |
 | `NEON_AUTH_BASE_URL`  | The provider's address, `https://…neonauth…/neondb/auth`. Required for sign-in. Written into `.env` by `neon deploy`. Must be `https://`. |
 | `AUTH_EMAIL_PASSWORD` | `true` draws the email-and-password form. Whether the provider *accepts* one is its own setting, read at start-up from `neon_auth.project_config`, and overrides this. |
-| `NEON_AUTH_PROVIDERS` | Comma-separated provider ids for the buttons on the sign-in screen. Normally unset: the server reads the branch's own configuration at start-up so the buttons always match what the branch accepts. Set it only for a branch with no provider configured. |
+| `NEON_AUTH_PROVIDERS` | Comma-separated provider ids for the buttons on the sign-in screen. Normally unset: the server reads the branch's own configuration at start-up. **`none` draws no social buttons** — see the note below, because a social sign-in does not currently finish. |
 | `TRUSTED_ORIGINS`     | Comma-separated app origins this deployment serves.                                     |
 | `REMII_PUBLIC_URL`    | This deployment's own address. Sent as `Origin` on every call to the provider, which checks it against the branch's trusted-origin list. |
 | `REMII_APP_URL`       | Where the browser app is served. Defaults to the first `TRUSTED_ORIGINS` entry, then `REMII_PUBLIC_URL`. |
@@ -182,6 +182,22 @@ neon deploy
 **Why `https://` is required.** The provider's session cookie is `__Secure-` prefixed, and a browser
 refuses a `__Secure-` cookie that did not arrive over TLS. An `http://` address therefore produces a
 sign-in that appears to succeed and leaves no session.
+
+**A social sign-in does not finish, and `NEON_AUTH_PROVIDERS=none` is how a deployment ships without
+one.** Google redirects to the *provider's* host, the provider sets its session cookie there, and the
+browser returns to this application holding nothing for this origin — so a proxy of `/api/auth/*` is not
+enough and the person appears to have been refused by Google. Nothing errors; they simply arrive back
+at the sign-in screen.
+
+The cookie cannot be handed over to fix it. It is `HttpOnly`, so no script can read it, and it is
+scoped to the provider's host, so a page here cannot send it here either. The provider also refuses a
+bare `session.token`: `GET /get-session` reports the first half of a two-part signed value, and posting
+that is answered `null`. Both verified rather than assumed, because the shape of that endpoint suggests
+it should work and it does not.
+
+So set `NEON_AUTH_PROVIDERS=none` with `AUTH_EMAIL_PASSWORD=true` and this deployment offers a way in
+that works. [deployment.md](deployment.md#neon) writes down what would have to change to restore
+Google.
 
 **The providers available are `google`, `github` and `vercel`.** Microsoft, Okta and company SAML or
 OIDC are not reachable: the provider offers no route to any of them. `GOOGLE_OAUTH_*`,

@@ -8,7 +8,8 @@ import { configuredAuthProviders, loadConfig } from "../src/config";
 const baseEnvironment = {
   DATABASE_URL: "postgres://remii:remii@localhost:5432/remii",
   KEY_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-  NEON_AUTH_BASE_URL: "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth",
+  NEON_AUTH_BASE_URL:
+    "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth",
   INTELLIGENCE_API_URL: "http://localhost:7100",
   INTELLIGENCE_GATEWAY_WS_URL: "ws://localhost:7103",
   INTELLIGENCE_API_KEY: "tenant-api-key",
@@ -26,7 +27,8 @@ const baseEnvironment = {
  */
 const withoutSignIn = Object.fromEntries(
   Object.entries(baseEnvironment).filter(
-    ([name]) => name !== "NEON_AUTH_BASE_URL" && name !== "INITIAL_ADMIN_EMAILS",
+    ([name]) =>
+      name !== "NEON_AUTH_BASE_URL" && name !== "INITIAL_ADMIN_EMAILS",
   ),
 );
 
@@ -245,21 +247,25 @@ describe("deployment configuration", () => {
     const config = loadConfig(baseEnvironment);
 
     expect(config.auth).toEqual({
-      neonAuthUrl: "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth",
+      neonAuthUrl:
+        "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth",
       // The address the provider is told the caller is. Localhost, because the sign-in screen is
       // served from the app's dev port and it is that origin the provider checks.
       origin: "http://localhost:3010",
       // What the buttons are drawn from. `index.ts` replaces this with the branch's own provider
-      // configuration at start-up; this is the fallback for a branch whose configuration cannot be
-      // read, and a branch with google configured is the ordinary case.
+      // configuration at start-up unless this deployment named a list itself; this is the fallback for
+      // a branch whose configuration cannot be read, and a branch with google configured is ordinary.
       socialProviders: ["google"],
+      // False here, which is what lets the branch's own list win at start-up.
+      socialProvidersOverridden: false,
     });
   });
 
   test("strips a trailing slash off the provider address", () => {
     const config = loadConfig({
       ...baseEnvironment,
-      NEON_AUTH_BASE_URL: "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth/",
+      NEON_AUTH_BASE_URL:
+        "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth/",
     });
 
     expect(config.auth?.neonAuthUrl).toBe(
@@ -276,7 +282,10 @@ describe("deployment configuration", () => {
    */
   test("refuses a provider address that is not https", () => {
     expect(() =>
-      loadConfig({ ...baseEnvironment, NEON_AUTH_BASE_URL: "http://localhost:3001" }),
+      loadConfig({
+        ...baseEnvironment,
+        NEON_AUTH_BASE_URL: "http://localhost:3001",
+      }),
     ).toThrow("NEON_AUTH_BASE_URL must be an https:// address");
   });
 
@@ -308,6 +317,46 @@ describe("deployment configuration", () => {
           .auth,
       ),
     ).toEqual(["google", "github"]);
+  });
+
+  /**
+   * `none` draws no social buttons, which is a setting rather than a trick.
+   *
+   * A social sign-in through the proxy does not finish — Google redirects to the provider's host and
+   * this origin never sees the cookie — so a deployment that has not settled that should offer email
+   * and password only. Asserted here because the alternative is a button that returns a person to the
+   * same screen, which reads as a rejected account rather than as an unfinished feature.
+   */
+  test("draws no social buttons when asked for none", () => {
+    // WITH `AUTH_EMAIL_PASSWORD` ALSO SET, because "no social buttons" is a deployment that still has
+    // a way in. On its own it is a deployment with no provider at all, and `loadConfig` refuses to
+    // start one — which is correct and is what the next test says.
+    const config = loadConfig({
+      ...baseEnvironment,
+      NEON_AUTH_PROVIDERS: "none",
+      AUTH_EMAIL_PASSWORD: "true",
+    });
+
+    expect(configuredAuthProviders(config.auth)).toEqual([]);
+    expect(config.auth?.emailPassword).toBe(true);
+    // And that the choice is marked as one, because `index.ts` reads the branch's own provider list
+    // at start-up and writes it back over this. Without the flag an explicit `none` is
+    // indistinguishable from a default, and the setting silently does nothing.
+    expect(config.auth?.socialProvidersOverridden).toBe(true);
+  });
+
+  test("says when the provider list was not overridden", () => {
+    // The other half of the same flag: unset means the branch's own list wins, which is the ordinary
+    // case and the one that keeps the buttons matching what the provider accepts.
+    expect(loadConfig(baseEnvironment).auth?.socialProvidersOverridden).toBe(
+      false,
+    );
+  });
+
+  test("no social buttons and no form is a deployment with no way in, and refuses", () => {
+    expect(() =>
+      loadConfig({ ...baseEnvironment, NEON_AUTH_PROVIDERS: "none" }),
+    ).toThrow("No identity provider is configured");
   });
 
   test("drops a provider the identity provider does not admit", () => {
@@ -344,7 +393,10 @@ describe("deployment configuration", () => {
      * that refuses. There is no administrator role for the list to have named.
      */
     expect(() =>
-      loadConfig({ ...baseEnvironment, INITIAL_ADMIN_EMAILS: "admin@remii.test" }),
+      loadConfig({
+        ...baseEnvironment,
+        INITIAL_ADMIN_EMAILS: "admin@remii.test",
+      }),
     ).toThrow("INITIAL_ADMIN_EMAILS");
   });
 

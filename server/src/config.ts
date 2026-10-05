@@ -163,6 +163,16 @@ export type AuthConfig = {
    */
   socialProviders: AuthProviderId[];
   /**
+   * Whether `NEON_AUTH_PROVIDERS` was set, as distinct from what it was set to.
+   *
+   * Present because the branch's own provider configuration is read at start-up and written back over
+   * `socialProviders`, and that is right for everything except this: a deployment that has said
+   * `none` must keep saying it. Without a flag saying the value was chosen rather than defaulted, an
+   * explicit `none` is indistinguishable from a default and gets overwritten, so the setting appears to
+   * do nothing.
+   */
+  socialProvidersOverridden: boolean;
+  /**
    * Whether the provider requires a verified address before the account is usable.
    *
    * The provider's own answer, read out of `neon_auth.project_config`, and it decides one thing:
@@ -716,8 +726,24 @@ function authConfig(environment: Environment): AuthConfig | undefined {
    * pool. `NEON_AUTH_PROVIDERS` overrides it for a branch whose provider has none configured, which
    * is the one case where the default would be a lie.
    */
+  /*
+   * `NEON_AUTH_PROVIDERS=none` draws no social buttons at all, which is a real setting rather than a
+   * trick.
+   *
+   * A social sign-in through this proxy does not finish: Google redirects to the provider's host, the
+   * provider sets its cookie there, and this origin never sees it. A button that sends somebody there
+   * and returns them to this same screen reads as a rejected account, which is worse than no button
+   * because there is nothing on the page to say otherwise. `docs/deployment.md` writes down what would
+   * have to change; until then this is how a deployment ships email and password without offering a
+   * broken door.
+   */
   const override = commaSeparated(environment, "NEON_AUTH_PROVIDERS");
-  const socialProviders = override.length > 0 ? override : ["google"];
+  const noSocialProviders = override.length === 1 && override[0] === "none";
+  const socialProviders = noSocialProviders
+    ? []
+    : override.length > 0
+      ? override
+      : ["google"];
 
   /*
    * The origin this deployment answers the provider with, which cannot be absent here.
@@ -739,6 +765,7 @@ function authConfig(environment: Environment): AuthConfig | undefined {
   return {
     neonAuthUrl: neonAuthUrl.replace(/\/+$/, ""),
     origin,
+    socialProvidersOverridden: override.length > 0,
     socialProviders: socialProviders.filter(
       (provider): provider is AuthProviderId =>
         provider === "google" || provider === "github" || provider === "vercel",

@@ -484,6 +484,39 @@ export function createApp(
    * closed. The sign-in screen's calls are Better Auth's own at the same paths, and the proxy in
    * `auth/neon.ts` forwards each one.
    */
+  /*
+   * Finish a social sign-in, on its own path rather than behind the wildcard below.
+   *
+   * The wildcard is a straight proxy to the provider, and the provider has no such route — so a
+   * request here would be answered 404 by Neon with a message about the provider's API rather than
+   * anything to do with signing in. That is the whole reason this is a route of ours.
+   *
+   * Named `/oauth-complete` rather than `/callback/google` on purpose. A path shaped like Google's
+   * callback invites registering it as the OAuth redirect URI, which would put this route inside the
+   * handshake it is supposed to follow: Google would send the authorization code here, and this route
+   * has no code to exchange because the provider holds the OAuth client. The redirect URI stays with
+   * the provider; this is called afterwards, with whatever it issued.
+   */
+  app.post("/api/auth/oauth-complete", async (context) => {
+    if (!auth) {
+      return context.json(
+        { error: "No identity provider is configured." },
+        503,
+      );
+    }
+    if (!auth.completeSocialSignIn) {
+      return context.json(
+        {
+          error:
+            "This deployment's sign-in cannot be completed out of process, which is what a social sign-in needs.",
+        },
+        501,
+      );
+    }
+
+    return auth.completeSocialSignIn(context.req.raw);
+  });
+
   app.on(["GET", "POST"], "/api/auth/*", async (context) => {
     if (!auth) {
       return context.json(

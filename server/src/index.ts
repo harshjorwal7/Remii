@@ -491,7 +491,18 @@ const providerSettings = config.auth
 if (providerSettings && config.auth) {
   config.auth = {
     ...config.auth,
-    socialProviders: providerSettings.socialProviders,
+    /*
+     * The branch's own list, UNLESS this deployment named one.
+     *
+     * The provider is the right answer to "what will this branch accept" and the wrong answer to "what
+     * should this deployment offer". A social sign-in through this proxy does not finish — Google
+     * redirects to the provider's host and this origin never receives the cookie — so a deployment
+     * that has said `NEON_AUTH_PROVIDERS=none` must keep saying it, and reading the branch's list over
+     * the top would turn a deliberate choice into a setting that silently does nothing.
+     */
+    socialProviders: config.auth.socialProvidersOverridden
+      ? config.auth.socialProviders
+      : providerSettings.socialProviders,
     // Replaced rather than merged, so `emailPassword` is absent when the provider has it off rather
     // than left at whatever the environment said. The environment said it because somebody wrote it
     // down months ago; the provider is what answers.
