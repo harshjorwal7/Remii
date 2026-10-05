@@ -5017,13 +5017,17 @@ fn main() {
                 crate::test_support::compile_fixture(&source, &path.bin().join("docker"));
                 std::fs::copy(path.bin().join("docker"), path.bin().join("podman")).unwrap();
                 std::env::set_var("REMII_TEST_ENGINE_RECORD", base.join("commands.log"));
-                if case == "remote-stale-image" {
-                    std::fs::write(
-                root.join(".env"),
-                "PICKED_HARNESS_IMAGE=localhost/old-image@sha256:00\nPICKED_HARNESS_PORT=4206\n",
-            )
-            .unwrap();
-                }
+                /*
+                 * No stale-remote-image case here, and there never was one.
+                 *
+                 * A block asking for `case` and `root` — neither of which exists in this function —
+                 * was left in the middle of the fixture's constructor by an interrupted edit, and it
+                 * stopped the crate compiling, so every clippy and Rust-test job on this workflow had
+                 * been failing on it. Nothing referenced it: the string appears nowhere else in the
+                 * tree, and `write_installed_deployment` above is what puts an image reference in a
+                 * fixture root. If that scenario is wanted it belongs in a test that asks for it by
+                 * name, the way every other fixture variation here does.
+                 */
                 let app = tauri::test::mock_builder()
                     .manage(Shell::default())
                     .invoke_handler(tauri::generate_handler![

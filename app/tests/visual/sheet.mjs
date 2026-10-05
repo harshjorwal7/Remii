@@ -107,15 +107,9 @@ try {
    * Not byte-equal, so the encodes differ — a font hint, a Chrome version, a fractional layout. That
    * is not by itself a mascot change, so the pixels are what get judged.
    *
-   * Both images go into a canvas at their natural size.
-   *
-   * A SMALL HEIGHT DIFFERENCE IS THE SAME NOISE, and treating it as fatal is what made this check
-   * unrunnable anywhere but the machine that produced the picture: the committed sheet came out 44
-   * pixels shorter here than on a CI runner, on a 7,158-pixel page, because the two machines resolve
-   * slightly different font metrics and every row inherits it. The page is laid out in a fixed-width
-   * viewport, so WIDTH is a real assertion — it is the viewport — and height is compared with a
-   * tolerance, and the two pictures are judged over the region they share. A mascot that became a
-   * hundred times its size, or a panel that collapsed, moves far more than the tolerance.
+   * Both images go into a canvas at their natural size. A size difference is reported separately
+   * rather than sampled against, because a sheet that got taller has changed the layout and there is
+   * no pixel-by-pixel answer worth computing.
    */
   const diff = await page.evaluate(
     async ([a, b]) => {
@@ -128,34 +122,23 @@ try {
           image.src = URL.createObjectURL(blob);
         });
       const [left, right] = await Promise.all([load(a), load(b)]);
-
-      /* One percent of the page, and never a width: see the note above. */
-      const HEIGHT_TOLERANCE = 0.01;
-      if (
-        left.width !== right.width ||
-        Math.abs(left.height - right.height) >
-          Math.max(
-            24,
-            Math.round(Math.max(left.height, right.height) * HEIGHT_TOLERANCE),
-          )
-      ) {
+      if (left.width !== right.width || left.height !== right.height) {
         return {
           sizeMismatch: true,
           a: [left.width, left.height],
           b: [right.width, right.height],
         };
       }
-      const shared = Math.min(left.height, right.height);
-      const read = (image, height) => {
+      const read = (image) => {
         const canvas = document.createElement("canvas");
         canvas.width = image.width;
-        canvas.height = height;
+        canvas.height = image.height;
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
         ctx.drawImage(image, 0, 0);
-        return ctx.getImageData(0, 0, image.width, height).data;
+        return ctx.getImageData(0, 0, image.width, image.height).data;
       };
-      const x = read(left, shared);
-      const y = read(right, shared);
+      const x = read(left);
+      const y = read(right);
       let differing = 0;
       let worst = 0;
       let firstRow = -1;
@@ -179,7 +162,6 @@ try {
         worst,
         firstRow,
         width: left.width,
-        comparedHeight: shared,
       };
     },
     [[...committed], [...fresh]],
@@ -204,8 +186,7 @@ try {
   }
 
   console.log(
-    `mascot sheet matches (${diff.differing} antialiased pixels, within ${Math.round(limit)}` +
-      `${diff.comparedHeight ? `, over ${diff.comparedHeight} shared rows` : ""})`,
+    `mascot sheet matches (${diff.differing} antialiased pixels, within ${Math.round(limit)})`,
   );
 } finally {
   await browser.close();

@@ -1075,23 +1075,6 @@ function appOf(row: VendorToolkit, position: number): BrokerApp {
  * here could only collapse the third into one of the first two, which is the exact defect being
  * closed. It is left as `unknown` so the reader has to say what it does with it.
  */
-/**
- * One connected-account row, as this file reads it.
- *
- * Every field is `unknown` because every field arrives from the vendor and is passed through
- * `textOf`, which is what turns an absent, null or non-string field into the absence the caller
- * wants. Named rather than left as `any` so the call sites stop re-asserting the shape they read.
- */
-type VendorAccount = {
-  id?: unknown;
-  alias?: unknown;
-  status?: unknown;
-  data?: { email?: unknown; username?: unknown } | null;
-  params?: { email?: unknown; username?: unknown } | null;
-  createdAt?: unknown;
-  updatedAt?: unknown;
-};
-
 type CheckedAuthConfig = {
   id: string;
   name: string;
@@ -2544,7 +2527,7 @@ export function buildComposioClient(
       configs?: string[];
       enough?: (rows: { id?: unknown }[]) => boolean;
     } = {},
-  ): Promise<VendorAccount[]> => {
+  ): Promise<{ id?: unknown }[]> => {
     /*
      * EVERY PAGE UNLESS THE CALLER SAYS OTHERWISE, READ HERE RATHER THAN AT EITHER CALLER, so that
      * the two questions cannot drift on the one thing they do share. A truncated listing is the
@@ -3033,20 +3016,10 @@ export function buildComposioClient(
         return await configsFor(slug);
       }
 
-      /*
-       * The vendor's own row, typed by what this file reads off it and nothing more.
-       *
-       * `VendorToolkit` already describes the toolkit shape this adapter understands, and the SDK's
-       * return type is a model with far more required fields than a partial read can satisfy — which
-       * is why this said `any`. `unknown` through the ask, then the shape, keeps the vendor's type
-       * out of the file and still refuses a row that is not a toolkit.
-       */
-      const detail: VendorToolkit | null = await askVendor<unknown>(
+      const detail = (await askVendor(
         { outcome: `what ${slug} asks for could not be read`, app: slug },
-        () => vendor.toolkits.retrieve(slug) as Promise<unknown>,
-      ).then((row) =>
-        typeof row === "object" && row !== null ? (row as VendorToolkit) : null,
-      );
+        () => vendor.toolkits.retrieve(slug) as Promise<any>,
+      )) as any;
       if (detail && typeof detail === "object") {
         const conn = connectionOf(detail);
         const name = textOf(detail.name) ?? slug;
@@ -3663,13 +3636,7 @@ export function buildComposioClient(
         () =>
           vendor.connectedAccounts.link(userId, config.id, {
             callbackUrl: returnUrl,
-            /*
-             * `allowMultiple` is asked for on purpose — it is what lets one person hold two accounts
-             * of the same app — and the installed SDK's option type does not carry it, so this is a
-             * cast rather than a field. `unknown` keeps the assertion from spreading `any` through the
-             * object it is spread into.
-             */
-            ...({ allowMultiple: true } as unknown as Record<string, boolean>),
+            ...({ allowMultiple: true } as any),
           }),
       );
 
@@ -3758,7 +3725,7 @@ export function buildComposioClient(
     async listAccounts({ userId, toolkit }): Promise<ConnectedAccountItem[]> {
       const rows = await accountsFor(userId, toolkit, CONNECTED);
       return rows
-        .map((r) => {
+        .map((r: any) => {
           const id = textOf(r.id) ?? "";
           const label =
             textOf(r.alias) ??

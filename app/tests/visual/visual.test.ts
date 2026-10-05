@@ -19,19 +19,12 @@ import { existsSync } from "node:fs";
  * So this file is the one that notices a mascot has become ugly. It needs Chrome, and says so and
  * skips rather than passing quietly when Chrome is absent — a visual test that silently stops running
  * is worse than no visual test, because it looks like coverage.
- *
- * AND IT IS OPT-IN, because a picture is only comparable on a machine that renders it the same way.
- * The committed PNG was taken on one machine with one set of fonts; a CI runner resolves slightly
- * different metrics, and the comparison then reports a difference in fonts — 13% of the pixels on the
- * sheet that last time — with nothing wrong with the mascot. So `REMII_VISUAL=1` turns the comparison
- * on, the workflow uploads whatever it rendered so a person can look at it either way, and the gate
- * that always runs is `mascot-geometry.test.ts`, which needs no browser and no tolerance.
  */
 
 const HERE = new URL(".", import.meta.url).pathname;
 const RENDER = `${HERE}render-sheet.ts`;
 const COMPARE = `${HERE}sheet.mjs`;
-const CHROME = process.env.SHEET_CHROME ?? "/usr/bin/google-chrome";
+const CHROME = "/usr/bin/google-chrome";
 
 function hasChrome() {
   return existsSync(CHROME);
@@ -43,17 +36,6 @@ describe("the mascot sheet", () => {
       console.warn(
         `skipping the mascot visual test: no chrome at ${CHROME}. ` +
           "The geometry tests in mascot-geometry.test.ts still cover the scaling bugs.",
-      );
-      return;
-    }
-
-    if (!process.env.REMII_VISUAL) {
-      console.warn(
-        "skipping the mascot visual comparison: REMII_VISUAL is not set. " +
-          "The committed picture only matches a machine whose fonts resolve to the same metrics, " +
-          "and a difference in fonts reads as a difference in the mascot. " +
-          "Run it with REMII_VISUAL=1 where you have those fonts; mascot-geometry.test.ts covers " +
-          "the scaling bugs either way.",
       );
       return;
     }
