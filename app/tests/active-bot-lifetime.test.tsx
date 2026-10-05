@@ -7,7 +7,7 @@ import {
   test,
 } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import {
   ActiveBotProvider,
   useActiveBot,
@@ -56,18 +56,26 @@ const held: { holder: { current: string } | null } = { holder: null };
 const read = () => held.holder?.current ?? "unread";
 
 /**
- * Effects have run, before anything is read.
+ * The holder has read what the effect declared, before anything asserts on it.
  *
  * `useActiveBot` declares the Bot from inside `useEffect`, and `render` normally flushes passive
- * effects before it returns. It is not guaranteed to: React 19 hands that work to its scheduler, and
- * under some environments (CI among them) the callback has not run by the time `render` returns, so
- * the holder still reads `"default"` and this file failed with
- * `Expected: "bot-1" / Received: "default"` — on a machine where the code is correct. Draining the
- * scheduler inside `act` makes the order the test means to assert the order it gets.
+ * effects before it returns. It is not guaranteed to: React 19 hands that work to its scheduler,
+ * which runs it in a MACROTASK, and under some environments — CI among them — the callback has not
+ * run by the time `render` returns. The holder then still reads `"default"` and this file failed with
+ * `Expected: "bot-1" / Received: "default"`, on a machine where the code is correct.
+ *
+ * Draining a microtask inside `act` was not enough, because the scheduler does not run on microtasks.
+ * Polling is: `waitFor` re-checks on an interval until the value lands, so the assertion is about the
+ * holder rather than about how the host happened to schedule React's work.
  */
+async function declares(view: () => string, expected: string) {
+  await waitFor(() => expect(view()).toBe(expected));
+}
+
+/** A macrotask, for the reads that must happen AFTER an unmount rather than after a mount. */
 async function settled() {
   await act(async () => {
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
 
@@ -89,8 +97,7 @@ describe("a Bot declared by a surface that has gone away", () => {
         <Probe />
       </ActiveBotProvider>,
     );
-    await settled();
-    expect(read()).toBe("bot-1");
+    await declares(read, "bot-1");
 
     // The person walks to another page in the app. The run is still going.
     view.unmount();
@@ -110,8 +117,7 @@ describe("a Bot declared by a surface that has gone away", () => {
         <Probe />
       </ActiveBotProvider>,
     );
-    await settled();
-    expect(read()).toBe("bot-1");
+    await declares(read, "bot-1");
     first.unmount();
     await settled();
 
@@ -121,8 +127,7 @@ describe("a Bot declared by a surface that has gone away", () => {
         <Probe />
       </ActiveBotProvider>,
     );
-    await settled();
-    expect(read()).toBe("bot-2");
+    await declares(read, "bot-2");
   });
 
   test("a surface that declares nothing takes the placeholder", async () => {
@@ -135,7 +140,6 @@ describe("a Bot declared by a surface that has gone away", () => {
         <Probe />
       </ActiveBotProvider>,
     );
-    await settled();
-    expect(read()).toBe("default");
+    await declares(read, "default");
   });
 });
