@@ -134,7 +134,10 @@ try {
       if (
         left.width !== right.width ||
         Math.abs(left.height - right.height) >
-          Math.max(24, Math.round(Math.max(left.height, right.height) * HEIGHT_TOLERANCE))
+          Math.max(
+            24,
+            Math.round(Math.max(left.height, right.height) * HEIGHT_TOLERANCE),
+          )
       ) {
         return {
           sizeMismatch: true,

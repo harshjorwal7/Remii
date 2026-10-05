@@ -29,8 +29,28 @@ import {
  * The probe below stands in for a tool handler: it is mounted with the surface
  * and read after that surface is gone, which is the shape of the failure.
  */
-beforeAll(() => GlobalRegistrator.register());
-afterAll(() => GlobalRegistrator.unregister());
+/*
+ * The act environment, set HERE rather than relied upon.
+ *
+ * `useActiveBot` declares the Bot from a `useEffect`, and React only flushes effects synchronously
+ * inside `act` when `IS_REACT_ACT_ENVIRONMENT` is set — which testing-library sets once for the whole
+ * process, when it loads. Every file in this suite runs in one process and several of them register
+ * and unregister a DOM, so whether the flag is up when this file mounts depends on the order the
+ * files happened to load in. With it down, `act` degrades to a pass-through, the effect goes to the
+ * scheduler instead, and this file failed on CI with `Expected: "bot-1"` while passing on a laptop
+ * running the same commit — for a test whose code is correct either way. Setting it here makes the
+ * file answer the same on its own, and clearing it afterwards leaves the next file as it found it.
+ */
+const ACT_ENVIRONMENT = "IS_REACT_ACT_ENVIRONMENT";
+
+beforeAll(() => {
+  (globalThis as Record<string, unknown>)[ACT_ENVIRONMENT] = true;
+  GlobalRegistrator.register();
+});
+afterAll(() => {
+  GlobalRegistrator.unregister();
+  delete (globalThis as Record<string, unknown>)[ACT_ENVIRONMENT];
+});
 
 /*
  * Unmount what this file rendered, before it unregisters the DOM.
