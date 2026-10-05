@@ -1474,7 +1474,14 @@ where
     Err(Problem::with(recording.said, detail))
 }
 
+/*
+ * `dead_code` AND `cfg(test)`: both callers are inside test blocks that only run on the platform the
+ * process-tree sweep belongs to, so on the other one this compiles as a helper nothing reaches — and
+ * clippy runs with `-D warnings` on every target, which turned a platform difference into a red
+ * workflow on the runners whose test blocks are compiled out.
+ */
 #[cfg(test)]
+#[allow(dead_code)]
 fn retire_host_processes<C>(shell: &Shell, root: &Path, cleanup: C) -> Result<usize, Problem>
 where
     C: FnOnce(&Path) -> Result<usize, Problem>,

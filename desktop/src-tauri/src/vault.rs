@@ -13,7 +13,7 @@ writes over stdin, since PowerShell reading the console to the end has no buffer
 */
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::problem::Problem;

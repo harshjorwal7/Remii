@@ -1661,11 +1661,6 @@ fn cleanup_result(stopped: usize, failures: Vec<Problem>) -> Result<usize, Probl
     Err(combined_cleanup_problem(failures))
 }
 
-#[cfg(not(unix))]
-fn taskkill_process_tree(pid: u32) -> Result<bool, Problem> {
-    taskkill_process_tree_with(Path::new("taskkill"), pid)
-}
-
 #[cfg(any(not(unix), test))]
 fn taskkill_process_tree_with(taskkill: &Path, pid: u32) -> Result<bool, Problem> {
     let operation = format!("{} /PID {pid} /T /F", taskkill.display());
