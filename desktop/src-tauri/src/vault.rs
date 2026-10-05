@@ -14,10 +14,6 @@ writes over stdin, since PowerShell reading the console to the end has no buffer
 
 use std::collections::BTreeMap;
 use std::io::Write;
-// Only the test helper reads through the trait; the import is unused in a plain library build, and
-// clippy runs with `-D warnings`, so it is scoped rather than removed.
-#[cfg(test)]
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::problem::Problem;
@@ -744,7 +740,11 @@ fn recall_secret_file(path: &Path) -> Result<Option<String>, Problem> {
         )
     })?;
     let mut value = String::new();
-    file.read_to_string(&mut value).map_err(|error| {
+    // Called through the trait by its full path rather than by an import, because whether this file
+    // needs `Read` in scope at all depends on which platform's build is compiling it: the import was
+    // "unused" on the runners where this code is cfg'd out and "missing" on the ones where it is not,
+    // and clippy runs with `-D warnings` on both.
+    std::io::Read::read_to_string(&mut file, &mut value).map_err(|error| {
         Problem::with(
             "Remii could not read your saved sign-in details on this computer.",
             format!("{}: {error}", path.display()),
