@@ -56,7 +56,7 @@ describe.skipIf(!asked || !hasKey)("live recall turn", () => {
         getApiKey: async () => process.env.OPENAI_API_KEY ?? null,
         environment: process.env,
       });
-      const cited: string[][] = [];
+      const _cited: string[][] = [];
       const agent = new RemiLoopAgent({
         botId: REMII_AGENT_ID,
         systemPrompt:
@@ -89,11 +89,11 @@ describe.skipIf(!asked || !hasKey)("live recall turn", () => {
         sub.subscribe({
           next: (event: unknown) => {
             const record = event as Record<string, unknown>;
-            if (typeof record["delta"] === "string") {
-              texts.push(record["delta"] as string);
+            if (typeof record.delta === "string") {
+              texts.push(record.delta as string);
             }
-            if (typeof record["message"] === "string" && record["message"]) {
-              texts.push(record["message"] as string);
+            if (typeof record.message === "string" && record.message) {
+              texts.push(record.message as string);
             }
           },
           complete: () => {
