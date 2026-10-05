@@ -24,7 +24,7 @@ import { existsSync } from "node:fs";
 const HERE = new URL(".", import.meta.url).pathname;
 const RENDER = `${HERE}render-sheet.ts`;
 const COMPARE = `${HERE}sheet.mjs`;
-const CHROME = "/usr/bin/google-chrome";
+const CHROME = process.env.SHEET_CHROME ?? "/usr/bin/google-chrome";
 
 function hasChrome() {
   return existsSync(CHROME);

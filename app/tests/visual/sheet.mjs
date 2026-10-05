@@ -28,8 +28,16 @@ import { existsSync } from "node:fs";
 const HERE = new URL(".", import.meta.url).pathname;
 const SHEET = `${HERE}sheet.html`;
 const COMMITTED = `${HERE}sheet.png`;
-const CHROME = "/usr/bin/google-chrome";
+const CHROME = process.env.SHEET_CHROME ?? "/usr/bin/google-chrome";
 
+/*
+ * WHICH CHROME, AND HOW TO SAY.
+ *
+ * `/usr/bin/google-chrome` is the answer on a machine and on CI, where the workflow installs a pinned
+ * Chrome for Testing build and links it there. `SHEET_CHROME` is the override for reproducing a
+ * committed picture locally with a specific build, which is what the workflow's own comment tells you
+ * to do when you bump the pin.
+ */
 /** Chrome's own path is a hard dependency of this file. Say so plainly rather than throwing ENOENT. */
 if (!existsSync(CHROME)) {
   console.error(
