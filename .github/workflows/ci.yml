@@ -239,6 +239,12 @@ jobs:
       # Bump the version deliberately, in the same commit as a regenerated `sheet.png`: run
       # `bun run app/tests/visual/render-sheet.ts` then `node app/tests/visual/sheet.mjs --update` with
       # the same build, and read the picture before committing it.
+      #
+      # THE COMPARISON IS NOT RUN HERE, and the browser above is installed for the rendering half
+      # only. A committed picture is only comparable where the fonts resolve to the same metrics; a CI
+      # runner does not, and the last attempt reported 13% of the pixels differing with nothing wrong
+      # with the mascot. `REMII_VISUAL` is what turns the comparison on, and the sheet rendered below
+      # is uploaded either way so a person can look at what this run produced.
       - name: Pin the browser the committed golden pictures were taken with
         run: |
           set -euo pipefail
@@ -256,6 +262,20 @@ jobs:
             *"$version"*) ;;
             *) echo "::error::pinned Chrome ${version} did not install (got: ${installed})"; exit 1;;
           esac
+      # WHAT THE APP LOOKS LIKE, from this runner, for a human to open. The comparison against the
+      # committed picture is opt-in and skipped here; the picture is not.
+      - name: Render the mascot sheet
+        if: always()
+        continue-on-error: true
+        run: |
+          bun run app/tests/visual/render-sheet.ts || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        continue-on-error: true
+        with:
+          name: mascot-sheet
+          path: app/tests/visual/sheet.html
+          retention-days: 7
       # A passing job must include the expected test floor. Import-time failures can otherwise skip
       # files before their tests are registered.
       - run: bun run test:ci

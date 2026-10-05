@@ -7,6 +7,7 @@ import {
   test,
 } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import type { ReactElement } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import {
   ActiveBotProvider,
@@ -89,10 +90,26 @@ const read = () => held.holder?.current ?? "unread";
  * holder rather than about how the host happened to schedule React's work.
  */
 async function declares(view: () => string, expected: string) {
-  // Five seconds, not the one second `waitFor` defaults to. React flushes this effect through its
-  // scheduler, which is a macrotask competing with everything else on a loaded CI runner, and the
-  // first version of this file failed there by giving up before the callback ran.
   await waitFor(() => expect(view()).toBe(expected), { timeout: 5000 });
+}
+
+/**
+ * Mount inside React's own `act`, so the declaring effect has run when this returns.
+ *
+ * Testing-library wraps `render` in `act` too, but the effect this file is about was reaching the
+ * scheduler instead of running on the spot, and only on CI: `app/tests/preload.ts` registers a DOM,
+ * lets React resolve its browser scheduler against it, and then takes the DOM away again, so what is
+ * left is a scheduler whose callbacks depend on globals this file has since replaced. `act` from
+ * `react`, with the environment flag set in `beforeAll`, flushes effects on exit regardless of which
+ * scheduler React picked at import time.
+ */
+async function mounted(node: ReactElement) {
+  let view: ReturnType<typeof render> | undefined;
+  await act(async () => {
+    view = render(node);
+  });
+  if (!view) throw new Error("render returned nothing inside act");
+  return view;
 }
 
 /** A macrotask, for the reads that must happen AFTER an unmount rather than after a mount. */
@@ -114,7 +131,7 @@ function Surface({ botId }: { botId: string | undefined }) {
 
 describe("a Bot declared by a surface that has gone away", () => {
   test("is still what a pending tool call is addressed to", async () => {
-    const view = render(
+    const view = await mounted(
       <ActiveBotProvider>
         <Surface botId="bot-1" />
         <Probe />
@@ -134,7 +151,7 @@ describe("a Bot declared by a surface that has gone away", () => {
   test("a second surface still takes the value for itself", async () => {
     // The restore exists so one channel cannot leave its Bot addressed to
     // whatever mounts next, and that has to keep working.
-    const first = render(
+    const first = await mounted(
       <ActiveBotProvider>
         <Surface botId="bot-1" />
         <Probe />
@@ -157,7 +174,7 @@ describe("a Bot declared by a surface that has gone away", () => {
     // Before anything has declared a Bot there is nothing to stand on, and the
     // placeholder is the honest answer: the tool refuses it with its own
     // sentence rather than addressing a Bot that does not exist.
-    render(
+    await mounted(
       <ActiveBotProvider>
         <Surface botId={undefined} />
         <Probe />
