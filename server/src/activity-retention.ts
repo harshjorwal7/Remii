@@ -1,4 +1,4 @@
-import postgres from "postgres";
+import { createUnpooledConnection } from "./db/unpooled";
 
 /**
  * Keep `run_activity` to a window.
@@ -47,7 +47,7 @@ export async function sweepRunActivity(
     return { deleted: null };
   }
 
-  const connection = postgres(databaseUrl, { max: 1 });
+  const connection = createUnpooledConnection(databaseUrl);
 
   try {
     const [lock] = await connection`

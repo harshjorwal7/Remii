@@ -126,7 +126,7 @@ and everything else here.
 | Variable | |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL with the `vector` extension. Not needed with `EMBEDDED_POSTGRES=on` |
-| an identity provider | `GOOGLE_OAUTH_*`, `MICROSOFT_OAUTH_*` or `OKTA_OAUTH_*`, with `BETTER_AUTH_URL` and `BETTER_AUTH_SECRET`. See the README |
+| an identity provider | `NEON_AUTH_BASE_URL`, the address Neon Auth is reached at. `neon link` then `neon deploy` writes it into `.env`. See [configuration](configuration.md#authentication) |
 | `EMBEDDED_POSTGRES` | `on` to run the database inside the container. Off by default |
 | `KEY_ENCRYPTION_KEY` | base64 32 bytes. `openssl rand -base64 32`. The example key is refused in production |
 | a model key | `OPENAI_API_KEY`, or the provider you configured |

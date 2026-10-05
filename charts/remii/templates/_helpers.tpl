@@ -258,8 +258,6 @@ and in whatever holds the release, which is not where `KEY_ENCRYPTION_KEY` belon
 {{- if .Values.config.publicUrl }}
 - name: REMII_PUBLIC_URL
   value: {{ .Values.config.publicUrl | quote }}
-- name: BETTER_AUTH_URL
-  value: {{ .Values.config.publicUrl | quote }}
 {{- end }}
 {{- if .Values.config.singleUser }}
 - name: REMII_SINGLE_USER
@@ -353,61 +351,28 @@ and in whatever holds the release, which is not where `KEY_ENCRYPTION_KEY` belon
       name: {{ include "remii.secretName" $ }}
       key: managed-agent-token
 {{- end }}
-{{- with .Values.config.auth.google.clientId }}
-- name: GOOGLE_OAUTH_CLIENT_ID
-  value: {{ . | quote }}
-- name: GOOGLE_OAUTH_CLIENT_SECRET
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "remii.secretName" $ }}
-      key: google-client-secret
-{{- end }}
-{{- with .Values.config.auth.microsoft.clientId }}
-- name: MICROSOFT_OAUTH_CLIENT_ID
-  value: {{ . | quote }}
-- name: MICROSOFT_OAUTH_CLIENT_SECRET
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "remii.secretName" $ }}
-      key: microsoft-client-secret
-{{- end }}
-{{- with .Values.config.auth.microsoft.tenantId }}
-- name: MICROSOFT_OAUTH_TENANT_ID
+{{- /*
+  Sign-in is Neon Auth, and this is the whole of it: one address, no secret.
+
+  There is no client id or client secret to template because there is no credential in this chart to
+  hold. The provider owns its OAuth clients, its session secret and its trusted-origin list, per
+  branch, so the only thing a deployment has to say is where to reach it. A chart that still took a
+  Google client secret would be storing a credential that nothing reads, which is worse than not
+  storing it: it looks like the thing that makes sign-in work.
+*/}}
+{{- with .Values.config.auth.neonAuthBaseUrl }}
+- name: NEON_AUTH_BASE_URL
   value: {{ . | quote }}
 {{- end }}
-{{- with .Values.config.auth.okta.clientId }}
-- name: OKTA_OAUTH_CLIENT_ID
-  value: {{ . | quote }}
-- name: OKTA_OAUTH_CLIENT_SECRET
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "remii.secretName" $ }}
-      key: okta-client-secret
-{{- end }}
-{{- with .Values.config.auth.okta.issuer }}
-- name: OKTA_OAUTH_ISSUER
-  value: {{ . | quote }}
+{{- if .Values.config.auth.emailPassword }}
+- name: AUTH_EMAIL_PASSWORD
+  value: "true"
 {{- end }}
 - name: KEY_ENCRYPTION_KEY
   valueFrom:
     secretKeyRef:
       name: {{ include "remii.secretName" . }}
       key: key-encryption-key
-{{- /*
-  Optional only while it genuinely is.
-  
-  With no identity provider there is no sign-in and nothing to sign, so an absent key is correct.
-  With one configured the server refuses to start without it, and `optional: true` turned that into a
-  crash loop rather than a container that says which key is missing. It also hid the whole path from
-  the render check, which skips optional keys: a deployment supplying its own Secret without this in
-  it rendered clean and then never came up.
-*/}}
-- name: BETTER_AUTH_SECRET
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "remii.secretName" . }}
-      key: better-auth-secret
-      optional: {{ not (or .Values.config.auth.google.clientId .Values.config.auth.microsoft.clientId .Values.config.auth.okta.clientId) }}
 - name: OPENAI_API_KEY
   valueFrom:
     secretKeyRef:

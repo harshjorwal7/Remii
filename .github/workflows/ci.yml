@@ -141,6 +141,11 @@ jobs:
           fi
           # A Bot endpoint with nothing on the request that says who is calling. Armed whether the
           # secret is this chart's or a store's, because the key list is readable either way.
+          # A sign-in address the browser cannot keep a cookie for. The provider mints a
+          # __Secure- prefixed cookie and a browser refuses one that did not arrive over TLS, so an
+          # http:// address produces a sign-in that appears to work and leaves no session.
+          refuses "a sign-in provider on a plain-HTTP address" \
+            --set-string config.auth.neonAuthBaseUrl=http://auth.internal/neondb/auth
           refuses "a managed agent URL with no token" \
             --set-string config.managedAgent.url=http://agent.default:8000/ag-ui
           # A browser inside every replica of a replicated API.
@@ -194,6 +199,12 @@ jobs:
     env:
       DATABASE_URL: postgres://remii:remii@localhost:5432/remii_test
       TEST_DATABASE_URL: postgres://remii:remii@localhost:5432/remii_test
+      # Sign-in is Neon Auth, a hosted provider, and there is nothing to reach in CI. An address that
+      # resolves to nothing keeps `loadConfig` on the branch that refuses to come up without one —
+      # which is the branch several of these tests exist to check — while every test that actually
+      # needs a session builds its own `AuthService` and passes it to `createApp`. Nothing here calls
+      # out to the network.
+      NEON_AUTH_BASE_URL: https://ep-ci.invalid/neondb/auth
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

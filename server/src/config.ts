@@ -6,7 +6,6 @@
 
 import { join } from "node:path";
 import { singleUserEnabled } from "./auth/dev-actor";
-import type { EmailServiceConfig } from "./auth/email";
 import type { ActionPolicy } from "./computer/policy";
 import { parseActionPolicy } from "./computer/policy-store";
 
@@ -125,14 +124,12 @@ export type ComputerConfig =
 /**
  * Who a deployment lets in, and through which front door.
  *
- * One identity provider is a product decision somebody else already made. A company running this
- * has Google or Entra or Okta and is not going to acquire another, so the shape here is a set of
- * optional providers rather than one required one, and the deployment turns on whichever it has.
+ * These are the ids the identity provider admits. Microsoft and Okta are gone because this product
+ * serves individuals directly rather than companies behind a directory, and the provider offers no
+ * route to either — `MICROSOFT_OAUTH_*` and `OKTA_OAUTH_*` are no longer read, and configuring them
+ * has no effect rather than a partial one.
  */
-export type AuthProviderId = "google" | "github" | "microsoft" | "okta";
-
-/** An OAuth client, as every provider here needs one. */
-export type OAuthClient = { clientId: string; clientSecret: string };
+export type AuthProviderId = "google" | "github" | "vercel";
 
 export type TurnstileConfig = {
   secretKey: string;
@@ -140,26 +137,41 @@ export type TurnstileConfig = {
 };
 
 export type AuthConfig = {
-  baseUrl: string;
-  secret: string;
-  trustedOrigins: string[];
-  google?: OAuthClient;
-  github?: OAuthClient;
   /**
-   * `tenantId` decides who may sign in at all, so it is not a detail. `common` admits any Microsoft
-   * account including personal ones, `organizations` any work or school account anywhere, and a GUID
-   * admits one directory. A deployment that wants only its own company needs the GUID.
+   * The Managed Better Auth endpoint that is this deployment's identity provider.
+   *
+   * Replaces the `baseUrl`/`secret`/`trustedOrigins`/per-provider-client fields this type used to
+   * carry. Those were all inputs to a Better Auth instance running inside this process; a hosted
+   * provider holds the client secrets and the session secret on its own side, so there is nothing
+   * left to configure here beyond where to reach it and what to call ourselves.
    */
-  microsoft?: OAuthClient & { tenantId: string };
-  /** Okta is an OIDC provider rather than a named one, so it is identified by its issuer. */
-  okta?: OAuthClient & { issuer: string };
-  email?: EmailServiceConfig;
+  neonAuthUrl: string;
   /**
-   * Email (or username) plus password sign-in, Remi-style. Enabled explicitly with
-   * `AUTH_EMAIL_PASSWORD=true`; unlike the OAuth providers it needs no vendor client, only
-   * the session secret and base URL below. Counts as an identity provider: setting it turns
-   * single-user mode off and requires sign-in.
+   * This deployment's own public address, sent as `Origin` on every call to the provider.
+   *
+   * The provider answers CORS from an allowlist it keeps per branch, and an origin missing from it is
+   * refused — so this is not decoration. See `auth/neon.ts`.
    */
+  origin: string;
+  /**
+   * The social providers this deployment offers, as the provider spells them.
+   *
+   * Read from `neon_auth.project_config` rather than configured, because the provider decides what
+   * it will accept and a list written here would be a second thing to keep in step with it. Neon
+   * Auth admits `google`, `github` and `vercel`; nothing else reaches it, which is why there is no
+   * Microsoft, Okta or company-SSO path left in this product.
+   */
+  socialProviders: AuthProviderId[];
+  /**
+   * Whether the provider requires a verified address before the account is usable.
+   *
+   * The provider's own answer, read out of `neon_auth.project_config`, and it decides one thing:
+   * whether a computer may be driven by somebody whose address is not verified. It is on this type
+   * rather than read at the one place it is used because reading a database row from inside a route
+   * middleware is a per-request query for an answer that changes when an administrator changes it,
+   * not per request.
+   */
+  emailVerificationRequired?: boolean;
   emailPassword?: boolean;
   turnstile?: TurnstileConfig;
 };
@@ -167,20 +179,14 @@ export type AuthConfig = {
 /**
  * The providers this deployment can actually sign somebody in with.
  *
- * Ordered, and deliberately not alphabetically: this is the order the buttons appear in, and it is
- * fixed here rather than left to object key order so the sign-in screen cannot change shape because
- * of how a configuration happened to be written.
+ * The provider's list, in its order. It used to be assembled here from whichever OAuth clients a
+ * deployment had configured, which meant the sign-in screen's buttons were decided by this process;
+ * now the provider decides, and this only reports what it was told.
  */
 export function configuredAuthProviders(
   auth: AuthConfig | undefined,
 ): AuthProviderId[] {
-  if (!auth) return [];
-  const providers: AuthProviderId[] = [];
-  if (auth.google) providers.push("google");
-  if (auth.github) providers.push("github");
-  if (auth.microsoft) providers.push("microsoft");
-  if (auth.okta) providers.push("okta");
-  return providers;
+  return auth ? [...auth.socialProviders] : [];
 }
 
 /** Whether anybody must sign in: an OAuth provider or email-plus-password is configured. */
@@ -251,6 +257,20 @@ export type DeploymentConfig = {
   /** The port the API listens on. Named `PORT` or `SERVER_PORT`; see `serverPort`. */
   port: number;
   databaseUrl: string;
+  /**
+   * The connection that must NOT be pooled, for the work a pooler breaks.
+   *
+   * `LISTEN` and session-scoped advisory locks are both properties of one socket. A pooler is free
+   * to hand the next query to a different backend session, so a notification lands on a connection
+   * nobody is reading and a lock taken for a sweep is released by the pool before the sweep ends.
+   * `activity/listen.ts`, `channels/events.ts`, `computer/policy-listener.ts` and `work/queue.ts`
+   * therefore run on this one, and so do the two retention sweeps.
+   *
+   * Unset on a deployment that is not behind a pooler, which is every local one: the single URL is
+   * then its own answer. A provider that offers only a pooled endpoint has nothing to put here,
+   * which is worth knowing before trusting this to be set.
+   */
+  databaseUrlUnpooled: string;
   keyEncryptionKey: string;
   /**
    * Authentication for the bundled Bot and/or the installed picked harness.
@@ -337,9 +357,15 @@ export type DeploymentConfig = {
    * nobody, and a table nobody reads is still a table somebody pays to store.
    */
   activityRetentionDays: number;
-  oauth: {
-    google?: { clientId: string; clientSecret: string };
-  };
+  /*
+   * Sign-in for this product's own integrations, as distinct from `auth` above.
+   *
+   * Was `oauth.google`, the client this process used to hold for sign-in. That credential belongs to
+   * the identity provider now, so the field is gone with its only consumer. It is kept as an empty
+   * object rather than removed because `DeploymentConfig` is spread into fixtures across the test
+   * suite and deleting a required key would touch every one of them for no gain.
+   */
+  oauth: Record<string, never>;
   auth?: AuthConfig;
   /**
    * Admit everybody as one fixed administrator instead of requiring sign-in.
@@ -632,24 +658,6 @@ function managedAgentConfig(
   };
 }
 
-function oauthClient(
-  environment: Environment,
-  provider: "GOOGLE" | "MICROSOFT" | "OKTA",
-): OAuthClient | undefined {
-  const clientId = optional(environment, `${provider}_OAUTH_CLIENT_ID`);
-  const clientSecret = optional(environment, `${provider}_OAUTH_CLIENT_SECRET`);
-
-  // Both or neither. One alone is a half-configured sign-in that fails at the first attempt rather
-  // than at start-up, which is the worst moment to discover it.
-  if (Boolean(clientId) !== Boolean(clientSecret)) {
-    throw new Error(
-      `${provider}_OAUTH_CLIENT_ID and ${provider}_OAUTH_CLIENT_SECRET must be set together`,
-    );
-  }
-
-  return clientId && clientSecret ? { clientId, clientSecret } : undefined;
-}
-
 function commaSeparated(environment: Environment, name: string): string[] {
   return (optional(environment, name) ?? "")
     .split(",")
@@ -658,147 +666,107 @@ function commaSeparated(environment: Environment, name: string): string[] {
 }
 
 /**
- * Outbound email for verification codes and resets (Resend or SendGrid).
- *
- * Absent means the dev simulation in auth/email.ts logs instead of sending. Email verification
- * is only required when this is configured (see createAuth): without a way to deliver a code,
- * requiring one would lock everybody out on first signup.
- */
-function emailConfig(environment: Environment): EmailServiceConfig | undefined {
-  const provider = optional(environment, "EMAIL_PROVIDER");
-  const apiKey = optional(environment, "EMAIL_API_KEY");
-  const from = optional(environment, "EMAIL_FROM");
-  if (!provider && !apiKey && !from) return undefined;
-  if (provider !== "resend" && provider !== "sendgrid") {
-    throw new Error(
-      'EMAIL_PROVIDER must be "resend" or "sendgrid" (with EMAIL_API_KEY and EMAIL_FROM).',
-    );
-  }
-  if (!apiKey || !from) {
-    throw new Error(
-      "EMAIL_PROVIDER is set but EMAIL_API_KEY or EMAIL_FROM is missing.",
-    );
-  }
-  return { provider, apiKey, from };
-}
-
-/**
  * Sign-in, if this deployment has an identity provider to sign people in with.
  *
- * Any one of these turns authentication on: Google, Microsoft, Okta, or email-plus-password
- * (`AUTH_EMAIL_PASSWORD=true`, which needs no vendor client). More than one is allowed.
+ * `NEON_AUTH_BASE_URL` is the whole configuration now. The provider holds the OAuth clients, the
+ * session secret and the trusted-origin allowlist on its own side, per branch, so a deployment that
+ * set `GOOGLE_OAUTH_CLIENT_ID` here was writing a credential into a process that no longer reads it.
  *
- * Every combination that cannot work refuses at start-up rather than at somebody's first attempt to
- * sign in, which is the worst moment to discover it: a provider with half its credentials, a
- * provider with no session secret to mint against, or a session secret configured with no provider
- * to use it.
+ * `AUTH_EMAIL_PASSWORD` is still read, because it is a statement about the product rather than a
+ * credential: it says whether the sign-in screen draws a password form. The provider's own setting
+ * decides whether one would work, and `index.ts` overrides this from what the provider reports so
+ * the form and the provider cannot disagree about whether one exists.
  */
-function authConfig(
-  environment: Environment,
-  google: OAuthClient | undefined,
-): AuthConfig | undefined {
-  const microsoft = microsoftAuth(environment);
-  const okta = oktaAuth(environment);
+function authConfig(environment: Environment): AuthConfig | undefined {
+  const neonAuthUrl = optional(environment, "NEON_AUTH_BASE_URL");
   const emailPassword =
     environment.AUTH_EMAIL_PASSWORD?.trim() === "true" || undefined;
-  const email = emailConfig(environment);
 
-  const secret = optional(environment, "BETTER_AUTH_SECRET");
-  const baseUrl = url(environment, "BETTER_AUTH_URL");
-
-  if (!google && !microsoft && !okta && !emailPassword) {
-    if (secret || baseUrl) {
+  if (!neonAuthUrl) {
+    if (emailPassword) {
       throw new Error(
-        "BETTER_AUTH_SECRET or BETTER_AUTH_URL is set but no identity provider is. Configure GOOGLE_OAUTH_*, MICROSOFT_OAUTH_*, OKTA_OAUTH_* or AUTH_EMAIL_PASSWORD=true, or unset both",
+        "AUTH_EMAIL_PASSWORD is set but NEON_AUTH_BASE_URL is not. Sign-in needs the identity provider: run `neon deploy` with `auth: true` in neon.ts, or unset AUTH_EMAIL_PASSWORD to run without sign-in.",
       );
     }
     return undefined;
   }
-  if (!secret) {
-    throw new Error("Sign-in requires BETTER_AUTH_SECRET");
-  }
-  if (secret.length < 32) {
-    throw new Error("BETTER_AUTH_SECRET must be at least 32 characters");
-  }
-  if (!baseUrl) {
-    throw new Error("Sign-in requires BETTER_AUTH_URL");
+
+  if (!/^https:\/\//.test(neonAuthUrl)) {
+    throw new Error(
+      "NEON_AUTH_BASE_URL must be an https:// address. The provider holds the session cookie as Secure, and a plain-HTTP endpoint cannot store it.",
+    );
   }
 
   /*
-   * Individual-user SaaS has no administrators: every account that can
-   * authenticate may sign in, and its own data is the only thing it can
-   * reach. INITIAL_ADMIN_EMAILS is retired — if it is still set, it is
-   * ignored rather than honoured, because honouring it would silently grant
-   * one address power over every other user's data.
+   * Individual-user SaaS has no administrators: every account that can authenticate may sign in, and
+   * its own data is the only thing it can reach. Retired, and refused rather than ignored now — the
+   * old behaviour warned and carried on, which left a setting that looks live and is not.
    */
   if (commaSeparated(environment, "INITIAL_ADMIN_EMAILS").length > 0) {
-    console.warn(
-      "INITIAL_ADMIN_EMAILS is set, but this deployment has no administrator role: every user is sovereign over their own data, and the list is ignored. Remove it from the environment.",
-    );
-  }
-
-  return {
-    baseUrl,
-    secret,
-    trustedOrigins: commaSeparated(environment, "TRUSTED_ORIGINS").length
-      ? commaSeparated(environment, "TRUSTED_ORIGINS")
-      : /*
-         * All three spellings of the same place, because this is an allowlist of what a browser
-         * sends and not an address anything dials. `localhost` alone refused a browser pointed at
-         * `127.0.0.1:3010`, which is the address the rest of this deployment hands out.
-         */
-        ["http://127.0.0.1:3010", "http://[::1]:3010", "http://localhost:3010"],
-    ...(google ? { google } : {}),
-    ...(microsoft ? { microsoft } : {}),
-    ...(okta ? { okta } : {}),
-    ...(emailPassword ? { emailPassword } : {}),
-    ...(email ? { email } : {}),
-  };
-}
-
-/**
- * Entra ID, and which directory it admits.
- *
- * `common` by default, matching Microsoft's own default, and said out loud in `.env.example` because
- * it admits personal Microsoft accounts as well as work ones. A company that means "our staff"
- * wants its directory GUID here.
- */
-function microsoftAuth(
-  environment: Environment,
-): (OAuthClient & { tenantId: string }) | undefined {
-  const client = oauthClient(environment, "MICROSOFT");
-  if (!client) return undefined;
-  return {
-    ...client,
-    tenantId: optional(environment, "MICROSOFT_OAUTH_TENANT_ID") ?? "common",
-  };
-}
-
-/**
- * Okta, which is an OIDC provider rather than a named one.
- *
- * The issuer is what makes it a particular Okta rather than Okta in general, so it is required
- * alongside the credentials rather than defaulted to anything.
- */
-function oktaAuth(
-  environment: Environment,
-): (OAuthClient & { issuer: string }) | undefined {
-  const client = oauthClient(environment, "OKTA");
-  const issuer = url(environment, "OKTA_OAUTH_ISSUER");
-  if (!client) {
-    if (issuer) {
-      throw new Error(
-        "OKTA_OAUTH_ISSUER is set but OKTA_OAUTH_CLIENT_ID and OKTA_OAUTH_CLIENT_SECRET are not",
-      );
-    }
-    return undefined;
-  }
-  if (!issuer) {
     throw new Error(
-      "Okta sign-in requires OKTA_OAUTH_ISSUER, such as https://example.okta.com/oauth2/default",
+      "INITIAL_ADMIN_EMAILS is set, but this deployment has no administrator role: every user is sovereign over their own data. Remove it from the environment.",
     );
   }
-  return { ...client, issuer };
+
+  /*
+   * Which buttons to draw is the provider's answer, not ours.
+   *
+   * Read once in `index.ts` from `neon_auth.project_config` and written here, rather than this
+   * function querying a database — `loadConfig` is synchronous and takes an environment, not a
+   * pool. `NEON_AUTH_PROVIDERS` overrides it for a branch whose provider has none configured, which
+   * is the one case where the default would be a lie.
+   */
+  const override = commaSeparated(environment, "NEON_AUTH_PROVIDERS");
+  const socialProviders = override.length > 0 ? override : ["google"];
+
+  /*
+   * The origin this deployment answers the provider with, which cannot be absent here.
+   *
+   * `publicOrigin` returns undefined for a deployment with no configured address, and that is what
+   * lets `broker.ts` refuse to mint a connection link pointing at a machine that is not this one. It
+   * cannot happen on this path: `NEON_AUTH_BASE_URL` is set by this point and `publicOrigin` answers
+   * for exactly that reason. Refused rather than defaulted, because a wrong answer to "what origin
+   * does the provider think I am" surfaces as a CORS failure on somebody's first sign-in rather than
+   * as a type error here.
+   */
+  const origin = publicOrigin(environment);
+  if (!origin) {
+    throw new Error(
+      "NEON_AUTH_BASE_URL is set but REMII_PUBLIC_URL is empty, so there is no origin to reach the identity provider with. Set REMII_PUBLIC_URL to the address this deployment is served from.",
+    );
+  }
+
+  return {
+    neonAuthUrl: neonAuthUrl.replace(/\/+$/, ""),
+    origin,
+    socialProviders: socialProviders.filter(
+      (provider): provider is AuthProviderId =>
+        provider === "google" || provider === "github" || provider === "vercel",
+    ),
+    ...(emailPassword ? { emailPassword } : {}),
+  };
+}
+
+/**
+ * This deployment's own address, which is what the provider is told the caller is.
+ *
+ * `REMII_PUBLIC_URL` when set. Otherwise the address the sign-in screen is served from in local
+ * development — but only when there is an identity provider to be an origin for. The localhost default
+ * is the app's dev port rather than the API's, because what the provider checks is the origin of the
+ * page whose session is being read, and that is the page the browser loaded.
+ *
+ * UNDEFINED when there is no provider and nothing was configured, and that is deliberate rather than a
+ * gap. An address that Composio sends somebody back to has to be one a browser can reach, and a
+ * deployment with no configured address has none: answering with a localhost default would mint a
+ * connection link pointing at a machine that is not this one, and the person who follows it lands
+ * nowhere. `broker.ts` refuses that case, and this is what gives it something to refuse.
+ */
+function publicOrigin(environment: Environment): string | undefined {
+  const configured = optional(environment, "REMII_PUBLIC_URL");
+  if (configured) return configured.replace(/\/+$/, "");
+  return optional(environment, "NEON_AUTH_BASE_URL")
+    ? "http://localhost:3010"
+    : undefined;
 }
 
 /**
@@ -1296,27 +1264,30 @@ function readRealValue(
 export function loadConfig(
   environment: Environment = process.env,
 ): DeploymentConfig {
-  const google = oauthClient(environment, "GOOGLE");
-  const auth = authConfig(environment, google);
+  const auth = authConfig(environment);
   const managedAgent = managedAgentConfig(environment);
   const workerSharedSecret = optional(environment, "WORKER_SHARED_SECRET");
 
   return {
     port: serverPort(environment),
     databaseUrl: required(environment, "DATABASE_URL"),
+    // Falls back to the pooled URL rather than demanding a second one: a deployment with a single
+    // direct connection is correct without it, and a deployment that is behind a pooler and has
+    // forgotten this gets one URL instead of a startup failure, which is the failure that is easy
+    // to miss and expensive to notice, because LISTEN that does not fire looks like nobody spoke.
+    databaseUrlUnpooled:
+      optional(environment, "DATABASE_URL_UNPOOLED")?.trim() ||
+      required(environment, "DATABASE_URL"),
     keyEncryptionKey: keyEncryptionKey(environment),
     ...(managedAgent ? { managedAgent } : {}),
 
     deploymentId: optional(environment, "DEPLOYMENT_ID"),
     composioApiKey: optional(environment, "COMPOSIO_API_KEY"),
-    publicUrl: (
-      optional(environment, "REMII_PUBLIC_URL") ?? auth?.baseUrl
-    )?.replace(/\/+$/, ""),
+    publicUrl: publicOrigin(environment),
     appUrl: (
       optional(environment, "REMII_APP_URL") ??
       commaSeparated(environment, "TRUSTED_ORIGINS")[0] ??
-      optional(environment, "REMII_PUBLIC_URL") ??
-      auth?.baseUrl
+      publicOrigin(environment)
     )?.replace(/\/+$/, ""),
     tenantPackageDirectory:
       optional(environment, "TENANT_PACKAGE_DIR") ?? "../examples/fintech",
@@ -1324,7 +1295,7 @@ export function loadConfig(
     agentStallTimeoutMs: agentStallTimeoutMs(environment),
     auditRetentionDays: auditRetentionDays(environment),
     activityRetentionDays: activityRetentionDays(environment),
-    oauth: { google },
+    oauth: {},
     auth,
     singleUser: singleUserEnabled(environment, hasIdentityProvider(auth)),
     accessibility: accessibilityEnabled(environment),

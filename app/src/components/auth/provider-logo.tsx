@@ -1,20 +1,27 @@
 import type { AuthProviderId } from "@/lib/auth/queries";
 
 /**
- * The mark each identity provider requires on a sign-in button.
+ * The mark the identity provider requires on a sign-in button.
  *
- * Drawn inline rather than fetched. These sit on the one screen somebody reaches before they have a
+ * Drawn inline rather than fetched. This sits on the one screen somebody reaches before they have a
  * session, so a mark that arrives over the network is a mark that can be missing exactly when the
  * page has to be trustworthy, and a request to a third party from an unauthenticated page is a
  * request nobody asked for.
  *
- * Reproduced at their published colours because two of the three require it. Google's guidelines say
- * the standard colour G, at its own aspect ratio, neither recoloured nor restretched, and Microsoft
- * publish the four squares the same way. They are trade marks used to say "this button signs you in
- * with them", which is what the guidelines are for.
+ * Reproduced at its published colours because Google requires it: their guidelines say the standard
+ * colour G, at its own aspect ratio, neither recoloured nor restretched. It is a trade mark used to
+ * say "this button signs you in with them", which is what the guidelines are for.
  *
- * All three are drawn into the same 18x18 box so the buttons line up. Google's G is not square, so
- * it is centred in the box rather than stretched to fill it.
+ * Drawn into the 18x18 box the button reserves for it. Google's G is not square, so it is centred
+ * rather than stretched to fill.
+ *
+ * Google is the only mark. The identity provider admits `google`, `github` and `vercel`; Microsoft
+ * and Okta are gone from this product, which serves individuals rather than companies behind a
+ * directory. `github` and `vercel` are not drawn because their branding guidelines forbid the mark
+ * being reproduced — Vercel's says to use its own button component, and GitHub's asks for a link
+ * rather than a button. A branch configured with either would render this button's label with the
+ * Google mark, which is wrong, and `sign.tsx` is where that should be handled rather than guessed at
+ * here.
  */
 export function ProviderLogo({
   dataIcon,
@@ -28,10 +35,22 @@ export function ProviderLogo({
   dataIcon?: string;
   provider: AuthProviderId;
 }) {
+  /*
+   * Google's mark, and nothing else.
+   *
+   * `github` and `vercel` return null rather than the Google mark. Both publish branding guidelines
+   * that forbid reproducing them — Vercel's says to use its own button component and GitHub's asks
+   * for a link rather than a button — so drawing something would be the one thing guaranteed to be
+   * wrong, and showing Google's G on a GitHub button would tell somebody they were signing in with
+   * the wrong company.
+   *
+   * Null leaves the button without a mark, which is honest and keeps the label readable: `sign.tsx`
+   * reserves the space either way, so the text does not shift when a mark appears.
+   */
+  if (provider !== "google") return null;
+
   const attrs = dataIcon === undefined ? {} : { "data-icon": dataIcon };
-  if (provider === "google") return <GoogleMark {...attrs} />;
-  if (provider === "microsoft") return <MicrosoftMark {...attrs} />;
-  return <OktaMark {...attrs} />;
+  return <GoogleMark {...attrs} />;
 }
 
 /** Google's four-colour G, at the published path and colours. */
@@ -60,51 +79,6 @@ function GoogleMark(attrs: Record<string, string> = {}) {
       <path
         d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"
         fill="#EA4335"
-      />
-    </svg>
-  );
-}
-
-/** Microsoft's four squares, at their published colours. */
-function MicrosoftMark(attrs: Record<string, string> = {}) {
-  return (
-    <svg
-      aria-hidden="true"
-      className="size-[18px]"
-      focusable="false"
-      viewBox="0 0 23 23"
-      xmlns="http://www.w3.org/2000/svg"
-      {...attrs}
-    >
-      <path d="M1 1h10v10H1z" fill="#F25022" />
-      <path d="M12 1h10v10H12z" fill="#7FBA00" />
-      <path d="M1 12h10v10H1z" fill="#00A4EF" />
-      <path d="M12 12h10v10H12z" fill="#FFB900" />
-    </svg>
-  );
-}
-
-/**
- * Okta's circular mark.
- *
- * `currentColor` rather than Okta blue, which is the one difference between this and the other two.
- * Okta is not a consumer sign-in button somebody recognises by colour; it is whichever Okta the
- * company running this deployment happens to use, and their guidelines allow a monochrome mark. It
- * also means it stays legible in both themes without a second asset.
- */
-function OktaMark(attrs: Record<string, string> = {}) {
-  return (
-    <svg
-      aria-hidden="true"
-      className="size-[18px]"
-      focusable="false"
-      viewBox="0 0 24 24"
-      xmlns="http://www.w3.org/2000/svg"
-      {...attrs}
-    >
-      <path
-        d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 15a5 5 0 1 1 0-10 5 5 0 0 1 0 10z"
-        fill="currentColor"
       />
     </svg>
   );

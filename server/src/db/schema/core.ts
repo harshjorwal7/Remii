@@ -68,9 +68,27 @@ export const users = pgTable("users", {
   /**
    * Optional login name (Remi auth). Null means the person signs in with email only.
    * Unique where present; several people without one coexist because nulls never collide.
+   *
+   * Unreachable now. Sign-in is Neon Auth, which has no username provider, so nothing writes this
+   * and the sign-in screen no longer offers a field for it. The column stays because dropping it
+   * would rewrite the table for 2 rows and gain nothing: the ids and any names captured before the
+   * switch are still here, and a later provider that wants a login name has somewhere to put it.
    */
   username: text("username").unique(),
   displayUsername: text("display_username"),
+  /**
+   * This person's id in `neon_auth.user`, once they have signed in.
+   *
+   * Null for anyone who has not, which after the switch to Neon Auth is nobody who can sign in.
+   * Unique where present, so one Neon identity is one product account, and the pair is how a repeat
+   * sign-in finds the row that 39 foreign keys already point at instead of making a second one.
+   *
+   * Not the primary key, and that is deliberate: `id` is this product's own identifier and predates
+   * Neon. Re-keying 39 columns and every row in them to match a UUID a provider assigned would risk
+   * exactly the data loss the migration was meant to avoid, for no gain — a join resolves this
+   * either way.
+   */
+  neonAuthUserId: text("neon_auth_user_id").unique(),
   /**
    * The person's groups, for a group-based rule to be evaluated against.
    *

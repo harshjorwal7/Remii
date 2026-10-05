@@ -154,53 +154,51 @@ Two things are worth knowing before pointing a deployment at any gateway. Not ev
 
 ## Authentication
 
-| Variable                     | Meaning                                                                                |
-| ---------------------------- | -------------------------------------------------------------------------------------- |
-| `REMII_SINGLE_USER`        | One fixed local user and no sign-in. **Required** when no identity provider is configured, or the deployment refuses to start. Ignored when one is. |
-| `GOOGLE_OAUTH_CLIENT_ID`     | Google OAuth client id.                                                                |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | Google OAuth client secret.                                                            |
-| `MICROSOFT_OAUTH_CLIENT_ID`  | Microsoft Entra ID application id.                                                     |
-| `MICROSOFT_OAUTH_CLIENT_SECRET` | Microsoft Entra ID client secret.                                                   |
-| `MICROSOFT_OAUTH_TENANT_ID`  | Directory to admit. `common` by default, which admits personal accounts too; a GUID admits one directory. |
-| `OKTA_OAUTH_CLIENT_ID`       | Okta client id.                                                                        |
-| `OKTA_OAUTH_CLIENT_SECRET`   | Okta client secret.                                                                    |
-| `OKTA_OAUTH_ISSUER`          | Which Okta, for example `https://example.okta.com/oauth2/default`.                     |
-| `BETTER_AUTH_SECRET`         | At least 32 characters. Required with any provider.                                    |
-| `BETTER_AUTH_URL`            | Public API server base URL, where OAuth callbacks return. Required with any provider.  |
-| `TRUSTED_ORIGINS`            | Comma-separated app origins accepted by the API.                                       |
-| `INITIAL_ADMIN_EMAILS`       | Retired. No administrators exist; if set, it is ignored with a warning.                |
-| `REMII_PUBLIC_URL`         | Public address of this API. Defaults to `BETTER_AUTH_URL`.                              |
-| `REMII_APP_URL`            | Where the browser app is served. Defaults to the first `TRUSTED_ORIGINS` entry.          |
+Sign-in is [Neon Auth](https://neon.com/docs/auth/overview), a hosted identity provider reached over
+HTTPS. It holds the OAuth clients, the session secret and the trusted-origin list on its own side,
+per branch, so the configuration here is an address rather than a set of credentials.
 
-**With no provider at all, `REMII_SINGLE_USER=true` is required.** A deployment that configures
-nothing to sign anybody in and does not say that was deliberate refuses to start, naming what to
-configure, because a public URL where every visitor gets an account of their own fails silently.
-`NODE_ENV` does not enter into it. `.env.example` ships the line switched on, so a clone runs with no
-configuration at all.
+| Variable              | Meaning                                                                                  |
+| --------------------- | ---------------------------------------------------------------------------------------- |
+| `REMII_SINGLE_USER`   | One fixed local user and no sign-in. **Required** when `NEON_AUTH_BASE_URL` is unset, or the deployment refuses to start. Ignored when it is set. |
+| `NEON_AUTH_BASE_URL`  | The provider's address, `https://…neonauth…/neondb/auth`. Required for sign-in. Written into `.env` by `neon deploy`. Must be `https://`. |
+| `AUTH_EMAIL_PASSWORD` | `true` draws the email-and-password form. Whether the provider *accepts* one is its own setting, read at start-up from `neon_auth.project_config`, and overrides this. |
+| `NEON_AUTH_PROVIDERS` | Comma-separated provider ids for the buttons on the sign-in screen. Normally unset: the server reads the branch's own configuration at start-up so the buttons always match what the branch accepts. Set it only for a branch with no provider configured. |
+| `TRUSTED_ORIGINS`     | Comma-separated app origins this deployment serves.                                     |
+| `REMII_PUBLIC_URL`    | This deployment's own address. Sent as `Origin` on every call to the provider, which checks it against the branch's trusted-origin list. |
+| `REMII_APP_URL`       | Where the browser app is served. Defaults to the first `TRUSTED_ORIGINS` entry, then `REMII_PUBLIC_URL`. |
+| `INITIAL_ADMIN_EMAILS`| Retired, and **refused**. No administrators exist, so a value left in the environment stops the deployment starting. |
 
-**Any one provider turns sign-in on**, and several may be configured at once. Each provider's id and
-secret must be set together, Okta additionally needs its issuer, and any of them requires
-`BETTER_AUTH_SECRET` and `BETTER_AUTH_URL`. Every incomplete combination is
-refused at start-up rather than at somebody's first attempt to sign in.
+**Provisioning.** With `auth: true` in `neon.ts` at the repository root:
 
-`INITIAL_ADMIN_EMAILS` is retired. It was the only way to name somebody as an administrator, and with
-no administrator role it would silently grant one address power over every other user's data, so a
-value left in the environment is logged and ignored rather than honoured. Remove it.
+```bash
+neon link --project-id <project-id> --branch production
+neon deploy
+```
 
-**SAML and OpenID Connect cannot be registered at runtime.** The three Better Auth SSO mutation routes
-are closed outright, because the only thing standing behind them is a session, and in a product with
-no administrator that would let any signed-in person register a provider for a domain and mint
-themselves colleagues. A deployment that needs company SSO puts the identity provider in front of
-Remii rather than inside it.
+`neon deploy` provisions the provider on the linked branch and pulls `DATABASE_URL` and the
+`NEON_AUTH_*` variables into `.env`.
 
-The redirect URI to register with each provider is `<BETTER_AUTH_URL>/api/auth/callback/<provider>`,
-where `<provider>` is `google`, `microsoft` or `okta`.
+**Why `https://` is required.** The provider's session cookie is `__Secure-` prefixed, and a browser
+refuses a `__Secure-` cookie that did not arrive over TLS. An `http://` address therefore produces a
+sign-in that appears to succeed and leaves no session.
 
-`REMII_PUBLIC_URL` and `REMII_APP_URL` matter only for a connector each person connects their own account to, such as Google Drive.
+**The providers available are `google`, `github` and `vercel`.** Microsoft, Okta and company SAML or
+OIDC are not reachable: the provider offers no route to any of them. `GOOGLE_OAUTH_*`,
+`MICROSOFT_OAUTH_*`, `OKTA_OAUTH_*`, `BETTER_AUTH_SECRET` and `BETTER_AUTH_URL` are no longer read,
+and setting them has no effect rather than a partial one. This product serves individuals directly
+rather than companies behind a directory.
 
-`REMII_PUBLIC_URL` builds the redirect URI the vendor sends somebody back to after they consent, which has to match what you registered with that vendor character for character — so it comes from configuration rather than from the incoming request. Most deployments never set it, because `BETTER_AUTH_URL` is already the same public address. With neither, the app's own page says the deployment cannot complete a consent flow, and no account can be connected.
+**Where the Google callback is registered.** `<NEON_AUTH_BASE_URL>/callback/google`, and no trailing
+slash before `/callback`. The OAuth consent screen shows Neon rather than this product while the
+provider is on its shared development credentials, so a deployment that needs its own name there
+supplies its own Google client through `neon neon-auth oauth-provider add`.
 
-`REMII_APP_URL` is where the callback sends the person afterwards. It is a separate setting because the app and the API are separate addresses: locally the app is Vite on `3010` and the API is `3001`, so a relative redirect would land on the API, which serves no pages. A deployment serving both from one origin can leave it unset.
+**`REMII_PUBLIC_URL` and `REMII_APP_URL` matter only for a connector each person connects their own account to**, such as Google Drive.
+
+`REMII_PUBLIC_URL` builds the redirect URI the vendor sends somebody back to after they consent, which has to match what you registered with that vendor character for character — so it comes from configuration rather than from the incoming request. Most deployments never set it, because `NEON_AUTH_BASE_URL` is already on the same public address. With neither, the app's own page says the deployment cannot complete a consent flow, and no account can be connected.
+
+`REMII_APP_URL` is where the callback sends the person afterwards. It is a separate setting because the app and the API can be separate addresses: locally the app is Vite on `3010` and the API is `3001`, so a relative redirect would land on the API, which serves no pages. A deployment serving both from one origin can leave it unset.
 
 A [Composio](plugins/composio.md) app needs `REMII_APP_URL` and nothing else of the two: the consent lives at the broker, so no redirect URI of ours is registered anywhere, but the address Composio returns somebody to has to be absolute and this is where it comes from. Connecting a brokered account refuses where it resolves to nothing, rather than sending somebody to a consent screen with no way back.
 

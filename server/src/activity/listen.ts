@@ -1,4 +1,4 @@
-import postgres from "postgres";
+import { createUnpooledConnection } from "../db/unpooled";
 
 /**
  * The subset of a logger this module uses.
@@ -44,7 +44,7 @@ export async function startRunActivityListener(
   /** Told after a reconnection, so the client can be asked to refetch. */
   onResync?: () => void,
 ): Promise<RunActivityListener> {
-  const connection = postgres(databaseUrl, { max: 1 });
+  const connection = createUnpooledConnection(databaseUrl);
 
   /*
    * Skipped on the first establish, so the signal means one thing.

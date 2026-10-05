@@ -1,3 +1,4 @@
+import { IconBrandGithub, IconCode } from "@tabler/icons-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useState } from "react";
@@ -6,98 +7,180 @@ import { SkillFields } from "@/components/skills/skill-fields";
 import type { DraftedSkill, SkillDraft } from "@/lib/plugins/mutations";
 import { saveSkillMutationOptions } from "@/lib/plugins/mutations";
 import { emptySkillForm, type SkillFormValues } from "@/lib/skills/form";
+import { cn } from "@/lib/utils";
 
 /**
- * Writing a skill, in the detail panel beside the list.
+ * Writing or importing a skill in the detail panel beside the skills list.
  *
- * The panel rather than a page of its own, so the skills you already have stay on screen while you
- * write the next one — the usual reason to open this is to make a variant of one that exists.
- *
- * TWO WAYS IN, ONE WAY OUT. A person can type a skill into the fields, or paste a repository above
- * them and have one drafted into the same fields. Both are reviewed in the same place and both are
- * saved by the same button, because a draft that arrived by itself is not a skill and a review that
- * happens somewhere else is not a review.
+ * Provides two dedicated modes to avoid visual clutter:
+ *  1. Custom skill: Write instructions manually with full control over tools and repository linkage.
+ *  2. From GitHub: Inspect a public repository, draft skills automatically, and save all or individual skills with one click.
  */
 export function NewSkill() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
+  const [mode, setMode] = useState<"manual" | "github">("manual");
   const createSkill = useMutation(saveSkillMutationOptions(queryClient));
 
-  /**
-   * The fields' current contents, as handed down from above.
-   *
-   * Held here rather than in the drafter because the two halves have to agree on it: choosing a
-   * draft sets it, and saving the draft that was in the fields has to know which slug that was.
-   */
+  /** The fields' current contents for manual authoring. */
   const [applied, setApplied] = useState<SkillFormValues | null>(null);
 
   /** Slugs saved out of this repository's drafts, so none is offered twice. */
   const [saved, setSaved] = useState<string[]>([]);
 
-  /** What the drafter still has on offer, so the last save can be told from the first. */
+  /** What the drafter still has on offer. */
   const [offered, setOffered] = useState<readonly SkillDraft[]>([]);
   const reportDrafts = useCallback(
     (drafts: readonly SkillDraft[]) => setOffered(drafts),
     [],
   );
 
+  const [isSavingAll, setIsSavingAll] = useState(false);
+  const [savingProgress, setSavingProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
+
   const choose = useCallback((draft: DraftedSkill) => {
-    /*
-     * A NEW OBJECT EVERY TIME, because `SkillFields` resets on identity rather than on contents:
-     * handing the same object back would mean pressing the same draft twice does nothing at all,
-     * which reads as a broken button rather than as a no-op.
-     */
     setApplied({
       slug: draft.slug,
       title: draft.title,
       summary: draft.summary,
       instructions: draft.instructions,
-      // Tools are left to the person: a declaration is theirs to make, and the picker is right here.
       tools: [],
       repo: draft.repo ?? null,
     });
+    setMode("manual");
   }, []);
 
+  const saveOne = useCallback(
+    async (draft: DraftedSkill) => {
+      await createSkill.mutateAsync({
+        slug: draft.slug,
+        title: draft.title,
+        summary: draft.summary,
+        instructions: draft.instructions,
+        tools: [],
+        repo: draft.repo ?? null,
+      });
+      setSaved((before) =>
+        before.includes(draft.slug) ? before : [...before, draft.slug],
+      );
+    },
+    [createSkill],
+  );
+
+  const saveAll = useCallback(
+    async (draftsToSave: DraftedSkill[]) => {
+      if (draftsToSave.length === 0) return;
+      setIsSavingAll(true);
+      const total = draftsToSave.length;
+      setSavingProgress({ current: 0, total });
+
+      const newlySaved: string[] = [];
+      try {
+        for (let i = 0; i < draftsToSave.length; i++) {
+          const draft = draftsToSave[i];
+          setSavingProgress({ current: i + 1, total });
+          await createSkill.mutateAsync({
+            slug: draft.slug,
+            title: draft.title,
+            summary: draft.summary,
+            instructions: draft.instructions,
+            tools: [],
+            repo: draft.repo ?? null,
+          });
+          newlySaved.push(draft.slug);
+        }
+        setSaved((before) => [...before, ...newlySaved]);
+      } finally {
+        setIsSavingAll(false);
+        setSavingProgress(null);
+      }
+    },
+    [createSkill],
+  );
+
   return (
-    <div className="mx-auto flex w-full max-w-xl flex-col gap-6 p-8">
+    <div className="mx-auto flex w-full max-w-xl flex-col gap-6 p-6 sm:p-8">
       <header>
-        <h1 className="text-2xl font-semibold">New skill</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          A named instruction you invoke with <code>/</code>. It goes on the
-          Bots you own, and nobody else sees it.
+        <h1 className="font-semibold text-2xl tracking-tight">
+          {mode === "manual" ? "New skill" : "Import skills"}
+        </h1>
+        <p className="mt-1 text-muted-foreground text-sm leading-normal">
+          {mode === "manual" ? (
+            <>
+              A named instruction you invoke with <code>/</code>. It goes on the
+              Bots you own, and nobody else sees it.
+            </>
+          ) : (
+            "Read skills from a public GitHub repository and save them to your Bots."
+          )}
         </p>
       </header>
 
-      <SkillDrafts onChoose={choose} onDrafts={reportDrafts} saved={saved} />
+      {/* Segmented Mode Switcher */}
+      <div className="flex rounded-lg border border-border bg-muted/50 p-1">
+        <button
+          className={cn(
+            "flex flex-1 items-center justify-center gap-2 rounded-md py-1.5 font-medium text-xs transition-colors",
+            mode === "manual"
+              ? "bg-background text-foreground shadow-xs"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+          onClick={() => setMode("manual")}
+          type="button"
+        >
+          <IconCode className="size-4" />
+          Custom skill
+        </button>
+        <button
+          className={cn(
+            "flex flex-1 items-center justify-center gap-2 rounded-md py-1.5 font-medium text-xs transition-colors",
+            mode === "github"
+              ? "bg-background text-foreground shadow-xs"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+          onClick={() => setMode("github")}
+          type="button"
+        >
+          <IconBrandGithub className="size-4" />
+          From GitHub
+        </button>
+      </div>
 
-      <SkillFields
-        defaultValues={emptySkillForm}
-        error={createSkill.error}
-        onSubmit={async (values) => {
-          await createSkill.mutateAsync(values);
-          /*
-           * THE PANEL STAYS OPEN WHILE A REPOSITORY STILL OWES SKILLS.
-           *
-           * It used to close on every save, which is right for a hand-written skill and wrong for a
-           * repository with four: three drafts would be thrown away by the save that succeeded, and
-           * the person would have to re-read the repository to get them back. So the close happens
-           * when there is nothing left on offer, and until then the form empties and the next draft
-           * is not loaded for them — the choice of which draft to save next is theirs.
-           */
-          const remaining = offered.filter(
-            (each) => !saved.includes(each.slug) && each.slug !== values.slug,
-          );
-          if (remaining.length > 0) {
-            setSaved((before) => [...before, values.slug]);
-            setApplied({ ...emptySkillForm });
-            return;
-          }
-          await navigate({ search: {}, to: "/skills" });
-        }}
-        submitLabel="Save skill"
-        values={applied ?? undefined}
-      />
+      {mode === "github" ? (
+        <SkillDrafts
+          isSaving={isSavingAll}
+          onChoose={choose}
+          onDrafts={reportDrafts}
+          onSaveAll={saveAll}
+          onSaveOne={saveOne}
+          saved={saved}
+          savingProgress={savingProgress}
+        />
+      ) : (
+        <SkillFields
+          defaultValues={emptySkillForm}
+          error={createSkill.error}
+          onCancel={() => navigate({ search: {}, to: "/skills" })}
+          onSubmit={async (values) => {
+            await createSkill.mutateAsync(values);
+            const remaining = offered.filter(
+              (each) => !saved.includes(each.slug) && each.slug !== values.slug,
+            );
+            if (remaining.length > 0) {
+              setSaved((before) => [...before, values.slug]);
+              setApplied({ ...emptySkillForm });
+              return;
+            }
+            await navigate({ search: {}, to: "/skills" });
+          }}
+          submitLabel="Save skill"
+          values={applied ?? undefined}
+        />
+      )}
     </div>
   );
 }

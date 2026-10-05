@@ -38,5 +38,8 @@
     "typescript": "^5.9.3",
     "yaml": "^2.9.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@neon/config": "^1.8.3",
+    "@neon/env": "^1.5.0"
+  }
 }

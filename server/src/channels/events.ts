@@ -1,4 +1,4 @@
-import postgres from "postgres";
+import { createUnpooledConnection } from "../db/unpooled";
 
 /**
  * Live channel activity, from whoever ran an agent to everybody else in the channel.
@@ -144,7 +144,7 @@ export async function startChannelActivityListener(
   databaseUrl: string,
   hub: ChannelEventHub,
 ): Promise<ChannelActivityListener> {
-  const connection = postgres(databaseUrl, { max: 1 });
+  const connection = createUnpooledConnection(databaseUrl);
 
   /*
    * `onlisten` fires on every establish, reconnects included — the same hook `policy-listener.ts`

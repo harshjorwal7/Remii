@@ -22,8 +22,9 @@ config:
     apiUrl: https://api.intelligence.copilotkit.ai
     gatewayWsUrl: wss://realtime.intelligence.copilotkit.ai
   auth:
-    google:
-      clientId: example.apps.googleusercontent.com
+    # A rendering example that reaches nothing. Enough for `helm template`, which is all this file is
+    # for; a real deployment puts what `neon link` + `neon deploy` printed there.
+    neonAuthBaseUrl: https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth
   publicUrl: https://remii.example.com
 postgresql:
   enabled: false
@@ -42,15 +43,9 @@ externalSecrets:
         key: remii/key-encryption-key
     # Sessions are signed with this. The server refuses to start when sign-in is configured and it
     # is missing, so every provider store has to carry it.
-    - secretKey: better-auth-secret
-      remoteRef:
-        key: remii-better-auth-secret
     - secretKey: intelligence-api-key
       remoteRef:
         key: remii/intelligence-api-key
-    - secretKey: google-client-secret
-      remoteRef:
-        key: remii/google-client-secret
     - secretKey: computer-token
       remoteRef:
         key: remii/computer-token

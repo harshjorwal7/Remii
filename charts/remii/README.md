@@ -119,9 +119,16 @@ helm upgrade --install remii charts/remii \
 ```
 
 `config.singleUser` admits every request as one user with no sign-in, so it is a local trial only —
-the chart refuses it behind a public LoadBalancer or alongside a public URL. A real deployment
-configures `config.auth.google`, `config.auth.microsoft` or `config.auth.okta` instead, and every
+the chart refuses it behind a public LoadBalancer or alongside a public URL. A real deployment sets
+`config.auth.neonAuthBaseUrl` to its [Neon Auth](https://neon.com/docs/auth/overview) address instead,
+which `neon link` followed by `neon deploy` prints; `config.publicUrl` is required alongside it,
+because the provider checks the `Origin` of every call against the branch's trusted-origin list. Every
 account that can sign in is then a full user over its own data.
+
+There is no credential to set. The provider holds its own OAuth clients, session secret and
+trusted-origin list per branch, so this chart holds an address and nothing else — the Google, Microsoft
+and Okta client secrets it used to template are gone, and configuring them had no effect rather than
+a partial one.
 
 `secrets.keyEncryptionKey` encrypts the credential vault. Generate it once, keep it, and do not put
 it in a file anybody commits. The chart marks the Secret it creates `helm.sh/resource-policy: keep`,

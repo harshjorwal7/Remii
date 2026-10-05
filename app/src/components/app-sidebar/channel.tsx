@@ -182,25 +182,25 @@ export const Channel = memo(function Channel({
             </div>
             <div className="flex-col min-w-0 flex-1">
               <div className="flex flex-row items-center justify-between gap-2">
-                <span
-                  className={`text-[14px] tracking-[-1%] truncate ${
-                    unread ? "font-medium" : ""
-                  }`}
-                >
-                  {name}
-                </span>
-                {/*
-                 * The chief of staff reads apart from every other row. Remii is the default
-                 * coworker, holds the whole of the person's powers, and is always present — a
-                 * badge states that where the person looks, rather than in a profile they may
-                 * never open. Matched on the stable agent id, not the display name.
-                 */}
-                {participantIds.includes(REMII_AGENT_ID) ? (
-                  <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-semibold tracking-wide text-primary uppercase">
-                    CoS
+                <div className="flex min-w-0 items-center gap-1.5 truncate">
+                  <span
+                    className={`text-[14px] tracking-[-1%] truncate ${
+                      unread ? "font-medium" : ""
+                    }`}
+                  >
+                    {name}
                   </span>
-                ) : null}
-                <div className="text-[12px] text-muted-foreground/70">
+                  {/*
+                   * The chief of staff reads apart from every other row. Remii is the default
+                   * coworker, holds the whole of the person's powers, and is always present.
+                   */}
+                  {participantIds.includes(REMII_AGENT_ID) ? (
+                    <span className="shrink-0 rounded-md border border-primary/20 bg-primary/10 px-1.5 py-0.5 font-medium text-[10px] tracking-tight text-primary">
+                      Chief of Staff
+                    </span>
+                  ) : null}
+                </div>
+                <div className="shrink-0 text-[12px] text-muted-foreground/70">
                   {lastMessageAt}
                 </div>
               </div>

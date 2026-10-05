@@ -169,38 +169,8 @@ describe("authentication availability", () => {
   });
 });
 
-/**
- * Who may register an identity provider.
- *
- * Better Auth's SSO plugin guards these with a session, which asks only that somebody is signed in.
- * That is the wrong bar: registering an IdP for a domain means anybody it vouches for can sign in,
- * so a plain user reaching it could mint themselves colleagues. These pin the gate in front of it.
- */
-/*
- * The three SSO mutation routes are closed outright, and `identity-provider-audit.test.ts` is where
- * that is tested.
- *
- * This block used to live here, and every case in it was about ROLES: a plain user refused with a 403,
- * an administrator let through, a signed-out caller refused. Individual-user SaaS has no roles —
- * `RemiiRole` is the literal type `"user"`, so an administrator is unrepresentable — and the routes
- * are now closed for everybody with a 410, which removed the role question rather than answering it.
- * Six of the nine cases were failing against that, and the three that passed were passing by
- * coincidence: they asserted `reached() === false`, which a 410 also satisfies.
- *
- * The replacement keeps the properties that are still load-bearing — the refusal happens IN FRONT of
- * Better Auth, so the plugin never sees the request, and `/api/auth/*` is otherwise untouched, so
- * sign-in through a configured provider still works — and adds what is new: that the closure is
- * narrow, that no audit row is written, and that the reason is the absence of an administrator rather
- * than a forgotten guard.
- */
-describe("identity provider registration", () => {
-  const routes = [
-    "/api/auth/sso/register",
-    "/api/auth/sso/update-provider",
-    "/api/auth/sso/delete-provider",
-  ];
-
-  /** An app whose Better Auth handler records whether anything reached it. */
+describe("the auth proxy", () => {
+  /** An app whose auth service records whether anything reached it. */
   function appWithHandler() {
     let reachedHandler = false;
     const app = createApp(loadConfig(testEnvironment()), {
@@ -217,35 +187,45 @@ describe("identity provider registration", () => {
     return { app, reached: () => reachedHandler };
   }
 
-  test.each(routes)(
-    "closes %s rather than letting the plugin serve it",
-    async (route) => {
-      const { app, reached } = appWithHandler();
-
-      const response = await app.request(`http://remii.test${route}`, {
-        method: "POST",
-      });
-
-      // Refused in front of Better Auth: the plugin's own guard asks only that somebody is signed in,
-      // which would let any user register a provider for a domain and mint themselves colleagues.
-      expect(response.status).toBe(410);
-      expect(reached()).toBe(false);
-      await expect(response.json()).resolves.toEqual({
-        error: "Registering an identity provider is not available.",
-      });
-    },
-  );
-
-  // Everything else under /api/auth is Better Auth's own business, including sign-in itself, which by
-  // definition happens before anybody has signed in. This is the test that would catch a closure that
-  // had been written against `/api/auth/*` rather than against the three routes.
-  test("leaves the rest of the auth routes alone", async () => {
+  /*
+   * Every auth route is forwarded, with no closure list in front of them.
+   *
+   * WAS three tests asserting that `/api/auth/sso/register`, `/api/auth/sso/update-provider` and
+   * `/api/auth/sso/delete-provider` answer 410 — the Better Auth SSO plugin's registration routes,
+   * closed so that a signed-in person could not register an identity provider for a domain and mint
+   * themselves colleagues.
+   *
+   * The closure is gone with the plugin. The identity provider admits no SAML and no generic OIDC, so
+   * there is no route behind those paths to protect against, and a deny-list kept "just in case"
+   * would be three paths refused for no stated reason — which is how a deny-list quietly stops
+   * matching the thing it was written for.
+   */
+  test.each([
+    "/api/auth/sign-in/social",
+    "/api/auth/sign-in/email",
+    "/api/auth/sign-up/email",
+    "/api/auth/get-session",
+    "/api/auth/sign-out",
+  ])("forwards %s to the provider", async (route) => {
     const { app, reached } = appWithHandler();
 
-    await app.request("http://remii.test/api/auth/sign-in/social", {
-      method: "POST",
-    });
+    await app.request(`http://remii.test${route}`, { method: "POST" });
 
     expect(reached()).toBe(true);
+  });
+
+  test("answers 503 when no provider is configured", async () => {
+    const app = createApp(
+      loadConfig(testEnvironment({ NEON_AUTH_BASE_URL: undefined, REMII_SINGLE_USER: "true" })),
+    );
+
+    const response = await app.request("http://remii.test/api/auth/get-session", {
+      method: "GET",
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "No identity provider is configured.",
+    });
   });
 });

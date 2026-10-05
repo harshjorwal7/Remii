@@ -53,3 +53,4 @@ venv/
 
 # Runtime artifact scratch (repo transcripts written by runs), not source.
 server/.data/
+.neon

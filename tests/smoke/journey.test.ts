@@ -27,15 +27,22 @@ import { beforeAll, describe, expect, test } from "bun:test";
  * result nobody could produce.
  *
  * So `REMII_SMOKE_COOKIE` carries a signed-in session, sent verbatim as the `cookie` header. It is
- * a cookie rather than a token because that is what this deployment issues: Better Auth is
- * configured here with social and OIDC providers and no bearer plugin, so a session lives in a
- * cookie and nothing else opens these routes. Take it from a browser already signed in to the
- * deployment under test: DevTools, Application, Cookies, the `better-auth.session_token` entry, sent
- * as `better-auth.session_token=<value>`. It is a credential with that person's reach, so treat it
- * as one: it belongs in the environment of the run and not in a file, a log or a comment on a pull
- * request.
+ * a cookie rather than a token because that is what this deployment issues: sign-in is Neon Auth,
+ * reached through this server's proxy, and the session is an HTTP-only cookie whose value nothing but
+ * the provider can read. Take it from a browser already signed in to the deployment under test:
+ * DevTools, Application, Cookies, the `__Host-neon_auth_session` entry, sent as
+ * `__Host-neon_auth_session=<value>`.
  *
- *   REMII_SMOKE_COOKIE='better-auth.session_token=...' bun run test:smoke
+ * That name is this deployment's own, not the provider's. The provider mints
+ * `__Secure-neon-auth.session_token` and it is scoped to the provider's host; `auth/neon.ts` renames it
+ * on the way back so the browser holds a cookie belonging to this origin, which is the whole reason
+ * the proxy exists. So the cookie to copy is the renamed one, and a run that sends the provider's own
+ * name will be refused as signed out.
+ *
+ * It is a credential with that person's reach, so treat it as one: it belongs in the environment of
+ * the run and not in a file, a log or a comment on a pull request.
+ *
+ *   REMII_SMOKE_COOKIE='__Host-neon_auth_session=...' bun run test:smoke
  *
  * Without it the run stops before the first test with a sentence naming it, rather than skipping the
  * half that matters and reporting the other half as a pass. A journey that did not act on a computer
@@ -84,7 +91,7 @@ beforeAll(async () => {
   if (!COOKIE) {
     throw new Error(
       "This journey acts as a person, and every route it proves is behind a session. Set " +
-        "REMII_SMOKE_COOKIE to the `better-auth.session_token=...` cookie of a browser signed in " +
+        "REMII_SMOKE_COOKIE to the `__Host-neon_auth_session=...` cookie of a browser signed in " +
         `to ${API}. See the comment at the top of this file.`,
     );
   }

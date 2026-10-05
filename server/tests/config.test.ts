@@ -8,11 +8,7 @@ import { configuredAuthProviders, loadConfig } from "../src/config";
 const baseEnvironment = {
   DATABASE_URL: "postgres://remii:remii@localhost:5432/remii",
   KEY_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-  GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
-  GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
-  BETTER_AUTH_SECRET: "a-long-enough-local-development-auth-secret",
-  BETTER_AUTH_URL: "http://localhost:3001",
-  INITIAL_ADMIN_EMAILS: "admin@remii.test",
+  NEON_AUTH_BASE_URL: "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth",
   INTELLIGENCE_API_URL: "http://localhost:7100",
   INTELLIGENCE_GATEWAY_WS_URL: "ws://localhost:7103",
   INTELLIGENCE_API_KEY: "tenant-api-key",
@@ -24,10 +20,16 @@ const baseEnvironment = {
 /**
  * The same deployment with nothing signing anybody in.
  *
- * `baseEnvironment` ships Google and a session secret because most tests want authentication on.
- * The provider tests need the opposite starting point, or "Microsoft is configured" cannot be told
- * apart from "Microsoft and the Google that was already there".
+ * `baseEnvironment` points at an identity provider because most tests want authentication on. The
+ * tests below need the opposite starting point, or "no provider is configured" cannot be told apart
+ * from "the provider is configured and its address is missing".
  */
+const withoutSignIn = Object.fromEntries(
+  Object.entries(baseEnvironment).filter(
+    ([name]) => name !== "NEON_AUTH_BASE_URL" && name !== "INITIAL_ADMIN_EMAILS",
+  ),
+);
+
 /**
  * A deployment that is actually deployed.
  *
@@ -40,15 +42,6 @@ const productionEnvironment = {
   NODE_ENV: "production",
   KEY_ENCRYPTION_KEY: "b3BlbmJvdC1wcm9kdWN0aW9uLXRlc3Qta2V5LTMyMzI=",
 };
-
-const {
-  GOOGLE_OAUTH_CLIENT_ID: _googleId,
-  GOOGLE_OAUTH_CLIENT_SECRET: _googleSecret,
-  BETTER_AUTH_SECRET: _authSecret,
-  BETTER_AUTH_URL: _authUrl,
-  INITIAL_ADMIN_EMAILS: _adminEmails,
-  ...withoutSignIn
-} = baseEnvironment;
 
 describe("deployment configuration", () => {
   test("resolves the local runtime, which is the only runtime", () => {
@@ -137,18 +130,6 @@ describe("deployment configuration", () => {
 
     expect(config.runtime).toEqual({ mode: "local", durableHistory: true });
     expect(JSON.stringify(config)).not.toContain("self-hosted-licence");
-  });
-
-  test("rejects incomplete OAuth client configuration", () => {
-    expect(() =>
-      loadConfig({
-        ...baseEnvironment,
-        GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
-        GOOGLE_OAUTH_CLIENT_SECRET: "",
-      }),
-    ).toThrow(
-      "GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must be set together",
-    );
   });
 
   test("starts without a managed Bot when neither half is set", () => {
@@ -260,145 +241,90 @@ describe("deployment configuration", () => {
     },
   );
 
-  test("enables Google authentication when its complete deployment contract is present", () => {
-    const config = loadConfig({
-      ...baseEnvironment,
-      GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
-      GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
-      BETTER_AUTH_SECRET: "a-long-enough-local-development-auth-secret",
-      BETTER_AUTH_URL: "http://localhost:3001",
-      INITIAL_ADMIN_EMAILS: "admin@remii.test, owner@remii.test",
-    });
+  test("points at the identity provider, and carries nothing but its address", () => {
+    const config = loadConfig(baseEnvironment);
 
     expect(config.auth).toEqual({
-      baseUrl: "http://localhost:3001",
-      secret: "a-long-enough-local-development-auth-secret",
-      google: {
-        clientId: "google-client-id",
-        clientSecret: "google-client-secret",
-      },
-      trustedOrigins: [
-        "http://127.0.0.1:3010",
-        "http://[::1]:3010",
-        "http://localhost:3010",
-      ],
-      /*
-       * No `initialAdminEmails`, even though the environment sets it and always did.
-       *
-       * There are no administrators: every account that can authenticate may sign in and its own data
-       * is the only thing it can reach. `INITIAL_ADMIN_EMAILS` is retired and IGNORED rather than
-       * honoured, because honouring it would silently grant one address power over every other user's
-       * data — which is why `loadConfig` warns about it and why this projection does not carry it.
-       */
+      neonAuthUrl: "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth",
+      // The address the provider is told the caller is. Localhost, because the sign-in screen is
+      // served from the app's dev port and it is that origin the provider checks.
+      origin: "http://localhost:3010",
+      // What the buttons are drawn from. `index.ts` replaces this with the branch's own provider
+      // configuration at start-up; this is the fallback for a branch whose configuration cannot be
+      // read, and a branch with google configured is the ordinary case.
+      socialProviders: ["google"],
     });
   });
 
-  /**
-   * Sign-in with more than one identity provider.
-   *
-   * A company mid-migration has some people on Entra and some still on Okta, so more than one at a
-   * time is the normal shape rather than a corner. These assert the shape the sign-in screen reads
-   * and every arrangement that cannot work refusing at start-up, which is the only moment a
-   * misconfiguration is cheap to find.
-   */
-  const SESSION = {
-    BETTER_AUTH_SECRET: "a-long-enough-local-development-auth-secret",
-    BETTER_AUTH_URL: "http://localhost:3001",
-    INITIAL_ADMIN_EMAILS: "admin@remii.test",
-  };
-
-  /** What a deployment with no provider has to say before it is allowed to come up. */
-  const OPEN = { REMII_SINGLE_USER: "true" };
-
-  test("enables Microsoft, and admits any account until told a directory", () => {
+  test("strips a trailing slash off the provider address", () => {
     const config = loadConfig({
-      ...withoutSignIn,
-      ...SESSION,
-      MICROSOFT_OAUTH_CLIENT_ID: "entra-client-id",
-      MICROSOFT_OAUTH_CLIENT_SECRET: "entra-client-secret",
+      ...baseEnvironment,
+      NEON_AUTH_BASE_URL: "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth/",
     });
 
-    // `common` is Microsoft's own default and admits personal accounts as well as work ones. A
-    // deployment that means "our staff" has to say so with a directory GUID.
-    expect(config.auth?.microsoft).toEqual({
-      clientId: "entra-client-id",
-      clientSecret: "entra-client-secret",
-      tenantId: "common",
-    });
-    expect(configuredAuthProviders(config.auth)).toEqual(["microsoft"]);
-  });
-
-  test("narrows Microsoft to one directory when given a tenant", () => {
-    const config = loadConfig({
-      ...withoutSignIn,
-      ...SESSION,
-      MICROSOFT_OAUTH_CLIENT_ID: "entra-client-id",
-      MICROSOFT_OAUTH_CLIENT_SECRET: "entra-client-secret",
-      MICROSOFT_OAUTH_TENANT_ID: "8f2c1e40-0000-0000-0000-000000000000",
-    });
-
-    expect(config.auth?.microsoft?.tenantId).toBe(
-      "8f2c1e40-0000-0000-0000-000000000000",
+    expect(config.auth?.neonAuthUrl).toBe(
+      "https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth",
     );
   });
 
-  test("enables Okta against its issuer", () => {
-    const config = loadConfig({
-      ...withoutSignIn,
-      ...SESSION,
-      OKTA_OAUTH_CLIENT_ID: "okta-client-id",
-      OKTA_OAUTH_CLIENT_SECRET: "okta-client-secret",
-      OKTA_OAUTH_ISSUER: "https://example.okta.com/oauth2/default",
-    });
-
-    expect(config.auth?.okta).toEqual({
-      clientId: "okta-client-id",
-      clientSecret: "okta-client-secret",
-      issuer: "https://example.okta.com/oauth2/default",
-    });
-  });
-
-  test("refuses Okta without an issuer, which names no particular Okta", () => {
+  /**
+   * The provider address has to be https, and it is the provider's cookie that says why.
+   *
+   * Neon's session cookie is `__Secure-` prefixed, and a browser refuses a `__Secure-` cookie that did
+   * not come over TLS. A plain-HTTP address would therefore produce a sign-in that appears to work and
+   * leaves no session — the failure a person discovers as "I signed in and it asked me again".
+   */
+  test("refuses a provider address that is not https", () => {
     expect(() =>
-      loadConfig({
-        ...withoutSignIn,
-        ...SESSION,
-        OKTA_OAUTH_CLIENT_ID: "okta-client-id",
-        OKTA_OAUTH_CLIENT_SECRET: "okta-client-secret",
-      }),
-    ).toThrow("OKTA_OAUTH_ISSUER");
+      loadConfig({ ...baseEnvironment, NEON_AUTH_BASE_URL: "http://localhost:3001" }),
+    ).toThrow("NEON_AUTH_BASE_URL must be an https:// address");
   });
 
-  test("refuses an Okta issuer with no credentials behind it", () => {
+  test("refuses a password form with no provider to accept it", () => {
     expect(() =>
-      loadConfig({
-        ...withoutSignIn,
-        ...SESSION,
-        OKTA_OAUTH_ISSUER: "https://example.okta.com/oauth2/default",
-      }),
-    ).toThrow("OKTA_OAUTH_CLIENT_ID");
+      loadConfig({ ...withoutSignIn, AUTH_EMAIL_PASSWORD: "true" }),
+    ).toThrow("NEON_AUTH_BASE_URL is not");
   });
 
-  test("carries all three at once, in a fixed order", () => {
-    const config = loadConfig({
-      ...withoutSignIn,
-      ...SESSION,
-      GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
-      GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
-      MICROSOFT_OAUTH_CLIENT_ID: "entra-client-id",
-      MICROSOFT_OAUTH_CLIENT_SECRET: "entra-client-secret",
-      OKTA_OAUTH_CLIENT_ID: "okta-client-id",
-      OKTA_OAUTH_CLIENT_SECRET: "okta-client-secret",
-      OKTA_OAUTH_ISSUER: "https://example.okta.com/oauth2/default",
-    });
-
-    // The order the buttons appear in, fixed here so it cannot change with how a .env was written.
-    expect(configuredAuthProviders(config.auth)).toEqual([
-      "google",
-      "microsoft",
-      "okta",
-    ]);
+  test("reports no email password form unless the deployment asked for one", () => {
+    expect(loadConfig(baseEnvironment).auth?.emailPassword).toBeUndefined();
+    expect(
+      loadConfig({ ...baseEnvironment, AUTH_EMAIL_PASSWORD: "true" }).auth
+        ?.emailPassword,
+    ).toBe(true);
   });
+
+  /**
+   * The provider's own list of providers, or an override for a branch that has none.
+   *
+   * The list here is a fallback rather than the answer — `index.ts` reads the branch's
+   * configuration at start-up and writes it back onto this. `NEON_AUTH_PROVIDERS` exists for the one
+   * case where the fallback would be a lie, which is a branch with no provider configured at all.
+   */
+  test("takes the button list from the environment when it is given one", () => {
+    expect(
+      configuredAuthProviders(
+        loadConfig({ ...baseEnvironment, NEON_AUTH_PROVIDERS: "google,github" })
+          .auth,
+      ),
+    ).toEqual(["google", "github"]);
+  });
+
+  test("drops a provider the identity provider does not admit", () => {
+    // Silently rather than by refusal: a typo in this variable should not stop a deployment that is
+    // otherwise fine, and the branch's own configuration overrides the whole list anyway.
+    expect(
+      configuredAuthProviders(
+        loadConfig({
+          ...baseEnvironment,
+          NEON_AUTH_PROVIDERS: "google,microsoft,okta",
+        }).auth,
+      ),
+    ).toEqual(["google"]);
+  });
+
+  /** What a deployment with no provider has to say before it is allowed to come up. */
+  const OPEN = { REMII_SINGLE_USER: "true" };
 
   /**
    * Somebody has to be an administrator.
@@ -407,18 +333,23 @@ describe("deployment configuration", () => {
    * configures sign-in without it admits everybody as a plain user and can never promote anyone.
    * Start-up is the only cheap moment to notice.
    */
-  test("does not ask for an administrator, because there are none", () => {
+  test("refuses to start with an administrator list, because there are none", () => {
     /*
-     * WAS "refuses sign-in with nobody named as an administrator", asserting a throw mentioning
-     * `INITIAL_ADMIN_EMAILS`. There is no administrator to name: every account that can authenticate
-     * may sign in, and its own data is the only thing it can reach.
+     * WAS ignored with a warning, which is what made this test say a deployment with the variable set
+     * booted the same as one without it. That was true then and is not now: this deployment refuses.
      *
-     * So a deployment with the variable absent boots exactly as one with it set does. The variable is
-     * retired rather than honoured precisely because honouring it would silently grant one address
-     * power over every other user's data, and `loadConfig` warns when it finds one still set.
+     * The reason to change is the difference between the two behaviours. A warning is invisible to a
+     * deployment that is not reading logs, and the setting it warns about grants one address power
+     * over every other user's data — so a setting that looks live and does nothing is worse than one
+     * that refuses. There is no administrator role for the list to have named.
      */
-    const { INITIAL_ADMIN_EMAILS: _none, ...withoutAdmins } = baseEnvironment;
-    const config = loadConfig(withoutAdmins);
+    expect(() =>
+      loadConfig({ ...baseEnvironment, INITIAL_ADMIN_EMAILS: "admin@remii.test" }),
+    ).toThrow("INITIAL_ADMIN_EMAILS");
+  });
+
+  test("boots when the administrator list is absent, and still has none", () => {
+    const config = loadConfig(baseEnvironment);
     expect(config.auth).toBeDefined();
     expect(JSON.stringify(config.auth)).not.toContain("initialAdminEmails");
   });
@@ -430,10 +361,16 @@ describe("deployment configuration", () => {
     expect(() => loadConfig({ ...withoutSignIn, ...OPEN })).not.toThrow();
   });
 
+  /**
+   * No provider, and nobody saying that was meant.
+   *
+   * The refusal is not in `authConfig` and never was — it is `singleUserEnabled`, which is what
+   * decides between running as one fixed person and refusing. A deployment with no provider and no
+   * `REMII_SINGLE_USER` used to come up and serve every visitor as that one person whenever
+   * `NODE_ENV` was unset, which is the default on exactly the bare-VM deployment it was meant to
+   * catch. So this still throws, and the test says which line.
+   */
   test("refuses to start with no provider and nothing saying that was meant", () => {
-    // The whole of the sign-in story in one line. This used to come up open, and `NODE_ENV` was the
-    // only thing standing between a bare-VM deployment and serving every visitor as an
-    // administrator, which is unset by default on exactly that deployment.
     expect(() => loadConfig(withoutSignIn)).toThrow(
       "No identity provider is configured",
     );
@@ -444,24 +381,6 @@ describe("deployment configuration", () => {
 
     expect(config.auth).toBeUndefined();
     expect(configuredAuthProviders(config.auth)).toEqual([]);
-  });
-
-  test("refuses a session secret with no provider to use it", () => {
-    expect(() => loadConfig({ ...withoutSignIn, ...SESSION })).toThrow(
-      "no identity provider",
-    );
-  });
-
-  test("rejects incomplete Google authentication deployment settings", () => {
-    expect(() =>
-      loadConfig({
-        ...baseEnvironment,
-        GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
-        GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
-        BETTER_AUTH_SECRET: "",
-        BETTER_AUTH_URL: "http://localhost:3001",
-      }),
-    ).toThrow("Sign-in requires BETTER_AUTH_SECRET");
   });
 
   // A turn that is ended is a turn somebody loses, so an unset variable leaves every stream alone
@@ -730,6 +649,35 @@ describe("deployment configuration", () => {
       .split("\n")
       .filter((line) =>
         /^\s*AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS\s*=/.test(line),
+      );
+
+    expect(live).toEqual([]);
+  });
+
+  /**
+   * The shipped example carries no live identity-provider line.
+   *
+   * The same argument as above, for sign-in. Copying `.env.example` is the ordinary way a deployment
+   * gets its environment, and every line that is not commented out is one that deployment has now
+   * claimed. A live `NEON_AUTH_BASE_URL` here would point a fresh clone at somebody else's provider;
+   * a live `GOOGLE_OAUTH_CLIENT_ID` or `BETTER_AUTH_SECRET` would be a credential-shaped line for a
+   * mechanism that no longer exists.
+   *
+   * Commented mentions are wanted — that is how the provider stays discoverable. What is refused is a
+   * line that would be read.
+   */
+  test("the shipped example configures no identity provider by itself", () => {
+    const example = readFileSync(
+      new URL("../../.env.example", import.meta.url),
+      "utf8",
+    );
+
+    const live = example
+      .split("\n")
+      .filter((line) =>
+        /^\s*(NEON_AUTH_BASE_URL|GOOGLE_OAUTH_CLIENT_ID|GOOGLE_OAUTH_CLIENT_SECRET|MICROSOFT_OAUTH_CLIENT_ID|MICROSOFT_OAUTH_CLIENT_SECRET|MICROSOFT_OAUTH_TENANT_ID|OKTA_OAUTH_CLIENT_ID|OKTA_OAUTH_CLIENT_SECRET|OKTA_OAUTH_ISSUER|BETTER_AUTH_SECRET|BETTER_AUTH_URL|INITIAL_ADMIN_EMAILS)\s*=/.test(
+          line,
+        ),
       );
 
     expect(live).toEqual([]);

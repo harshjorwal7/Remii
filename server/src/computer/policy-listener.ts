@@ -14,7 +14,7 @@
  * pool it would be a connection the rest of the server never gets back. Same shape, and the same
  * reason, as the channel activity listener.
  */
-import postgres from "postgres";
+import { createUnpooledConnection } from "../db/unpooled";
 import { ACTION_POLICY_TOPIC, type PolicyStore } from "./policy-store";
 
 export type PolicyListener = { stop: () => Promise<void> };
@@ -23,7 +23,7 @@ export async function startPolicyListener(
   databaseUrl: string,
   store: PolicyStore,
 ): Promise<PolicyListener> {
-  const connection = postgres(databaseUrl, { max: 1 });
+  const connection = createUnpooledConnection(databaseUrl);
 
   /*
    * The payload is ignored on purpose. It says the boundary moved, not what it moved to: a rule list

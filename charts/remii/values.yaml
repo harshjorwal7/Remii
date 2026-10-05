@@ -130,17 +130,24 @@ config:
   # own data, which is why this section needs a provider and nothing else.
   #
   # Client secrets go under `secrets` below. Only the public halves belong here.
+  # Sign-in is Neon Auth, a hosted identity provider, and this is the address to reach it at.
+  #
+  # NOT A CREDENTIAL. The provider holds its own OAuth clients, session secret and trusted-origin list
+  # per branch, so there is nothing secret to write here and nothing to rotate. `neon link` followed
+  # by `neon deploy` prints the line into your `.env`.
+  #
+  # https only. The provider's session cookie is `__Secure-` prefixed and a browser refuses a
+  # `__Secure-` cookie that did not arrive over TLS, so an `http://` address produces a sign-in that
+  # appears to succeed and leaves no session.
+  #
+  # The providers available are google, github and vercel. Microsoft, Okta, SAML and generic OIDC are
+  # not reachable: this product serves individuals directly rather than companies behind a directory,
+  # and the provider offers no route to any of them.
   auth:
-    google:
-      clientId: ""
-    microsoft:
-      clientId: ""
-      # `common` is Microsoft's own default and admits personal accounts as well as work ones. A
-      # company that means "our staff" puts its directory GUID here.
-      tenantId: ""
-    okta:
-      clientId: ""
-      issuer: ""
+    neonAuthBaseUrl: ""
+    # Whether to draw the email-and-password form. The provider's own setting decides whether one
+    # would be accepted, and the server reads that at start-up, so this is only a local override.
+    emailPassword: false
   tenantPackageDir: /app/examples/fintech
 
   # Optional. The server's runtime is local and reads none of these; they are forwarded so a
@@ -397,7 +404,9 @@ secrets:
   # is not in version control; `KEY_ENCRYPTION_KEY` and the model credential are the two that matter
   # and neither should ever be a literal in a file anybody commits.
   keyEncryptionKey: ""
-  betterAuthSecret: ""
+  # There is no session secret here, and there was never a reason for one on this chart's part: sign-in
+  # is a hosted provider that holds its own, so the only credential this deployment configures is the
+  # one below and `KEY_ENCRYPTION_KEY`.
   modelApiKey: ""
   computerToken: ""
   supervisorToken: ""
@@ -413,10 +422,6 @@ secrets:
   # Required when `routines.enabled`: what the CronJob presents to the API server to be recognised
   # as the worker rather than as an unauthenticated caller.
   workerSharedSecret: ""
-  # The client secret for whichever provider is configured above.
-  googleClientSecret: ""
-  microsoftClientSecret: ""
-  oktaClientSecret: ""
 
 externalSecrets:
   enabled: false

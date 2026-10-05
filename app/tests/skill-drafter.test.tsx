@@ -5,22 +5,11 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SkillDrafts } from "@/components/skills/skill-drafter";
 import { SkillFields } from "@/components/skills/skill-fields";
+import type { DraftedSkill } from "@/lib/plugins/mutations";
 import { emptySkillForm, type SkillFormValues } from "@/lib/skills/form";
 
 /**
- * Drafting a repository's skills into the New-skill form.
- *
- * TWO THINGS ARE ASSERTED, AND THE SECOND IS THE ONE THAT WOULD HAVE BEEN INVISIBLE. The first is
- * that a draft reaches the form: the button, the list and the click are all machinery, and a
- * regression there is visible. The second is that a NEW set of values actually lands in the inputs.
- * `useForm` reads `defaultValues` once, so the component under test has to reset the form by hand —
- * and a version that did not would still pass every other test in this file, because the button
- * would still work and the list would still draw. It would just save an empty skill, which is the
- * failure the whole feature exists to prevent.
- *
- * `fetch` is stubbed rather than a mutation injected: the point of these two files is the wiring
- * between a server answer and the fields on screen, and stubbing the transport tests that wiring
- * without inventing a seam in production code for the sake of a test.
+ * Drafting a repository's skills into the New-skill form and batch saving.
  */
 
 beforeAll(() => GlobalRegistrator.register());
@@ -235,4 +224,80 @@ test("values handed to the fields land in the inputs, and a new set replaces the
     expect(view.getByDisplayValue("release-notes")).toBeTruthy();
   });
   expect(view.queryByDisplayValue("tauri-signing")).toBeNull();
+});
+
+test("all drafted skills from a repository can be saved at once with onSaveAll", async () => {
+  answerWith(DRAFTS);
+  const savedAll: DraftedSkill[] = [];
+  const view = draw(
+    <SkillDrafts
+      onChoose={() => {}}
+      onDrafts={() => {}}
+      onSaveAll={async (drafts) => {
+        savedAll.push(...drafts);
+      }}
+      saved={[]}
+    />,
+  );
+  const user = userEvent.setup({ document: view.baseElement.ownerDocument });
+
+  await user.type(
+    view.getByLabelText("Repository"),
+    "https://github.com/owner/repo",
+  );
+  await user.click(view.getByRole("button", { name: /Draft skills/ }));
+
+  await waitFor(() => {
+    expect(
+      view.getByRole("button", { name: /Save all \(2\) skills/i }),
+    ).toBeTruthy();
+  });
+
+  await user.click(
+    view.getByRole("button", { name: /Save all \(2\) skills/i }),
+  );
+  expect(savedAll).toHaveLength(2);
+  expect(savedAll.map((s) => s.slug)).toEqual([
+    "tauri-signing",
+    "release-notes",
+  ]);
+});
+
+test("an individual drafted skill can be saved directly with onSaveOne", async () => {
+  answerWith(DRAFTS);
+  const savedSingle: DraftedSkill[] = [];
+  const view = draw(
+    <SkillDrafts
+      onChoose={() => {}}
+      onDrafts={() => {}}
+      onSaveOne={async (draft) => {
+        savedSingle.push(draft);
+      }}
+      saved={[]}
+    />,
+  );
+  const user = userEvent.setup({ document: view.baseElement.ownerDocument });
+
+  await user.type(
+    view.getByLabelText("Repository"),
+    "https://github.com/owner/repo",
+  );
+  await user.click(view.getByRole("button", { name: /Draft skills/ }));
+
+  await waitFor(() => {
+    expect(view.getAllByRole("button", { name: "Save skill" })).toHaveLength(2);
+  });
+
+  await user.click(view.getAllByRole("button", { name: "Save skill" })[0]);
+  expect(savedSingle).toHaveLength(1);
+  expect(savedSingle[0].slug).toBe("tauri-signing");
+});
+
+test("does not use sparkles/star logo in draft button", () => {
+  const view = draw(
+    <SkillDrafts onChoose={() => {}} onDrafts={() => {}} saved={[]} />,
+  );
+  const draftButton = view.getByRole("button", { name: /Draft skills/ });
+  expect(draftButton.innerHTML).not.toContain("sparkle");
+  expect(draftButton.innerHTML).not.toContain("star");
 });

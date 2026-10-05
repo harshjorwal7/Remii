@@ -20,7 +20,7 @@
  * the same delete over the same rows every hour: N times the work for one outcome, on the one table
  * every action writes to.
  */
-import postgres from "postgres";
+import { createUnpooledConnection } from "./db/unpooled";
 import {
   FRAME_RETENTION_MS,
   type PageFrameStore,
@@ -65,7 +65,7 @@ export async function sweepAuditTrail(
     return { deleted: null };
   }
 
-  const connection = postgres(databaseUrl, { max: 1 });
+  const connection = createUnpooledConnection(databaseUrl);
 
   try {
     const [lock] = await connection`

@@ -8,8 +8,9 @@ config:
     apiUrl: https://api.intelligence.copilotkit.ai
     gatewayWsUrl: wss://realtime.intelligence.copilotkit.ai
   auth:
-    google:
-      clientId: example.apps.googleusercontent.com
+    # An address that renders but reaches nothing. Enough for `helm template` and for the shape of an
+    # install; a real deployment puts `neon link` + `neon deploy`'s own output here.
+    neonAuthBaseUrl: https://ep-example.neonauth.eu-west-2.aws.neon.tech/neondb/auth
   publicUrl: https://remii.internal
 postgresql:
   enabled: true
@@ -18,7 +19,6 @@ postgresql:
     password: "example-for-rendering-only"
 secrets:
   # Sessions are signed with this. Rendering example only; generate one with: openssl rand -base64 32
-  betterAuthSecret: "example-for-rendering-only-at-least-32-chars"
   # NOT SET HERE, AND THAT IS THE POINT. This file used to carry the public example key from
   # `.env.example`, which the server refuses to start with in production: the target rendered, and
   # the deployment it described could never run. Supply a real one:

@@ -1896,17 +1896,26 @@ const AUTHORIZATION_URL = "https://backend.composio.dev/s/a-bearer-capability";
  *
  * BUILT FROM THE DEPLOYMENT AND FROM NOTHING IN THE REQUEST, which is the property the tests below
  * are about. The origin is `testEnvironment`'s own — no `REMII_APP_URL` is set, so it falls back
- * through to `BETTER_AUTH_URL` — and the path is the account's page, which is where the person
- * pressed Connect and the page that asks Composio whether it worked.
+ * through to the deployment's public address — and the path is the account's page, which is where the
+ * person pressed Connect and the page that asks Composio whether it worked.
  *
  * Two of them because a caller may name one of two PAGES and nothing else: an administrator who
  * started this from the app's own admin screen comes back to that screen. A literal at each
  * assertion rather than a call to `connectedAccountsUrlFor`, because an assertion that builds the
  * expected value the way the code does cannot fail when the code's answer changes.
  */
+/*
+ * `localhost:3010`, not the API's `3001`.
+ *
+ * WAS `localhost:3001`, because `BETTER_AUTH_URL` was where the deployment's public address came from
+ * and that variable pointed at the API server. With the identity provider hosted elsewhere there is no
+ * such variable, and the address is `REMII_PUBLIC_URL` or the local default — which is the app's dev
+ * port, because the address has to be one a browser can come back through and the browser is served
+ * from there.
+ */
 const RETURN_URL =
-  "http://localhost:3001/settings/connected-accounts/composio-linear";
-const _ADMIN_RETURN_URL = "http://localhost:3001/admin/plugins/composio-linear";
+  "http://localhost:3010/settings/connected-accounts/composio-linear";
+const _ADMIN_RETURN_URL = "http://localhost:3010/admin/plugins/composio-linear";
 
 /**
  * A failure in the shape `vendorSentence` reaches into, with the vendor's sentence at the bottom.
@@ -2575,10 +2584,7 @@ describe("connecting a brokered app", () => {
     const { authorized, connect } = brokeredApp(null, AUTHORIZATION_URL, {
       environment: {
         REMII_SINGLE_USER: "true",
-        BETTER_AUTH_URL: undefined,
-        BETTER_AUTH_SECRET: undefined,
-        GOOGLE_OAUTH_CLIENT_ID: undefined,
-        GOOGLE_OAUTH_CLIENT_SECRET: undefined,
+        NEON_AUTH_BASE_URL: undefined,
         INITIAL_ADMIN_EMAILS: undefined,
       },
     });
@@ -3061,10 +3067,7 @@ describe("connecting an app whose secret a person types", () => {
       {
         environment: {
           REMII_SINGLE_USER: "true",
-          BETTER_AUTH_URL: undefined,
-          BETTER_AUTH_SECRET: undefined,
-          GOOGLE_OAUTH_CLIENT_ID: undefined,
-          GOOGLE_OAUTH_CLIENT_SECRET: undefined,
+          NEON_AUTH_BASE_URL: undefined,
           INITIAL_ADMIN_EMAILS: undefined,
         },
       },
@@ -3209,10 +3212,7 @@ describe("connecting an app that needs no account", () => {
     const { authorized, connectNoAuth } = brokeredApp(null, AUTHORIZATION_URL, {
       environment: {
         REMII_SINGLE_USER: "true",
-        BETTER_AUTH_URL: undefined,
-        BETTER_AUTH_SECRET: undefined,
-        GOOGLE_OAUTH_CLIENT_ID: undefined,
-        GOOGLE_OAUTH_CLIENT_SECRET: undefined,
+        NEON_AUTH_BASE_URL: undefined,
         INITIAL_ADMIN_EMAILS: undefined,
       },
     });

@@ -215,13 +215,17 @@ export function createApp(
    */
   threadIdentity?: ThreadIdentity,
   /**
-   * The enterprise identity providers this deployment has registered.
+   * Unused, and kept only so a caller's argument list does not move.
    *
-   * Read here rather than through Better Auth's own listing route, which scopes to the person asking:
-   * a company's Okta tenant belongs to the deployment, not to whichever administrator pasted the
-   * metadata in. See identity-provider-store.ts.
+   * This was the store of enterprise identity providers this deployment had registered, read here
+   * rather than through the auth library's own listing route, which scopes to whoever is asking: a
+   * company's tenant belongs to the deployment, not to whichever administrator pasted the metadata
+   * in. There is no longer a company front door — this product serves individuals directly and the
+   * identity provider admits no SAML or generic-OIDC route — so nothing writes to `sso_providers`
+   * and nothing reads it. The table and its migration are left in place; deleting them is a
+   * separate piece of work from not calling this.
    */
-  identityProviders?: IdentityProviderStore,
+  _identityProviders?: IdentityProviderStore,
   /**
    * Chooses which coworker an untagged message is for, before a channel is pinned to one.
    *
@@ -442,8 +446,13 @@ export function createApp(
        */
       authProviders: configuredAuthProviders(config.auth),
       /*
-       * Whether email (or username) plus password sign-in is on. Separate from the OAuth ids
-       * above because it draws a form, not a button.
+       * Whether the email-and-password form is drawn. Separate from the OAuth ids above because it
+       * draws a form rather than a button.
+       *
+       * Read from the provider's own configuration (`neon_auth.project_config`) rather than from
+       * `AUTH_EMAIL_PASSWORD`, because the provider is what decides whether a password sign-in
+       * works. `auth/neon.ts` reads the same row at start-up into `AuthConfig.emailPassword`, so
+       * the form and the provider cannot disagree about whether one exists.
        */
       emailPassword: config.auth?.emailPassword === true,
       /*
@@ -453,44 +462,33 @@ export function createApp(
        */
       executionMode: config.executionMode,
       /*
-       * Whether any enterprise identity provider has been registered.
+       * Always false, and the sign-in screen uses it to decide whether to draw the company-domain
+       * email box.
        *
-       * A count, not a list. The sign-in screen only needs to know whether to offer the email box
-       * that routes by domain; naming the providers would tell anybody who loads the page which
-       * companies use this deployment, which is not theirs to have before they sign in.
+       * It reported whether an enterprise identity provider had been registered, for a product that
+       * serves individuals directly and has no company front door. Neon Auth has no SAML or
+       * generic-OIDC route to register one through, so there is nothing that could make it true.
+       * It is kept rather than removed because the screen reads it and because deleting a key from a
+       * projected response is a breaking change for anything caching the old shape.
        */
-      ssoConfigured: ((await identityProviders?.list()) ?? []).length > 0,
+      ssoConfigured: false,
       authMode: config.auth ? "session" : "single-user",
     }),
   );
   /*
-   * Individual-user SaaS has no company SSO to register at runtime: providers
-   * come from deployment configuration, and there is no administrator who
-   * could authorize a new one. Better Auth's SSO plugin still serves its
-   * mutation routes, and its own guard asks only that somebody is signed in —
-   * which would let any user register an identity provider for a domain and
-   * mint themselves colleagues. So those three paths are closed entirely.
-   * Sign-in through an already-configured provider keeps working; nothing
-   * here touches it.
+   * Everything under `/api/auth` goes to the identity provider.
+   *
+   * There is no list of closed routes any more. The old one closed three SSO mutation paths so a
+   * signed-in user could not register an identity provider for a domain and mint themselves
+   * colleagues; the plugin that served them does not run here, so those paths do not exist to be
+   * closed. The sign-in screen's calls are Better Auth's own at the same paths, and the proxy in
+   * `auth/neon.ts` forwards each one.
    */
-  const CLOSED_SSO_ROUTES = new Set([
-    "/api/auth/sso/register",
-    "/api/auth/sso/update-provider",
-    "/api/auth/sso/delete-provider",
-  ]);
-
   app.on(["GET", "POST"], "/api/auth/*", async (context) => {
     if (!auth) {
       return context.json(
         { error: "No identity provider is configured." },
         503,
-      );
-    }
-
-    if (CLOSED_SSO_ROUTES.has(new URL(context.req.url).pathname)) {
-      return context.json(
-        { error: "Registering an identity provider is not available." },
-        410,
       );
     }
 
@@ -1112,10 +1110,15 @@ export function createApp(
         pageFrames,
         auditReader,
         attachmentDatabase,
-        // Verification is only demanded when codes can actually be delivered. Without a mail
-        // provider nobody could ever complete it, and the gate would refuse every computer
-        // use forever — the same line sign-in draws in auth/index.ts.
-        config.auth?.email !== undefined,
+        /*
+         * Whether an unverified address is refused a computer.
+         *
+         * Was `config.auth?.email !== undefined` — whether this process could send mail, which it no
+         * longer can: verification codes and reset links belong to the provider now. So the question
+         * is the provider's own setting, read from the branch's `neon_auth.project_config` by
+         * the provider's own configuration, read at start-up.
+         */
+        config.auth?.emailVerificationRequired,
       ),
     );
   }

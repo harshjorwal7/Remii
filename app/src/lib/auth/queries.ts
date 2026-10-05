@@ -41,20 +41,26 @@ export const authKeys = {
   providers: () => [...authKeys.all, "providers"] as const,
 };
 
-/** An identity provider this deployment can sign somebody in with. */
-export type AuthProviderId = "google" | "microsoft" | "okta";
+/**
+ * An identity provider this deployment can sign somebody in with.
+ *
+ * The ids the identity provider admits. Microsoft and Okta are gone: this product serves individuals
+ * directly rather than companies behind a directory, and the provider has no route to either.
+ */
+export type AuthProviderId = "google" | "github" | "vercel";
 
 /** What the sign-in screen may offer, answered by the process that knows. */
 export type SignInOptions = {
   providers: AuthProviderId[];
   /**
-   * Whether any enterprise identity provider is registered.
+   * Always false now, and kept because the screen reads it.
    *
-   * A boolean, not a list: naming them would tell anybody who loads the sign-in page which companies
-   * use this deployment, before they have signed in.
+   * It reported whether a company identity provider had been registered, for a product that has no
+   * company front door. The server still sends the key, and it sends `false`, so anything caching
+   * the old shape does not break on a field that has gone missing.
    */
   sso: boolean;
-  /** Whether email/username plus password sign-in is on (draws a form, not a button). */
+  /** Whether email plus password sign-in is on (draws a form, not a button). */
   emailPassword: boolean;
   authMode: "session" | "single-user";
 };

@@ -43,7 +43,7 @@ import {
   recordAuditEvent,
 } from "./audit";
 import { startRetentionSweeps } from "./audit-retention";
-import { createAuth } from "./auth";
+import { createNeonAuth, readNeonAuthSettings } from "./auth/neon";
 import { DEV_ACTOR, initializeDevActorUser } from "./auth/dev-actor";
 import type { RemiiRole } from "./auth/guards";
 import { createIdentityProviderStore } from "./auth/identity-provider-store";
@@ -213,7 +213,10 @@ async function resolveRequestActor(request: Request): Promise<{
   if (config.singleUser) {
     return { id: DEV_ACTOR.id, name: DEV_ACTOR.email, role: DEV_ACTOR.role };
   }
-  const session = await auth?.api.getSession({ headers: request.headers });
+  const session = await auth?.api.getSession({
+    headers: request.headers,
+    query: { disableCookieCache: true },
+  });
   const user = session?.user;
   if (!user) {
     throw new Error("A CopilotKit run requires a signed-in user.");
@@ -374,7 +377,7 @@ const componentStore = createComponentStore(database);
 // Its own connection is held for the life of the process; announced activity from any instance
 // arrives here and is fanned out to connected members.
 const channelActivityListener = await startChannelActivityListener(
-  config.databaseUrl,
+  config.databaseUrlUnpooled,
   channelEvents,
 );
 /**
@@ -400,7 +403,7 @@ const _abandonedRunSweeper = startAbandonedRunSweeps(database, (event) =>
 );
 
 const _runActivityListener = await startRunActivityListener(
-  config.databaseUrl,
+  config.databaseUrlUnpooled,
   (event: RunActivityEvent) => {
     /*
      * Announced on the channel bus rather than over a socket of its own, because the browser already
@@ -465,8 +468,56 @@ const identityProviderStore = createIdentityProviderStore(database);
  * store that receives those rows has to exist before anything can sign in.
  */
 const signInAuditStore = createAuditStore(database);
+/*
+ * What the provider will actually accept, read once from the branch's own configuration.
+ *
+ * `neon_auth.project_config` holds the social providers this branch has, whether email-and-password
+ * is on, and whether it demands a verified address. `config.auth` cannot know any of it — `loadConfig`
+ * is synchronous and takes an environment rather than a pool — so it is read here and written back
+ * onto the config before `createApp` reads it, which is the only way the sign-in screen's buttons
+ * and the computer gate's verification rule come from the same source as the provider itself.
+ *
+ * A failure here is not fatal. The provider refuses anything not configured, so the deployment keeps
+ * the defaults in `config.auth` and says so; a sign-in screen offering one button too many is a
+ * recoverable nuisance, whereas refusing to start would take the whole product down over a row.
+ */
+const providerSettings = config.auth
+  ? await readNeonAuthSettings(
+      database,
+      config.auth.neonAuthUrl,
+      config.auth.origin,
+    )
+  : null;
+if (providerSettings && config.auth) {
+  config.auth = {
+    ...config.auth,
+    socialProviders: providerSettings.socialProviders,
+    // Replaced rather than merged, so `emailPassword` is absent when the provider has it off rather
+    // than left at whatever the environment said. The environment said it because somebody wrote it
+    // down months ago; the provider is what answers.
+    emailPassword: providerSettings.emailPassword || undefined,
+    ...(providerSettings.requireEmailVerification
+      ? { emailVerificationRequired: true }
+      : {}),
+  };
+} else if (config.auth) {
+  console.error(
+    JSON.stringify({
+      type: "neon-auth-settings-unreadable",
+      note: "Could not read this branch's provider configuration, so the sign-in screen falls back to the defaults in config.ts. If the buttons do not match what Neon Auth accepts, this is why.",
+    }),
+  );
+}
+
 const auth = config.auth
-  ? createAuth(config, database, signInAuditStore)
+  ? createNeonAuth(
+      {
+        baseUrl: config.auth.neonAuthUrl,
+        origin: config.auth.origin,
+      },
+      database,
+      signInAuditStore,
+    )
   : undefined;
 const ownerOf = async (botId: string): Promise<string | null> => {
   try {
@@ -572,7 +623,7 @@ const policySource = await policyStore.load();
  * and the audit row both report success. See policy-listener.ts.
  */
 const policyListener = await startPolicyListener(
-  config.databaseUrl,
+  config.databaseUrlUnpooled,
   policyStore,
 );
 
@@ -682,7 +733,7 @@ const channelIdForThread = async (threadId: string): Promise<string | null> => {
 const pageFrameStore = createPageFrameStore(database);
 // Housekeeping on a schedule: audit rows when asked for, screenshots always, one timer. See audit-retention.ts.
 const retentionSweeps = startRetentionSweeps(
-  config.databaseUrl,
+  config.databaseUrlUnpooled,
   config.auditRetentionDays,
   pageFrameStore,
 );
@@ -692,7 +743,7 @@ const retentionSweeps = startRetentionSweeps(
  * this table answers one question about the present. See activity-retention.ts.
  */
 const activitySweeps = startActivitySweeps(
-  config.databaseUrl,
+  config.databaseUrlUnpooled,
   config.activityRetentionDays,
 );
 /*
@@ -3014,7 +3065,7 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
    * backlog rather than stopping at the limit it was asked for.
    */
   workOfferedListener = await startWorkOfferedListener(
-    config.databaseUrl,
+    config.databaseUrlUnpooled,
     (kind) => {
       if (kind === HANDOFF_KIND) void kick();
     },

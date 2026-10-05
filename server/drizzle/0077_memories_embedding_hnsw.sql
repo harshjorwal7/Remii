@@ -1,0 +1,76 @@
+-- Two changes with nothing in common except that they landed together, and one of them is not this
+-- file's name.
+--
+-- 1. THE NEAREST-NEIGHBOUR INDEX ON `memories.embedding`, so a recall is not a table scan.
+--
+-- THERE IS NO `user_id` IN HERE, and there cannot be one. The obvious index for this table leads with
+-- `user_id`, because every read scopes to one person before ordering by distance: both the vector arm
+-- of `searchMemories` and the duplicate check in `saveMemory` filter `user_id = $1`. pgvector refuses
+-- that shape outright --
+--
+--     CREATE INDEX ... USING hnsw (user_id, embedding vector_cosine_ops)
+--     ERROR:  access method "hnsw" does not support multicolumn indexes
+--
+-- -- and refuses ivfflat the same way. Partitioning a vector index by a column is not a pgvector
+-- feature at any version, so this index spans every person's rows at once and `user_id` filters
+-- afterwards. Verified against pgvector 0.8.6 on both local Postgres and Neon rather than assumed.
+--
+-- Only `searchMemories`'s vector arm can use this. An approximate index serves an
+-- `ORDER BY <distance>`, and that arm has one (`ORDER BY embedding <=> $1::vector LIMIT 50`), whereas
+-- the duplicate check in `saveMemory` filters on similarity and takes `LIMIT 1` with no distance
+-- ORDER BY at all — a planner asked to serve it this way has nothing to serve. So the scan on the
+-- memory-save write path is NOT fixed by this migration and needs a different answer.
+--
+-- WHAT USING IT COSTS, measured rather than quoted. An HNSW scan collects `hnsw.ef_search`
+-- candidates (40 by default) ordered by distance across the whole table and only then applies
+-- `user_id`, so a person whose memories are a small slice of the table gets only the few of those 40
+-- that are theirs. Two probes on Neon with 1024-dimension random vectors:
+--
+--   20,000 rows / 5 users   -> index scan chosen, `Rows Removed by Filter: 205`
+--   50,000 rows / 50 users  -> planner abandoned the index entirely for a seq scan plus sort,
+--                              1,000 rows read to return 50
+--
+-- The second result is the important one: past roughly this many people sharing a table, the planner
+-- works out that the `user_id` filter throws away too much of the graph and stops choosing this index.
+-- The index is then dead weight rather than a fallback, and the fix is table partitioning on `user_id`
+-- with a per-partition HNSW index, which is a migration that cannot be written before the data shape
+-- that needs it exists.
+--
+-- `SET hnsw.iterative_scan = strict_order` (pgvector 0.8.0+) is the other lever: it re-enters the
+-- graph until the LIMIT is filled or `hnsw.max_scan_tuples` is reached. It is deliberately not applied
+-- here. It is a session setting, the connection pool shares sessions, and setting it on the connection
+-- rather than on the single query that wants it would change results for every other HNSW scan in the
+-- process. It belongs on the recall query, at the point where the planner is actually choosing this
+-- index — which, per the probe above, is a different point than "after this migration".
+--
+-- At the eight rows this database holds today the planner ignores the index and scans, which is
+-- correct and nothing here changes it.
+--
+-- `vector_cosine_ops` because every `<=>` in the codebase is cosine distance. The default op class is
+-- `vector_l2_ops`, which an `<=>` ORDER BY cannot use at all — the index would sit there unused and
+-- the planner would say so, which is at least an honest failure.
+--
+-- Build parameters are pgvector's defaults, `m = 16` and `ef_construction = 64`, at the 1024-dimension
+-- width of `remi.ts`'s `vector1024`. Stated rather than tuned: there is no row count or recall-latency
+-- budget to tune them against, and a number written down without a measurement behind it is
+-- indistinguishable from a guess.
+--
+-- 2. `users.neon_auth_user_id`, which the file's name does not mention.
+--
+-- This is the identity provider's id for a person, held beside this product's own. Sign-in is Neon
+-- Auth, whose users live in `neon_auth.user` under a UUID the provider assigned, while `users.id` is
+-- this product's identifier and 39 foreign keys point at it. So the two are linked rather than merged:
+-- the provider's id goes here, unique where present, and it is how a repeat sign-in finds the row that
+-- everything else already hangs off.
+--
+-- NULLABLE, and that is the point rather than an oversight. Every row that predates the switch has no
+-- value here, and a person who signs in with one of those addresses is matched by address instead and
+-- has this column filled in — see `auth/neon.ts`'s `ensureLocalUser`. Adding it NOT NULL would have
+-- failed on every existing row for no benefit.
+--
+-- NOT the primary key. `id` is this product's own and predates the provider; re-keying 39 columns and
+-- every row in them to match an assigned UUID would risk exactly the data loss the switch was meant to
+-- avoid, for no gain.
+ALTER TABLE "users" ADD COLUMN "neon_auth_user_id" text;--> statement-breakpoint
+CREATE INDEX "memories_embedding_hnsw_idx" ON "memories" USING hnsw ("embedding" vector_cosine_ops);--> statement-breakpoint
+ALTER TABLE "users" ADD CONSTRAINT "users_neon_auth_user_id_unique" UNIQUE("neon_auth_user_id");

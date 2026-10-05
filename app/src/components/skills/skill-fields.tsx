@@ -1,7 +1,5 @@
 import { useForm } from "@tanstack/react-form";
 import { useEffect, useRef } from "react";
-import { SkillRepo } from "@/components/skills/skill-repo";
-import { SkillTools } from "@/components/skills/skill-tools";
 import { Button } from "@/components/ui/button";
 import {
   Field,
@@ -222,22 +220,6 @@ export function SkillFields({
               </Field>
             );
           }}
-        </form.Field>
-        <form.Field name="repo">
-          {(field) => (
-            <SkillRepo
-              onChange={field.handleChange}
-              value={field.state.value}
-            />
-          )}
-        </form.Field>
-        <form.Field name="tools">
-          {(field) => (
-            <SkillTools
-              onChange={field.handleChange}
-              selected={field.state.value}
-            />
-          )}
         </form.Field>
       </FieldGroup>
 

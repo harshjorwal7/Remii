@@ -6,13 +6,7 @@ import AgentOrb from "@/components/agents/orb/agent-orb";
 import { ProviderLogo } from "@/components/auth/provider-logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
-import {
-  authClient,
-  providerName,
-  signInWith,
-  signInWithEmailDomain,
-} from "@/lib/auth/client";
+import { authClient, providerName, signInWith } from "@/lib/auth/client";
 import { appConfig } from "@/lib/generated/application-config";
 import {
   type AuthProviderId,
@@ -42,11 +36,14 @@ export const Route = createFileRoute("/sign")({
 });
 
 /**
- * Email (or username) plus password, Remi-style.
+ * An email address and a password.
  *
- * Two tabs and three fields, no OAuth round trip. Usernames sign in through the username
- * plugin; anything with an @ signs in by email. On success the session cookie is set by
- * the response and the app navigates home, where the authed gate reads the new session.
+ * Two tabs and two fields, no OAuth round trip. The field this used to accept a login name in, and
+ * the sign-up field beside it, are gone: the identity provider has no username, so there was nothing
+ * for either to be saved as. See the refusal in `submit`.
+ *
+ * On success the session cookie is set by the response and the app navigates home, where the
+ * authed gate reads the new session.
  */
 function EmailPasswordForm({
   busy,
@@ -58,7 +55,6 @@ function EmailPasswordForm({
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<"in" | "up">("in");
   const [identifier, setIdentifier] = useState("");
-  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [working, setWorking] = useState(false);
@@ -68,29 +64,31 @@ function EmailPasswordForm({
     onError(null);
     setWorking(true);
     try {
+      /*
+       * An address, or a refusal.
+       *
+       * There was a third branch here that read a login name instead of an address, which is how
+       * somebody signed in with whichever of the two they remembered. The identity provider has no
+       * username, so that branch would now be a call to an endpoint that answers 404 — and it would
+       * fail on somebody who has typed a correct username, which is the worst possible moment to
+       * discover the field was never going to work. Refused here, with a reason, instead.
+       */
+      const email = identifier.trim();
+      if (!email.includes("@")) {
+        throw new Error("Enter the email address you signed up with.");
+      }
       if (mode === "up") {
         if (password !== confirmPassword) {
           throw new Error("Passwords do not match.");
         }
-        const id = identifier.trim();
         const created = await authClient.signUp.email({
-          name: username.trim() || id,
-          username: username.trim() || undefined,
-          email: id,
+          name: email,
+          email,
           password,
         });
         if (created.error) throw new Error(created.error.message);
-      } else if (identifier.includes("@")) {
-        const result = await authClient.signIn.email({
-          email: identifier.trim(),
-          password,
-        });
-        if (result.error) throw new Error(result.error.message);
       } else {
-        const result = await authClient.signIn.username({
-          username: identifier.trim(),
-          password,
-        });
+        const result = await authClient.signIn.email({ email, password });
         if (result.error) throw new Error(result.error.message);
       }
       // The session cookie is set by the response above. The authed gate reads the user
@@ -147,23 +145,14 @@ function EmailPasswordForm({
       >
         <Input
           className="h-10"
-          autoComplete={mode === "up" ? "email" : "username"}
+          autoComplete="email"
           disabled={busy || working}
           onChange={(event) => setIdentifier(event.target.value)}
-          placeholder="Email or username"
+          placeholder="Email"
           required
+          type="email"
           value={identifier}
         />
-        {mode === "up" ? (
-          <Input
-            className="h-10"
-            autoComplete="username"
-            disabled={busy || working}
-            onChange={(event) => setUsername(event.target.value)}
-            placeholder="Username (optional)"
-            value={username}
-          />
-        ) : null}
         <Input
           className="h-10"
           autoComplete={mode === "up" ? "new-password" : "current-password"}
@@ -214,36 +203,12 @@ function EmailPasswordForm({
 }
 
 function SignScreen() {
-  // Which provider is being opened, rather than whether one is: with three buttons, a single
+  // Which provider is being opened, rather than whether one is: with more than one button, a single
   // boolean would put "Opening…" on all of them.
-  const [opening, setOpening] = useState<AuthProviderId | "sso" | null>(null);
+  const [opening, setOpening] = useState<AuthProviderId | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { data: options } = useQuery(authProvidersQueryOptions());
   const providers = options?.providers ?? [];
-  const [email, setEmail] = useState("");
-
-  /**
-   * Sign in through whichever identity provider covers this address.
-   *
-   * No password is asked for and none is checked here: only the part after the @ is used, to decide
-   * which registered provider to hand somebody to.
-   */
-  async function handleDomainSignIn(submission: React.FormEvent) {
-    submission.preventDefault();
-    setError(null);
-    setOpening("sso");
-
-    try {
-      await signInWithEmailDomain(email);
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error
-          ? caughtError.message
-          : "No identity provider is registered for that address.",
-      );
-      setOpening(null);
-    }
-  }
 
   async function handleSignIn(provider: AuthProviderId) {
     setError(null);
@@ -340,43 +305,6 @@ function SignScreen() {
               No sign-in provider is configured for this deployment.
             </p>
           )}
-          {/*
-           * The way in for a company that runs its own identity provider.
-           *
-           * Below the buttons, because a deployment with both has more people arriving through the
-           * buttons: the registered providers are for the companies whose IdP was added by hand.
-           */}
-          {options?.sso ? (
-            <form className="mt-3" onSubmit={handleDomainSignIn}>
-              {providers.length > 0 ? (
-                <div className="mb-3 flex items-center gap-3">
-                  <Separator className="flex-1" />
-                  <span className="text-muted-foreground text-xs">or</span>
-                  <Separator className="flex-1" />
-                </div>
-              ) : null}
-              <Input
-                className="h-10"
-                autoComplete="email"
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@company.com"
-                required
-                type="email"
-                value={email}
-              />
-              <Button
-                className="mt-2 w-full tracking-tight"
-                disabled={opening !== null || email.trim().length === 0}
-                size="lg"
-                type="submit"
-                variant="outline"
-              >
-                {opening === "sso"
-                  ? "Opening…"
-                  : "Continue with your company account"}
-              </Button>
-            </form>
-          ) : null}
           {error ? (
             <p className="mt-3 text-sm text-destructive" role="alert">
               {error}

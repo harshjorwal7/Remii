@@ -40,17 +40,9 @@ This template renders nothing.
   data, and the server ignores that variable. Keeping the check would have refused every correct
   install of this chart while the value it demanded did nothing.
 */}}
-{{- $provider := or .Values.config.auth.google.clientId .Values.config.auth.microsoft.clientId .Values.config.auth.okta.clientId -}}
+{{- $provider := .Values.config.auth.neonAuthBaseUrl -}}
 {{- if and (not .Values.config.singleUser) (not $provider) }}
-{{- fail "Nobody could sign in. Configure config.auth.google, config.auth.microsoft or config.auth.okta, or set config.singleUser=true for a local trial where every request is admitted as one fixed user." }}
-{{- end }}
-
-{{- if and $provider (not .Values.config.publicUrl) }}
-{{- fail "Sign-in needs somewhere to come back to. Set config.publicUrl to the address people reach this deployment at, which is where the OAuth callback lands." }}
-{{- end }}
-
-{{- if and .Values.config.auth.okta.clientId (not .Values.config.auth.okta.issuer) }}
-{{- fail "config.auth.okta.issuer is required alongside the Okta client, such as https://example.okta.com/oauth2/default. It is what makes it a particular Okta rather than Okta in general." }}
+{{- fail "Nobody could sign in. Set config.auth.neonAuthBaseUrl to your Neon Auth address - neon link then neon deploy prints it - or set config.singleUser=true for a local trial where every request is admitted as one fixed user." }}
 {{- end }}
 
 {{- /*
@@ -240,42 +232,26 @@ This template renders nothing.
 {{- end }}
 
 {{- /*
-  Sign-in configured with nothing to sign sessions with.
+  Sign-in pointed at an address that cannot work.
 
-  The server throws "Sign-in requires BETTER_AUTH_SECRET" and the pod crash-loops, which is a slow
-  and confusing way to be told about a value that was missing before anything was created. Every
-  shipped `ci/` values file was in exactly this state, which is what happens when nothing renders the
-  chart. Checked only when this chart holds the secret: from an existing Secret or an external store
-  it is not readable at template time, and refusing on a guess would refuse installs that are fine.
+  NEON_AUTH_BASE_URL is the only sign-in setting this chart holds, and two of its failures are worth
+  catching at install rather than as a pod that crash-loops or, worse, one that comes up and never
+  holds a session.
+
+  Neither has a secret behind it any more, so both are checked whenever the address is set. That is
+  the whole difference from the two checks that used to live here, which needed to know whether this
+  chart held secrets.betterAuthSecret and therefore went dark on every install that brought its own
+  Secret or read one from an external store - which is where a real deployment is.
 */}}
-{{- if or .Values.config.auth.google.clientId .Values.config.auth.microsoft.clientId .Values.config.auth.okta.clientId }}
-{{- if and (not .Values.secrets.betterAuthSecret) (not .Values.secrets.existingSecret) (not .Values.externalSecrets.enabled) }}
-{{- fail "An identity provider is configured but secrets.betterAuthSecret is not. Sessions are signed with it and the server refuses to start without it. Generate one with: openssl rand -base64 32" }}
-{{- end }}
-{{- if and .Values.secrets.betterAuthSecret (lt (len .Values.secrets.betterAuthSecret) 32) }}
-{{- fail "secrets.betterAuthSecret must be at least 32 characters. Generate one with: openssl rand -base64 32" }}
+{{- if .Values.config.auth.neonAuthBaseUrl }}
+{{- if not (hasPrefix "https://" .Values.config.auth.neonAuthBaseUrl) }}
+{{- fail "config.auth.neonAuthBaseUrl must be an https:// address. Neon Auth session cookie is __Secure- prefixed and a browser refuses a __Secure- cookie that did not arrive over TLS, so an http:// address produces a sign-in that appears to succeed and leaves no session." }}
 {{- end }}
 {{- if not .Values.config.publicUrl }}
-{{- fail "An identity provider is configured but config.publicUrl is not. Sign-in redirects come back to that address, so the server refuses to start without it." }}
+{{- fail "config.auth.neonAuthBaseUrl is set but config.publicUrl is not. The provider checks the Origin of every call against the branch trusted-origin list, and a deployment with no public address sends one the branch has not been told about." }}
 {{- end }}
 {{- end }}
 
-{{- /*
-  The same requirement, for a deployment whose secrets come from a store.
-
-  The value itself is not readable at template time, but the LIST of keys is, and a store that never
-  mentions `better-auth-secret` cannot be holding one. Every shipped cloud `ci/` file was in this
-  state, so the refusal above passed and the pod still crash-looped.
-*/}}
-{{- if .Values.externalSecrets.enabled }}
-{{- if or .Values.config.auth.google.clientId .Values.config.auth.microsoft.clientId .Values.config.auth.okta.clientId }}
-{{- $named := list }}
-{{- range .Values.externalSecrets.data }}{{- $named = append $named .secretKey }}{{- end }}
-{{- if not (has "better-auth-secret" $named) }}
-{{- fail "An identity provider is configured but externalSecrets.data does not name better-auth-secret. Sessions are signed with it and the server refuses to start without it." }}
-{{- end }}
-{{- end }}
-{{- end }}
 
 {{- /*
   A Bot's egress proxy, against the network policy that decides whether it can be reached.
@@ -313,7 +289,7 @@ This template renders nothing.
   So a cloud operator who turns on `routines.enabled` without adding this key to
   `externalSecrets.data` gets a clean install: the API server and the CronJob both reference a key
   that is never coming, and every pod that mounts it fails to start. Checked the same way as
-  `managed-agent-token` and `better-auth-secret` above: the value is not readable at template time,
+  `managed-agent-token` above: the value is not readable at template time,
   but the list of keys is, and a store that never mentions this key cannot be holding one.
 */}}
 {{- if and (.Values.routines).enabled .Values.externalSecrets.enabled }}

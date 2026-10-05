@@ -11,6 +11,7 @@ import {
   timestamp,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { users } from "./core";
 
 /**
@@ -118,6 +119,50 @@ export const memories = pgTable(
     ),
     index("memories_user_idx").on(table.userId),
     index("memories_user_task_idx").on(table.userId, table.taskId),
+    /*
+     * The nearest-neighbour index, on `embedding` alone and with no way to scope it by person.
+     *
+     * HNSW cannot be partitioned by a column. `CREATE INDEX ... USING hnsw (user_id, embedding
+     * vector_cosine_ops)` is refused outright by pgvector — `access method "hnsw" does not support
+     * multicolumn indexes` — and the same is true of ivfflat. So the tempting one-line fix for "every
+     * read here filters `user_id`" does not exist, and the honest options are a partial index per
+     * person (which cannot be generated ahead of the people arriving) or a partitioned table.
+     *
+     * Which leaves one index across every person's rows, ordered within it by cosine distance, and
+     * a `user_id` filter applied afterwards. That is the shape pgvector documents as lossy, and the
+     * loss was measured rather than quoted: at 20,000 rows across 5 users the planner chose this
+     * index and threw away 205 rows to apply `user_id`; at 50,000 rows across 50 users it abandoned
+     * the index entirely and sorted a sequential scan instead. Past roughly that many people per
+     * table this stops being a fallback and becomes dead weight, and the answer is partitioning
+     * `memories` on `user_id` with a per-partition index — a migration nobody can write until the
+     * data shape that needs it exists.
+     *
+     * `SET hnsw.iterative_scan = strict_order` (pgvector 0.8.0+) is the other lever: it re-enters the
+     * graph until the LIMIT is filled. Deliberately not applied to the connection — it is a session
+     * setting, the pool shares sessions, and setting it there rather than on the one query that wants
+     * it would change results for every other HNSW scan in the process.
+     *
+     * At the eight rows this table holds today the planner ignores the index and scans exactly, which
+     * is correct and nothing here changes it.
+     *
+     * Only `searchMemories`'s vector arm can use it, and not `saveMemory`'s duplicate check: an
+     * approximate index serves an `ORDER BY <distance>`, and that duplicate check filters on
+     * similarity and takes `LIMIT 1` with no distance ORDER BY at all. The scan on the memory-save
+     * write path is therefore NOT fixed by this index and needs a different answer.
+     *
+     * `vector_cosine_ops` because `<=>` is cosine distance everywhere it is written. The default op
+     * class is `vector_l2_ops`, which an `<=>` ORDER BY cannot use at all — the index would sit
+     * there unused and the planner would say so, which is the honest failure.
+     *
+     * `.using("hnsw")` so drizzle-kit emits `USING hnsw` rather than guessing btree from the name.
+     * The build parameters are pgvector's defaults (`m = 16`, `ef_construction = 64`), chosen here
+     * rather than tuned: a deployment that has grown enough to care should set `hnsw.ef_search` per
+     * workload instead of assuming these are right for its row counts.
+     */
+    index("memories_embedding_hnsw_idx").using(
+      "hnsw",
+      sql`${table.embedding} vector_cosine_ops`,
+    ),
   ],
 );
 
