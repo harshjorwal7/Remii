@@ -69,7 +69,10 @@ const read = () => held.holder?.current ?? "unread";
  * holder rather than about how the host happened to schedule React's work.
  */
 async function declares(view: () => string, expected: string) {
-  await waitFor(() => expect(view()).toBe(expected));
+  // Five seconds, not the one second `waitFor` defaults to. React flushes this effect through its
+  // scheduler, which is a macrotask competing with everything else on a loaded CI runner, and the
+  // first version of this file failed there by giving up before the callback ran.
+  await waitFor(() => expect(view()).toBe(expected), { timeout: 5000 });
 }
 
 /** A macrotask, for the reads that must happen AFTER an unmount rather than after a mount. */
