@@ -222,6 +222,31 @@ jobs:
       # comes from the job env instead, which drizzle.config.ts already reads.
       - run: bunx drizzle-kit migrate --config=drizzle.config.ts
         working-directory: server
+      # THE GOLDEN IMAGES ARE PHOTOGRAPHED WITH ONE CHROME, AND IT IS THIS ONE.
+      #
+      # `app/tests/visual` renders the mascot sheet in a real browser and compares the picture with a
+      # committed PNG. That is only a fair comparison while the renderer is the renderer the picture
+      # was taken with: the runner image's Chrome moves, and when it does the sheet came out 44 pixels
+      # taller here and the job reported "the mascot sheet no longer matches its committed picture"
+      # with nothing wrong with the mascot. The test also SKIPS itself when no Chrome is installed, so
+      # without this step a drifting runner quietly turns the check off rather than failing it.
+      #
+      # Bump the version deliberately, in the same commit as a regenerated `sheet.png`: render it with
+      # `bun run app/tests/visual/render-sheet.ts` then `node app/tests/visual/sheet.mjs --update`, and
+      # read the picture before committing it.
+      - name: Pin the browser the committed golden pictures were taken with
+        run: |
+          set -euo pipefail
+          version=150.0.7871.128
+          deb="https://dl.google.com/linux/direct/google-chrome-stable_${version}_amd64.deb"
+          curl -fsSL -o /tmp/chrome.deb "$deb"
+          sudo dpkg -i /tmp/chrome.deb
+          installed=$(google-chrome --version)
+          echo "$installed"
+          case "$installed" in
+            *" $version"*) ;;
+            *) echo "::error::pinned Chrome $version did not install (got: $installed)"; exit 1;;
+          esac
       # A passing job must include the expected test floor. Import-time failures can otherwise skip
       # files before their tests are registered.
       - run: bun run test:ci
