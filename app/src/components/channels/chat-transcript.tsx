@@ -47,6 +47,8 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { attachmentUrl } from "@/lib/channels/attachments";
 import { readFiring } from "@/lib/channels/routine-firing";
+import { normalizeCommandName } from "@/lib/commands/slug";
+import { RENDERABLE_NAMES } from "@/lib/copilot/gallery-registry";
 import { capMarkdown, markdownComponents } from "@/lib/markdown";
 import { EASE_OUT, ENTRANCE_SECONDS } from "@/lib/motion";
 import { readToolName } from "@/lib/plugins/tool-name";
@@ -108,8 +110,11 @@ function splitSkillChip(
   if (!match) {
     return null;
   }
-  const known = commandNames.split(",").filter(Boolean);
-  if (!known.includes(match[1])) {
+  const known = commandNames
+    .split(",")
+    .filter(Boolean)
+    .map((name) => normalizeCommandName(name));
+  if (!known.includes(normalizeCommandName(match[1]))) {
     return null;
   }
   return { chip: match[1], rest: text.slice(match[0].length) };
@@ -1532,7 +1537,9 @@ export function ChatTranscript({
    * folds a run of tool and thinking rows into one disclosure that opens while the answer is still
    * being produced and folds the moment it starts arriving.
    */
-  const items = groupChatWork(toVisibleChatItems(messages));
+  const items = groupChatWork(toVisibleChatItems(messages), (name) =>
+    RENDERABLE_NAMES.has(name),
+  );
 
   /*
    * ONLY WHILE THERE IS NOTHING ELSE TO LOOK AT. Once a reply starts streaming, or a tool line

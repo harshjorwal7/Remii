@@ -389,11 +389,19 @@ export function createTurnRunner(options: {
     /*
      * The turn's own meter, on the same subscriber seam as the reply above.
      *
-     * The runner drives `runAgent`, not `run`, so an enforcement wrapper
-     * around `run` would never fire here. Counting TOOL_CALL_START on the
-     * subscribed events covers this path directly: past 15 iterative calls
-     * the turn is stopped the same way the deadline stops it. Token totals
-     * feed the charge below, so the daily circuit breaker counts credits.
+     * Here rather than through `EnforcedAgent`, for two reasons that are both load-bearing.
+     *
+     * The wrapper would not fire where the reply is read: the runner drives `runAgent`, and
+     * `EnforcedAgent` answers that path by forwarding inward, leaving its OWN `messages` array as the
+     * caller seeded it. The reply below is recovered by diffing `agent.messages`, so a wrapped agent
+     * reads back as having said nothing and every firing would be recorded as "the turn finished
+     * without saying anything". `server/tests/turn-metering.test.ts` pins that.
+     *
+     * And it would charge twice: the wrapper settles the ledger through `onTurnSettled`, and
+     * `chargeUsage` below settles the same turn again for the same tokens.
+     *
+     * So counting TOOL_CALL_START on the subscribed events covers this path directly. Token totals
+     * feed the charge, so the daily circuit breaker counts credits rather than firings.
      */
     let toolCalls = 0;
     let promptTokens = 0;
@@ -574,9 +582,9 @@ export function createTurnRunner(options: {
     }
 
     /*
-     * And the same for a turn the loop breaker stopped: past 15 iterative
-     * tool calls the turn is going in circles, and posting its half-answer
-     * would read as success.
+     * And the same for a turn the loop breaker stopped: past
+     * `MAX_TURN_TOOL_CALLS` iterative tool calls the turn is going in circles,
+     * and posting its half-answer would read as success.
      */
     if (loopBroken) {
       await stopPromise;

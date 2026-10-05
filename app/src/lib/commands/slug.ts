@@ -19,3 +19,22 @@ export function commandSlug(name: string): string {
       .replace(/^-+|-+$/g, "")
   );
 }
+
+/**
+ * The short name under which a component is typed, e.g. `showBarChart` → `bar-chart`. This is what
+ * the dropdown shows; the full `show-bar-chart` slug remains as a hidden alias so chips inserted
+ * before this existed still resolve.
+ */
+export function commandAlias(name: string): string {
+  return commandSlug(name)
+    .replace(/^(show|ask|draw)-/, "")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Canonical form for name comparison: lowercase, alphanumerics-only. Lets `/barchart`,
+ * `/bar-chart` and `/BarChart` all resolve to the same command.
+ */
+export function normalizeCommandName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}

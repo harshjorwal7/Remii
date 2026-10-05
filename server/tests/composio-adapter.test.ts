@@ -339,6 +339,166 @@ describe("the page size this file is written against", () => {
   });
 });
 
+/**
+ * THE RETRY, WHICH IS ONE ATTEMPT AND ONLY ON A CLASS OF FAILURE.
+ *
+ * A listing that is retried has to be a listing: `tools.execute` is not one, and a 429 there is
+ * indistinguishable from the vendor having already run the action, so re-sending it after a socket
+ * failure would be a second email rather than a second try.
+ */
+describe("a listing that fails once and recovers", () => {
+  /** A vendor whose listing refuses `failures` times and then answers, counting every attempt. */
+  function flaky(failures: number, error: unknown) {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      list: async () => {
+        calls += 1;
+        if (calls <= failures) throw error;
+        return { items: [], next_cursor: null };
+      },
+    };
+  }
+
+  const rateLimit = Object.assign(new Error("rate limited"), { status: 429 });
+  const serverFault = Object.assign(new Error("bad gateway"), { status: 502 });
+
+  /*
+   * THE THREE LISTINGS THAT WERE WRAPPED, which is every listing the adapters' own code reads a
+   * cursor out of and the app catalogue is not among them: `fetchDirectory` goes through the
+   * toolkit listing, whose response carries no cursor at all, so a retry there has nothing to resume
+   * from and the hold that a rejection puts on a catalogue is worth more than one extra request.
+   */
+  const wrapped = [
+    {
+      what: "an app's action list",
+      vendor: (list: () => Promise<unknown>) => ({
+        tools: {
+          list: async () => ({
+            ...(await list()),
+            next_cursor: null,
+          }),
+        },
+      }),
+      run: async (_broker: ComposioBroker, actions: ComposioActions) =>
+        actions.listActions("gmail", { limit: 10 }),
+    },
+    {
+      what: "one person's accounts",
+      vendor: (list: () => Promise<unknown>) => ({
+        connectedAccounts: {
+          list: async () => ({ ...(await list()), next_cursor: null }),
+        },
+      }),
+      run: async (broker: ComposioBroker) =>
+        broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
+    },
+    {
+      what: "this deployment's authorization configs",
+      vendor: (list: () => Promise<unknown>) => ({
+        authConfigs: {
+          list: async () => ({ ...(await list()), next_cursor: null }),
+        },
+      }),
+      run: async (broker: ComposioBroker) => broker.deleteAuthConfig("gmail"),
+    },
+  ];
+
+  test("a 429 is asked again and the recovered answer is the one used", async () => {
+    for (const { what, vendor, run } of wrapped) {
+      const list = flaky(1, rateLimit);
+      const { broker, actions } = buildComposioClient(
+        fakeVendor(vendor(list.list)),
+      );
+      await run(broker, actions);
+      /*
+       * Two attempts, not one refusal. Every person connecting an app during the vendor's busiest
+       * minutes pays first, and one of those requests recovers on the retry far more often than it
+       * does not — so the page waits rather than asking every reconnecting client at once for the
+       * same first answer.
+       */
+      expect(`${what}: ${list.calls()}`).toBe(`${what}: 2`);
+    }
+  });
+
+  test("a 500 is asked again on the same terms", async () => {
+    for (const { what, vendor, run } of wrapped) {
+      const list = flaky(1, serverFault);
+      const { broker, actions } = buildComposioClient(
+        fakeVendor(vendor(list.list)),
+      );
+      await run(broker, actions);
+      expect(`${what}: ${list.calls()}`).toBe(`${what}: 2`);
+    }
+  });
+
+  test("a second failure is a refusal, not a third attempt", async () => {
+    const list = flaky(2, rateLimit);
+    const { broker } = buildComposioClient(
+      fakeVendor({ connectedAccounts: { list: list.list } }),
+    );
+    await failureOf(broker.isConnected({ userId: "user_1", toolkit: "gmail" }));
+    // One more than the retry and no more. A listing that keeps failing is the outage every
+    // reconnecting client would otherwise be asking about at the same instant.
+    expect(list.calls()).toBe(2);
+  });
+
+  test("a refusal that is neither a rate limit nor a fault is not retried at all", async () => {
+    for (const status of [400, 401, 403, 404, 422]) {
+      const list = flaky(1, Object.assign(new Error("no"), { status }));
+      const { broker } = buildComposioClient(
+        fakeVendor({ connectedAccounts: { list: list.list } }),
+      );
+      await failureOf(
+        broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
+      );
+      /*
+       * Once, for every status that means the request itself is wrong. Retrying a 400 or a 401 asks
+       * the same question and is refused the same way, and the lockout a run of them causes is this
+       * deployment's own doing.
+       */
+      expect(`${status}: ${list.calls()}`).toBe(`${status}: 1`);
+    }
+  });
+
+  test("an action is never retried, because a second try can be a second email", async () => {
+    let ran = 0;
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          getRawComposioToolBySlug: async () => ({
+            slug: "GMAIL_SEND_EMAIL",
+            toolkit: { slug: "gmail" },
+          }),
+          execute: async () => {
+            ran += 1;
+            throw rateLimit;
+          },
+        },
+      }),
+    );
+
+    await failureOf(
+      actions.execute(
+        {
+          toolkit: "gmail",
+          slug: "GMAIL_SEND_EMAIL",
+          userId: "user_1",
+          version: "20260903_00",
+        },
+        {},
+      ),
+    );
+
+    /*
+     * THE ONE PLACE A RETRY WOULD DO REAL HARM. A 429 on an execute is indistinguishable from the
+     * vendor having run the action and failed to say so, so a retry after it is not a second attempt
+     * at an unanswered question — it is a second email to somebody. One call, every time.
+     */
+    expect(ran).toBe(1);
+  });
+});
+
 describe("listing an app's actions", () => {
   test("the caller's page reaches the vendor, so the vendor's default never applies", async () => {
     const asked: unknown[] = [];
@@ -709,6 +869,81 @@ describe("executing an action", () => {
       /Refreshing this app's tools on App connections/,
     );
     expect(executed).toEqual([]);
+  });
+
+  /** Cached provenance: a listed slug resolves without paying for the resolve. */
+  test("a slug listed under this deployment satisfies the guard from the listing, not from the vendor", async () => {
+    let resolves = 0;
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          list: async () => ({
+            items: [{ slug: "GMAIL_FETCH_EMAILS", toolkit: { slug: "gmail" } }],
+            next_cursor: undefined,
+          }),
+          getRawComposioToolBySlug: async () => {
+            resolves += 1;
+            return { slug: "GMAIL_FETCH_EMAILS", toolkit: { slug: "gmail" } };
+          },
+          execute: async () => ({ data: {}, error: null, successful: true }),
+        },
+      }),
+    );
+
+    await actions.listActions("gmail", { limit: 10 });
+    const result = await actions.execute(
+      {
+        toolkit: "gmail",
+        slug: "GMAIL_FETCH_EMAILS",
+        userId: "user_1",
+        version: "20260903_00",
+      },
+      {},
+    );
+
+    expect(result.successful).toBe(true);
+    // The thing that used to be one sequential dependency on every call is now the listing's own
+    // record. A test that left `resolves` alone would read "the guard still works" while every call
+    // paid twice for the same fact.
+    expect(resolves).toBe(0);
+  });
+
+  test("a cached mismatch refuses before the vendor sees it, fresh like the guard", async () => {
+    const created: string[] = [];
+    const { actions } = buildComposioClient(
+      fakeVendor({
+        tools: {
+          list: async () => ({
+            items: [{ slug: "GMAIL_FETCH_EMAILS", toolkit: { slug: "gmail" } }],
+            next_cursor: undefined,
+          }),
+          getRawComposioToolBySlug: async () => {
+            throw new Error(
+              "listing already proved this; the vendor is not the answer.",
+            );
+          },
+          execute: async () => {
+            created.push("sent");
+            return { data: {}, error: null, successful: true };
+          },
+        },
+      }),
+    );
+
+    await actions.listActions("gmail", { limit: 10 });
+    const refused = actions.execute(
+      {
+        toolkit: "slack",
+        slug: "GMAIL_FETCH_EMAILS",
+        userId: "user_1",
+        version: "20260903_00",
+      },
+      {},
+    );
+
+    const refusal = await failureOf(refused);
+    expect(refusal.message).toMatch(/this connection is for slack/);
+    expect(created).toEqual([]);
   });
 
   /**
@@ -1237,8 +1472,8 @@ describe("telling this deployment's auth configs from anybody else's", () => {
         authConfigs: {
           list: async (query: unknown) =>
             (query as { cursor?: string }).cursor === undefined
-              ? { items: [OURS], nextCursor: "page_2" }
-              : { items: [OURS], nextCursor: null },
+              ? { items: [OURS], next_cursor: "page_2" }
+              : { items: [OURS], next_cursor: null },
           delete: async (id: string) => {
             if (deleted.includes(id)) {
               throw new Error(
@@ -1308,9 +1543,9 @@ describe("telling this deployment's auth configs from anybody else's", () => {
         authConfigs: {
           list: async (query: unknown) =>
             (query as { cursor?: string }).cursor === undefined
-              ? { items: [OURS], nextCursor: "page_2" }
+              ? { items: [OURS], next_cursor: "page_2" }
               : // The same config, named again with a name this deployment cannot read.
-                { items: [{ ...OURS, name: null }], nextCursor: null },
+                { items: [{ ...OURS, name: null }], next_cursor: null },
           delete: async (id: string) => {
             deleted.push(id);
           },
@@ -1342,6 +1577,54 @@ describe("telling this deployment's auth configs from anybody else's", () => {
    * a proxy stitching two partial reads, is as free to hand the half-written row over first as
    * second, so a function whose verdict depends on that is deciding on a coin toss.
    */
+  /*
+   * THE REGRESSION THIS FIXTURE SPELLING HID, stated as a test of its own so it cannot hide again.
+   *
+   * `authConfigs` and `connectedAccounts` are reached through the RAW generated client, so the cursor
+   * on the wire is `next_cursor`. A fixture saying `nextCursor` is a shape the vendor never sends, and
+   * these two listings went from the raw answer straight into `everyRowOf`, which reads the renamed
+   * spelling — so an absent rename read as "there is no next page", which is what a complete listing
+   * looks like. The whole suite was green against a listing that stopped after one page.
+   *
+   * Here the second page is the only one holding anything, so an implementation that reads one page
+   * returns nothing at all and says the app holds no config of ours — which is the state
+   * `ensureAuthConfig` answers by creating a second one, the split this function exists to prevent.
+   */
+  test("a config of ours that is only on the second page is still found", async () => {
+    const listed: (string | undefined)[] = [];
+    // Asked of the removal, which is the caller that most needs the whole listing: it reports a
+    // clean removal and lets `removeServer` delete the app's row, so a config it never saw is a
+    // live grant with nothing left pointing at it.
+    const deleted: string[] = [];
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        authConfigs: {
+          list: async (query: unknown) => {
+            const cursor = (query as { cursor?: string }).cursor;
+            listed.push(cursor);
+            return cursor === undefined
+              ? { items: [], next_cursor: "page_2" }
+              : {
+                  // "(Remii)" is `CONFIG_SUFFIX`, the name this deployment claims its own configs
+                  // by — the same suffix every other config fixture here is named with.
+                  items: [{ id: "cfg_2", name: "Gmail (Remii)" }],
+                  next_cursor: null,
+                };
+          },
+          delete: async (id: string) => {
+            deleted.push(id);
+            return { success: true };
+          },
+        },
+      }),
+    );
+
+    await broker.deleteAuthConfig("gmail");
+
+    expect(listed).toEqual([undefined, "page_2"]);
+    expect(deleted).toEqual(["cfg_2"]);
+  });
+
   test("a repeated row read second is still the config, however the listing ordered the copies", async () => {
     const deleted: string[] = [];
     const { broker } = buildComposioClient(
@@ -1350,8 +1633,8 @@ describe("telling this deployment's auth configs from anybody else's", () => {
           list: async (query: unknown) =>
             (query as { cursor?: string }).cursor === undefined
               ? // The same config, named first with a name this deployment cannot read.
-                { items: [{ ...OURS, name: null }], nextCursor: "page_2" }
-              : { items: [OURS], nextCursor: null },
+                { items: [{ ...OURS, name: null }], next_cursor: "page_2" }
+              : { items: [OURS], next_cursor: null },
           delete: async (id: string) => {
             deleted.push(id);
           },
@@ -2058,6 +2341,51 @@ describe("withdrawing one person's grants", () => {
    * `./access` asks before running somebody's action, and `REVOCABLE` decides what a disconnect can
    * even see.
    */
+  /*
+   * THE CACHE KEY CARRIES THE QUESTION, AND THIS IS THE BUG THAT PROVES IT HAS TO.
+   *
+   * `isConnected` asks "is there any row" and stops at the first page holding one; `listAccounts`
+   * asks "what are they all" and reads to the end. Keyed on the person, the app and the statuses —
+   * which is all three of those two calls have in common — the answer to whichever ran first was
+   * served to the other. In that order the harm is a false: `isConnected`'s empty answer reached
+   * the caller that needs every row, and the withdrawal built on it would end fewer grants than it
+   * reported while saying how many it withdrew.
+   */
+  test("an early-stopped answer is never served to the caller that reads every page", async () => {
+    let pages = 0;
+    const { broker } = buildComposioClient(
+      fakeVendor({
+        connectedAccounts: {
+          list: async (query: unknown) => {
+            pages += 1;
+            const cursor = (query as { cursor?: string }).cursor;
+            // Page one holds nothing and offers a second page holding a row, so the two questions
+            // provably disagree: the count is found on page two and the full read finds it too.
+            return cursor === undefined
+              ? { items: [], next_cursor: "page-2" }
+              : {
+                  items: [{ id: "acc_1", status: "ACTIVE", alias: "a@b.com" }],
+                  next_cursor: null,
+                };
+          },
+        },
+      }),
+    );
+
+    expect(
+      await broker.isConnected({ userId: "user_1", toolkit: "gmail" }),
+    ).toBe(true);
+    const every = await broker.listAccounts({
+      userId: "user_1",
+      toolkit: "gmail",
+    });
+
+    // Both questions asked for their own pages — the count stopped at page two, the full read went
+    // on to the end — so neither answer was served out of the other's listing.
+    expect(pages).toBe(4);
+    expect(every.map((account) => account.id)).toEqual(["acc_1"]);
+  });
+
   test("the statuses a listing is filtered by are not the adapter's own array", async () => {
     const asked: string[][] = [];
     const { broker } = buildComposioClient(
@@ -2075,8 +2403,16 @@ describe("withdrawing one person's grants", () => {
       () => 1_000_000,
     );
 
+    /*
+     * The listing is deduped by cache, so a second check for the same app in the same window is not a
+     * second fetch — which is exactly the property the ten-second window exists for, and which makes
+     * the double-call form of this test read a cached answer rather than a copied one. Two userIds
+     * give two fetches without changing the property: if the vendor's mutation of the first had
+     * reached the constant, the second fetch would report a filter of
+     * ["ACTIVE", "DELETED"], because the constant it is built from would have grown.
+     */
     await broker.isConnected({ userId: "user_1", toolkit: "gmail" });
-    await broker.isConnected({ userId: "user_1", toolkit: "gmail" });
+    await broker.isConnected({ userId: "user_2", toolkit: "gmail" });
 
     expect(asked).toEqual([["ACTIVE"], ["ACTIVE"]]);
   });
@@ -2506,8 +2842,8 @@ describe("withdrawing one person's grants", () => {
         connectedAccounts: {
           list: async (query: unknown) =>
             (query as { cursor?: string }).cursor === undefined
-              ? { items: [{ id: "ca_1" }], nextCursor: "page_2" }
-              : { items: [{ id: "ca_1" }], nextCursor: null },
+              ? { items: [{ id: "ca_1" }], next_cursor: "page_2" }
+              : { items: [{ id: "ca_1" }], next_cursor: null },
           delete: async (id: string) => {
             if (deleted.includes(id)) {
               throw new Error(
@@ -3887,12 +4223,22 @@ describe("a vendor listing that is not the shape it is declared to be", () => {
  * THE TWO LISTINGS HERE CARRY A CURSOR AND THE CATALOGUE DOES NOT, which is why they are answered
  * differently from the fragment refusal next door. `AuthConfigListParamsSchema` and
  * `ConnectedAccountListParamsSchema` both name a `cursor` (`@composio/core` 0.18.1,
- * `src/types/authConfigs.types.ts:124-131` and `src/types/connectedAccounts.types.ts:259-266`),
- * both models forward it (`src/models/AuthConfigs.ts:95`, `src/models/ConnectedAccounts.ts:118`),
- * and both transformers fill `nextCursor` in from the response
- * (`src/utils/transformers/authConfigs.ts:80`, `connectedAccounts.ts:116`). The toolkit listing has
- * none of that — its response is a bare array with the cursor dropped before any caller sees it —
- * so there the only honest answer is to refuse, and here it is to go and read the rest.
+ * `src/types/authConfigs.types.ts:124-131` and `src/types/connectedAccounts.types.ts:259-266`)
+ * and both models forward it (`src/models/AuthConfigs.ts:95`, `src/models/ConnectedAccounts.ts:118`).
+ * The toolkit listing has none of that — its response is a bare array with the cursor dropped before
+ * any caller sees it — so there the only honest answer is to refuse, and here it is to go and read
+ * the rest.
+ *
+ * THE FIXTURES BELOW SPELL THE CURSOR `next_cursor`, WHICH IS THE WIRE'S SPELLING, and that is the
+ * whole reason the two listings in this block were not paging at all before. Both `authConfigs` and
+ * `connectedAccounts` reach here through the RAW generated client — `client.authConfigs.list(query)`
+ * and `client.connectedAccounts.list(query)` at the bottom of this file — whose response is the parsed
+ * body, unrenamed. A fixture written as `nextCursor` is a shape the vendor never sends, and a suite
+ * full of them passed green while `{ next_cursor }` on the wire read as "no next page", which is what
+ * it says to this code: one page, complete. So `isConnected` read one page and said `false` about a
+ * person whose account was on the next one — and `store.ts` DELETES their connection row on anything
+ * but a `true`. {@link pageOf} is the seam that renames it, and it now wraps both of these listings
+ * as well as the two that always had it.
  *
  * WHAT IS ACTUALLY BEING PROTECTED IS `revoke`'s `true`. It means "this person's access has ended",
  * and `store.ts` writes that into the audit trail and then deletes the one row naming which app they
@@ -3921,8 +4267,8 @@ describe("a listing that arrived with a cursor still outstanding", () => {
           list: async (query: unknown) => {
             asked.push(query);
             return (query as { cursor?: string }).cursor === undefined
-              ? { items: [{ id: "ca_1" }], nextCursor: "page_2" }
-              : { items: [{ id: "ca_2" }], nextCursor: null };
+              ? { items: [{ id: "ca_1" }], next_cursor: "page_2" }
+              : { items: [{ id: "ca_2" }], next_cursor: null };
           },
           delete: async (id: string) => {
             deleted.push(id);
@@ -3969,8 +4315,8 @@ describe("a listing that arrived with a cursor still outstanding", () => {
         connectedAccounts: {
           list: async (query: unknown) =>
             (query as { cursor?: string }).cursor === undefined
-              ? { items: [], nextCursor: "page_2" }
-              : { items: [{ id: "ca_2" }], nextCursor: null },
+              ? { items: [], next_cursor: "page_2" }
+              : { items: [{ id: "ca_2" }], next_cursor: null },
         },
       }),
     );
@@ -4002,13 +4348,13 @@ describe("a listing that arrived with a cursor still outstanding", () => {
   for (const { fault, pages } of [
     {
       fault: "a cursor that is not a cursor",
-      pages: () => async () => ({ items: [{ id: "ca_1" }], nextCursor: 7 }),
+      pages: () => async () => ({ items: [{ id: "ca_1" }], next_cursor: 7 }),
     },
     {
       fault: "a cursor that never advances",
       pages: () => async () => ({
         items: [{ id: "ca_1" }],
-        nextCursor: "page_2",
+        next_cursor: "page_2",
       }),
     },
     {
@@ -4017,7 +4363,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
         let page = 0;
         return async () => ({
           items: [{ id: `ca_${++page}` }],
-          nextCursor: `page_${page + 1}`,
+          next_cursor: `page_${page + 1}`,
         });
       },
     },
@@ -4060,7 +4406,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
     const { broker } = buildComposioClient(
       fakeVendor({
         connectedAccounts: {
-          list: async () => ({ items: [], nextCursor: 7 }),
+          list: async () => ({ items: [], next_cursor: 7 }),
         },
       }),
       () => 1_000_000,
@@ -4082,8 +4428,8 @@ describe("a listing that arrived with a cursor still outstanding", () => {
           list: async (query: unknown) => {
             asked.push(query);
             return (query as { cursor?: string }).cursor === undefined
-              ? { items: [OURS], nextCursor: "page_2" }
-              : { items: [OURS_SPARE], nextCursor: null };
+              ? { items: [OURS], next_cursor: "page_2" }
+              : { items: [OURS_SPARE], next_cursor: null };
           },
           delete: async (id: string) => {
             deleted.push(id);
@@ -4116,8 +4462,8 @@ describe("a listing that arrived with a cursor still outstanding", () => {
         authConfigs: {
           list: async (query: unknown) =>
             (query as { cursor?: string }).cursor === undefined
-              ? { items: [BY_HAND], nextCursor: "page_2" }
-              : { items: [OURS], nextCursor: null },
+              ? { items: [BY_HAND], next_cursor: "page_2" }
+              : { items: [OURS], next_cursor: null },
         },
         connectedAccounts: {
           link: async (...call: unknown[]) => {
@@ -4150,7 +4496,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
         connectedAccounts: {
           list: async () => {
             calls += 1;
-            return { items: [{ id: "ca_1" }], nextCursor: 42 };
+            return { items: [{ id: "ca_1" }], next_cursor: 42 };
           },
           delete: async (id: string) => {
             deleted.push(id);
@@ -4218,7 +4564,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
           connectedAccounts: {
             list: async () => {
               calls += 1;
-              return { items: [{ id: "ca_1" }], nextCursor: cursor };
+              return { items: [{ id: "ca_1" }], next_cursor: cursor };
             },
             delete: async (id: string) => {
               deleted.push(id);
@@ -4252,7 +4598,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
         authConfigs: {
           list: async () => {
             calls += 1;
-            return { items: [OURS], nextCursor: "" };
+            return { items: [OURS], next_cursor: "" };
           },
           delete: async (id: string) => {
             deleted.push(id);
@@ -4277,7 +4623,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
           list: async () => {
             calls += 1;
             if (calls > 20) throw new Error("The paging did not terminate.");
-            return { items: [{ id: "ca_1" }], nextCursor: "page_2" };
+            return { items: [{ id: "ca_1" }], next_cursor: "page_2" };
           },
           // The delete ANSWERS rather than refusing, which is what makes this test able to fail: a
           // reader that follows no cursor withdraws `ca_1`, reports a completed disconnection, and
@@ -4326,7 +4672,7 @@ describe("a listing that arrived with a cursor still outstanding", () => {
             // than the page size this deployment asked for.
             return {
               items: [{ id: `ca_${calls}` }],
-              nextCursor: `page_${calls}`,
+              next_cursor: `page_${calls}`,
             };
           },
           delete: async (id: string) => {

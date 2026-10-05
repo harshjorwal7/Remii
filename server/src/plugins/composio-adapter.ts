@@ -446,6 +446,44 @@ function textOf(value: unknown): string | null {
 const PAGE_CEILING = 200;
 
 /**
+ * ONE RETRY, AND ONLY WHERE RETRYING CANNOT MAIL THE SAME PERSON TWICE.
+ *
+ * Every catalogue and listing call below is a GET, so a retry cannot duplicate anything the vendor
+ * did — `tools.list` never sends email, never stores anything, and has no side effect to repeat.
+ * THAT is the property the rule is held to, because the action call path deliberately has no retry
+ * at all: `tools.execute` is excluded not because a 429 would be surprising there but because a 429
+ * is indistinguishable from the vendor having already run the action, so a retry that re-sent it
+ * after a socket failure would be a duplicate.
+ *
+ * THE CLASS TO RETRY IS NARROW. A 429 and a 500 are exactly the failures that arrive during the
+ * vendor's busiest minutes here, because every person connecting an app during an incident pays
+ * first; they recover in one round trip far more often than they do not, so the page simply waits
+ * rather than asking every reconnecting client at once for the same first answer.
+ *
+ * 250ms + a quarter of a bit of jitter — enough to escape whatever burst caused the 429. The same
+ * timeout machinery that bounds the ordinary call bounds this one too, hanging only to the same
+ * deadline rather than losing both attempts on separate ones.
+ */
+async function withRetry<T>(produce: () => Promise<T>): Promise<T> {
+  try {
+    return await produce();
+  } catch (error) {
+    const status = (error as { status?: unknown } | undefined)?.status;
+    const retryable =
+      status === 429 ||
+      (typeof status === "number" && status >= 500) ||
+      (status === undefined &&
+        error instanceof Error &&
+        error.name.startsWith("APIConnection"));
+    if (!retryable) throw error;
+    await new Promise((resolve) =>
+      setTimeout(resolve, 250 + Math.floor(Math.random() * 128)),
+    );
+    return produce();
+  }
+}
+
+/**
  * The listing a refusal is about, as the two clauses every sentence below is built from.
  *
  * WRITTEN AT THE CALL SITE for the same reason {@link VendorCall}'s outcome is: what could not be
@@ -1075,6 +1113,23 @@ function appOf(row: VendorToolkit, position: number): BrokerApp {
  * here could only collapse the third into one of the first two, which is the exact defect being
  * closed. It is left as `unknown` so the reader has to say what it does with it.
  */
+/**
+ * One connected-account row, as this file reads it.
+ *
+ * Every field is `unknown` because every field arrives from the vendor and is passed through
+ * `textOf`, which is what turns an absent, null or non-string field into the absence the caller
+ * wants. Named rather than left as `any` so the call sites stop re-asserting the shape they read.
+ */
+type VendorAccount = {
+  id?: unknown;
+  alias?: unknown;
+  status?: unknown;
+  data?: { email?: unknown; username?: unknown } | null;
+  params?: { email?: unknown; username?: unknown } | null;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+};
+
 type CheckedAuthConfig = {
   id: string;
   name: string;
@@ -2527,7 +2582,7 @@ export function buildComposioClient(
       configs?: string[];
       enough?: (rows: { id?: unknown }[]) => boolean;
     } = {},
-  ): Promise<{ id?: unknown }[]> => {
+  ): Promise<VendorAccount[]> => {
     /*
      * EVERY PAGE UNLESS THE CALLER SAYS OTHERWISE, READ HERE RATHER THAN AT EITHER CALLER, so that
      * the two questions cannot drift on the one thing they do share. A truncated listing is the
@@ -2542,47 +2597,70 @@ export function buildComposioClient(
      * one into a thrown refusal against a person who is, in fact, connected. Reading the ids is the
      * withdrawal's business, and it is done there, where a row that cannot be named is something to
      * report alongside the grants that were ended rather than something to stop them.
+     *
+     * AND THAT DIFFERENCE IS WHY THE CACHE KEY CARRIES THE QUESTION AND NOT ONLY THE SUBJECT. It
+     * used to be keyed on the person, the app and the statuses, which is exactly what
+     * `confirmBrokeredConnection`'s two calls agree on — and it was wrong, in the direction that
+     * hands back a shorter answer than was asked for. `isConnected` passes `enough` and stops at the
+     * first page that holds a row; `listAccounts` reads every page. One key for both means whichever
+     * ran first decides what the other is told, so a `false` read early would be served to the caller
+     * that needs the whole list — and the withdrawal built on it would end fewer grants than it
+     * reports. `asked` is in the key so that cannot happen.
      */
-    const rows = await everyRowOf(
-      {
-        noun: `this person's ${toolkit} accounts`,
-        consequence:
-          "neither whether they are connected nor what there is to withdraw could be read",
+    const rows = await cachedList(
+      `accounts:${userId}:${toolkit}:${statuses.join(",")}:${
+        asked.configs === undefined ? "any-config" : asked.configs.join(",")
+      }:${asked.enough === undefined ? "all-pages" : "enough"}`,
+      async () => {
+        const listing: Listing = {
+          noun: `this person's ${toolkit} accounts`,
+          consequence:
+            "neither whether they are connected nor what there is to withdraw could be read",
+        };
+        const listed = await everyRowOf<{ id?: unknown }>(
+          listing,
+          (cursor) =>
+            pageOf(listing, () =>
+              askVendor(
+                {
+                  outcome: `this person's ${toolkit} accounts were not read`,
+                  app: toolkit,
+                },
+                () =>
+                  withRetry(() =>
+                    vendor.connectedAccounts.list({
+                      userIds: [userId],
+                      toolkitSlugs: [toolkit],
+                      /*
+                       * COPIED, BECAUSE WHAT THE CALLERS PASS IN IS {@link CONNECTED} OR {@link REVOCABLE}
+                       * ITSELF. Every other list in this body is built here — `[userId]`, `[toolkit]`, and
+                       * `asked.configs`, which is a fresh `map` — and this one was the adapter's own
+                       * module-level constant handed straight over the seam to the vendor's package. A
+                       * recipient that sorts, de-duplicates or appends to the array it was given would not
+                       * spoil one listing; it would rewrite the constant for the life of the process, after
+                       * which `isConnected` — the gate `./access` asks before running somebody's action —
+                       * and the withdrawal's own filter would both be asking a question nobody wrote down,
+                       * in the next request rather than this one. It is the same reasoning {@link copyOf}
+                       * applies to the catalogue rows, with no expiry to bound it.
+                       */
+                      statuses: [...statuses],
+                      accountType: "ALL",
+                      // Spread for the reason the cursor is: an explicit `undefined` reaches the vendor's
+                      // `parse` as a key, and "about every config" is said by not naming any.
+                      ...(asked.configs === undefined
+                        ? {}
+                        : { authConfigIds: asked.configs }),
+                      limit: LISTING_LIMIT,
+                      ...(cursor === undefined ? {} : { cursor }),
+                    }),
+                  ),
+              ),
+            ),
+          asked.enough,
+        );
+        return listed;
       },
-      (cursor) =>
-        askVendor(
-          {
-            outcome: `this person's ${toolkit} accounts were not read`,
-            app: toolkit,
-          },
-          () =>
-            vendor.connectedAccounts.list({
-              userIds: [userId],
-              toolkitSlugs: [toolkit],
-              /*
-               * COPIED, BECAUSE WHAT THE CALLERS PASS IN IS {@link CONNECTED} OR {@link REVOCABLE}
-               * ITSELF. Every other list in this body is built here — `[userId]`, `[toolkit]`, and
-               * `asked.configs`, which is a fresh `map` — and this one was the adapter's own
-               * module-level constant handed straight over the seam to the vendor's package. A
-               * recipient that sorts, de-duplicates or appends to the array it was given would not
-               * spoil one listing; it would rewrite the constant for the life of the process, after
-               * which `isConnected` — the gate `./access` asks before running somebody's action —
-               * and the withdrawal's own filter would both be asking a question nobody wrote down,
-               * in the next request rather than this one. It is the same reasoning {@link copyOf}
-               * applies to the catalogue rows, with no expiry to bound it.
-               */
-              statuses: [...statuses],
-              accountType: "ALL",
-              // Spread for the reason the cursor is: an explicit `undefined` reaches the vendor's
-              // `parse` as a key, and "about every config" is said by not naming any.
-              ...(asked.configs === undefined
-                ? {}
-                : { authConfigIds: asked.configs }),
-              limit: LISTING_LIMIT,
-              ...(cursor === undefined ? {} : { cursor }),
-            }),
-        ),
-      asked.enough,
+      10_000,
     );
     return rows;
   };
@@ -2636,45 +2714,49 @@ export function buildComposioClient(
     unreadable: BrokerRefusalError[];
   }> => {
     /*
-     * EVERY PAGE, BECAUSE A CONFIG ON THE SECOND ONE IS STILL OURS. Read one page and the two
-     * callers below are wrong in the two opposite directions {@link madeHere} describes:
+     * EVERY PAGE, BECAUSE A CONFIG ON THE SECOND ONE IS STILL OURS — and it was not, for want of
+     * {@link pageOf}. The raw client answers `next_cursor`, {@link everyRowOf} reads `nextCursor`,
+     * and this listing went straight between the two, so one page of a hundred looked like all of
+     * them. `ensureAuthConfig` created the second config {@link madeHere} describes, `revoke`
+     * withdrew a page of somebody's accounts and reported the whole set ended, and
+     * `deleteAuthConfig` left a config standing while reporting a clean removal. Read one page and
+     * the two callers below are wrong in the two opposite directions {@link madeHere} describes:
      * `ensureAuthConfig` finds none and creates the second config it exists to prevent, and
      * `deleteAuthConfig` leaves one standing, reports a clean removal, and lets `removeServer`
      * delete the app's row over the top of a live grant.
      */
-    const rows = await everyRowOf(
-      {
+    const rows = await cachedList(`configs:${toolkit}`, async () => {
+      const listing: Listing = {
         noun: `this deployment's authorization configs for ${toolkit}`,
         consequence:
           "whether one exists is not something this deployment can tell",
-      },
-      (cursor) =>
-        askVendor(
-          {
-            outcome: `this deployment's authorization configs for ${toolkit} were not read`,
-            app: toolkit,
-          },
-          () =>
-            vendor.authConfigs.list({
-              toolkit,
-              limit: LISTING_LIMIT,
-              showDisabled: true,
-              ...(cursor === undefined ? {} : { cursor }),
-            }),
+      };
+      const listed = await everyRowOf<VendorAuthConfig>(listing, (cursor) =>
+        pageOf(listing, () =>
+          askVendor(
+            {
+              outcome: `this deployment's authorization configs for ${toolkit} were not read`,
+              app: toolkit,
+            },
+            () =>
+              withRetry(() =>
+                vendor.authConfigs.list({
+                  toolkit,
+                  limit: LISTING_LIMIT,
+                  showDisabled: true,
+                  ...(cursor === undefined ? {} : { cursor }),
+                }),
+              ),
+          ),
         ),
-    );
-    /*
-     * CHECKED BEFORE THE FILTER AND NOT AFTER IT, which is the order the whole guard turns on. The
-     * filter's question IS the name, so a row checked only once it had been kept would be a row
-     * sorted by a field nobody had read — see {@link madeHere} for what each of the two guesses
-     * costs. Every row therefore passes {@link readableConfigs} first, including the ones that turn
-     * out to belong to an operator's own dashboard work.
-     */
-    const { configs, unreadable } = readableConfigs(rows, toolkit);
-    const held = configs.sort((one, other) =>
-      one.id < other.id ? -1 : one.id > other.id ? 1 : 0,
-    );
-    return { held, ours: held.filter(madeHere), unreadable };
+      );
+      const { configs, unreadable } = readableConfigs(listed, toolkit);
+      const held = configs.sort((one, other) =>
+        one.id < other.id ? -1 : one.id > other.id ? 1 : 0,
+      );
+      return { held, ours: held.filter(madeHere), unreadable };
+    });
+    return rows;
   };
 
   /**
@@ -2743,6 +2825,55 @@ export function buildComposioClient(
   let heldDirectory: { at: number; apps: Promise<BrokerApp[]> } | null = null;
 
   /**
+   * THE PER-KEY LIST CACHE, which is the shape {@link configsFor} and {@link accountsFor} share.
+   *
+   * `configsFor` is a full listing at `limit: 1000` on every write attempt, every settings render,
+   * every add and every refresh — and a settings page does TWO of them in a row. `accountsFor` is
+   * the same question with a person's name on it. Neither is skipped today, and neither is one app's
+   * settings page worth that many round trips to the same vendor three requests running.
+   *
+   * PROMISES RATHER THAN ROWS, for the same reason the directory is. A settings double-render or a
+   * persona click that lands while the first listing is still in flight shares one request instead
+   * of starting two and overwriting each other's answer.
+   *
+   * WRITES INVALIDATE, AND THAT IS THE PART THE DIRECTORY CACHE DECLARES IT DOES NOT NEED. Configs
+   * and accounts change inside this process — `ensureAuthConfig` creates one, `deleteAuthConfig`
+   * removes some, `authorize` links one, `revoke` and `revokeAccount` remove an account's — so a
+   * writer would otherwise read whatever it had cached a moment before deciding it already held or
+   * had none. Invalidated on EVERY mutation through this adapter, which is a superset of what the
+   * individual caches need: a 30-second staleness is accepted by clients only when a person click
+   * expects it and is bounded because that is what this TTL is.
+   *
+   * FAILURES ARE NOT CACHED. A listing Composio answered with an error went in a sentence and a
+   * `lastError`, and the entry is dropped before any caller could hold onto it — the directory
+   * cache makes the same argument at the same gate.
+   */
+  const LIST_TTL_MS = 30_000;
+  const heldLists = new Map<string, { at: number; value: Promise<unknown> }>();
+
+  function cachedList<T>(
+    key: string,
+    fetch: () => Promise<T>,
+    ttlMs = LIST_TTL_MS,
+  ): Promise<T> {
+    const now = Date.now();
+    const held = heldLists.get(key);
+    if (held !== undefined && now - held.at < ttlMs) {
+      return held.value as Promise<T>;
+    }
+    const value = fetch();
+    heldLists.set(key, { at: now, value });
+    void value.catch(() => {
+      if (heldLists.get(key)?.value === value) heldLists.delete(key);
+    });
+    return value;
+  }
+
+  function forgetLists(): void {
+    heldLists.clear();
+  }
+
+  /**
    * The catalogue as the vendor answers it, EVERY PAGE OF IT, mapped to the rows a person picks from.
    *
    * IT USED TO BE ONE PAGE AND A REFUSAL, AND THAT REFUSAL IS THE BUG THIS FUNCTION WAS FIXED FOR.
@@ -2806,6 +2937,25 @@ export function buildComposioClient(
     return toolkits.map(appOf);
   };
 
+  /**
+   * WHICH APP EACH ACTION BELONGS TO, as the last listing said, and the map the execute-time
+   * toolkit guard reads from.
+   *
+   * The vendor's `tools.list` for one toolkit returns only that toolkit's actions, so this is sound
+   * by the listing's own parameter. A row that has never been listed through this process is the
+   * miss case below, which falls back to the full vendor check rather than assuming: a slug with no
+   * provenance is exactly the one the old mismatch guard exists to interrogate.
+   *
+   * A vendor that moves a slug BETWEEN toolkits after our listing is the failure direction this
+   * trades for removing the per-call resolve: the cached pair is stale and an execute paired against
+   * it will send the action for the toolkit that was current at listing time. What this costs is
+   * the distinction between two failures, both loud — a hand-edit of the connection URL is still
+   * refused, because the recorded slug was listed for the OLD toolkit, and Composio's own next
+   * listing is what a refresh records. What this buys is one less sequential dependency on the
+   * hot path: every action call used to resolve the same key twice.
+   */
+  const toolkitBySlug = new Map<string, string>();
+
   const actions: ComposioActions = {
     async listActions(toolkit, page): Promise<ComposioAction[]> {
       /*
@@ -2853,14 +3003,16 @@ export function buildComposioClient(
               app: toolkit,
             },
             () =>
-              vendor.tools.list({
-                toolkit_slug: toolkit,
-                limit: page.limit,
-                // The SDK's own default, forwarded on every listing it made, and the thing that
-                // decides which `version` each action carries. See {@link ComposioVendor}.
-                toolkit_versions: "latest",
-                ...(cursor === undefined ? {} : { cursor }),
-              }),
+              withRetry(() =>
+                vendor.tools.list({
+                  toolkit_slug: toolkit,
+                  limit: page.limit,
+                  // The SDK's own default, forwarded on every listing it made, and the thing that
+                  // decides which `version` each action carries. See {@link ComposioVendor}.
+                  toolkit_versions: "latest",
+                  ...(cursor === undefined ? {} : { cursor }),
+                }),
+              ),
           ),
         ),
       );
@@ -2871,6 +3023,13 @@ export function buildComposioClient(
         const slug = row.slug.trim();
         if (seen.has(slug)) return false;
         seen.add(slug);
+        /*
+         * Every row returned for a listing of `toolkit` IS this toolkit's row, by the listing's own
+         * parameter — the pairing {@link ComposioActions.execute} used to spend a round trip asking
+         * the vendor to repeat back at call time. Cached here, so a call of a recorded tool never
+         * pays that resolve again; a miss falls back to the vendor check.
+         */
+        toolkitBySlug.set(slug, toolkit);
         return true;
       });
       return unique.map((row, position) => actionOf(row, position, toolkit));
@@ -2878,97 +3037,114 @@ export function buildComposioClient(
 
     async execute(call, args): Promise<ComposioResult> {
       /*
-       * THE TOOL IS RESOLVED BEFORE IT IS RUN, AND THAT COSTS A ROUND TRIP ON PURPOSE.
+       * THE TOOL IS RESOLVED BEFORE IT IS RUN, AND WHETHER THAT COSTS A ROUND TRIP IS NOW A
+       * QUESTION THE CACHE ANSWERS.
        *
-       * Composio's execute takes the slug alone — its REST parameters have no toolkit field — so
-       * the pair the caller was gated on cannot travel on the wire, and the obligation
-       * {@link ComposioActions.execute} writes down has to be discharged here instead. The
-       * resolved tool carries the app the vendor will actually run it against, so asking for it
-       * first is what makes the check possible at all.
+       * What the round trip buys is the obligation this seam writes down: the pair the caller was
+       * gated on — this run is cleared for one app — has to be the pair the vendor will actually run
+       * against, which Composio cannot enforce because its wire carries only the slug. Whether the
+       * vendor needs to be asked is another question, and it has a local answer:
        *
-       * `tools.execute` resolves the same tool again internally, so this is a second request
-       * rather than a saved one. It buys the one thing a single request cannot: a mismatch that is
-       * refused before anything runs, rather than discovered in an audit row afterwards.
+       * WHEN THE LAST LISTING RECORDED THE MATCH, THE CHECK CANNOT GO WRONG. `vendor.tools.list` for
+       * one toolkit returns only that toolkit's actions — every slug we cached was listed under
+       * exactly the toolkit it is recorded against — so `toolkitBySlug[slug] === call.toolkit` is
+       * the same fact the round trip would return, copied from this deployment's own record of the
+       * listing instead of the vendor's. That copy IS the round trip's answer, signed by the same
+       * parameter on the same listing the grant rows were written from.
        *
-       * AND IT IS TAKEN AT ITS DECLARED TYPE, WHICH IS THE ONE ANSWER IN THIS FILE MOST SAFE TO DO
-       * THAT WITH. `getRawComposioToolBySlug` ends in `this.transformToolCases(tool)` (`@composio/core`
-       * 0.18.1, `src/models/Tools.ts:719`), whose last act is `ToolSchema.parse(...)` — a throwing
-       * parse — so what resolves here is an object satisfying that schema or a `ZodError` that
-       * `./composio` recognises and answers with a package remedy. An answer that is not an object,
-       * and a `toolkit` that is present and not an object, both die at that parse; two refusals
-       * stood here for exactly those and neither could be reached.
+       * WHEN THE RECORDED PAIR IS A MISMATCH, THIS IS THE SAME REFUSAL. An edited url is exactly the
+       * case the guard exists for, and it is exactly a mismatch between the toolkit the slug was
+       * listed under and the one the connection now names — no network needed to say so.
+       *
+       * A MISS IS THE VENDOR'S QUESTION AGAIN: a slug nothing here has listed might be anything, so
+       * the old path — resolve first, then mismatch-check — still runs, with the checks it always
+       * did. A process upgraded mid-deployment has an empty map and behaves identically to today on
+       * the first call of each tool, and the listings that repair its view as they arrive are the
+       * ones that keep it sound after that.
        */
-      const resolved = await askVendor(
-        {
-          outcome: `${call.slug} was not resolved and nothing was run`,
-          app: call.toolkit,
-        },
-        () =>
-          vendor.tools.getRawComposioToolBySlug(call.slug, {
-            version: call.version,
-          }),
-      );
-
-      /*
-       * AN UNREADABLE APP IS NOT THE SAME FACT AS NO APP, AND THEIR REMEDIES DIFFER. The mismatch
-       * refusal below ends by telling an administrator to refresh this app's tools, which is right
-       * for a slug recorded against a url that has since changed and useless for an SDK that has
-       * begun answering a different shape. So a toolkit whose slug is not a usable name is refused
-       * as what it is rather than folded into "no app at all", where it would arrive wearing a
-       * remedy that cannot work.
-       *
-       * AND IT IS STILL READ, DESPITE `ToolkitSchema` SPELLING THE SLUG REQUIRED, for the reason
-       * {@link actionOf} reads the action's own: `z.string()` is satisfied by the empty string, so
-       * a passing parse still admits an app with no name — which would compare unequal to every
-       * toolkit and refuse this call as a mismatch with nothing on the other side of the sentence.
-       */
-      /*
-       * `?? undefined` BECAUSE ABSENT ALREADY HAS A SENTENCE HERE AND `null` IS THE OTHER SPELLING
-       * OF IT. The mismatch refusal below already says "no app at all" for an action the vendor
-       * attributes to nothing, so absence is an answer on this path rather than a fault. Exempting
-       * only `undefined` read a `null` as an app that was PRESENT and then took `.slug` off it —
-       * `null is not an object (evaluating 'answeredApp.slug')`, thrown from outside every vendor
-       * `try` in this file, which `./composio` puts into a model's context and an audit row as this
-       * deployment's account of what happened. That is the same `undefined`-only exemption the
-       * three field guards in {@link actionOf} carried, failing the loud way instead of the total
-       * one.
-       */
-      const answeredApp = resolved.toolkit ?? undefined;
-      let ran: string | undefined;
-      if (answeredApp !== undefined) {
-        /*
-         * `answeredSlug` RATHER THAN `named`, WHICH IS ONLY A RENAME AND IS WORTH ONE LINE. This
-         * binding was called `named` and shadowed the module helper of that name for the rest of
-         * the block — so {@link named} was unreachable here, and an edit reaching for it would have
-         * been calling a string. Nothing was wrong today; the next change to this block is what the
-         * rename is for.
-         */
-        const answeredSlug = textOf(answeredApp.slug);
-        if (answeredSlug === null) {
-          throw new Error(
-            `Composio sent ${sent(answeredApp.slug)} where the slug of the app ${call.slug} belongs to should be, so nothing was run: a name this deployment cannot read is not one it can compare with ${call.toolkit}. ${VENDOR_SHAPE_REMEDY}`,
-          );
-        }
-        ran = answeredSlug;
+      const remembered = toolkitBySlug.get(call.slug);
+      if (remembered !== undefined && remembered !== call.toolkit) {
+        throw new Error(
+          `${call.slug} was not sent to Composio: this connection is for ${call.toolkit}, and the last listing this deployment made records it as ${remembered ?? "no app at all"}. Refreshing this app's tools on App connections recovers it where the action was recorded against a url that has since changed.`,
+        );
       }
 
-      if (ran !== call.toolkit) {
+      const resolved =
+        remembered === call.toolkit
+          ? undefined
+          : await askVendor(
+              {
+                outcome: `${call.slug} was not resolved and nothing was run`,
+                app: call.toolkit,
+              },
+              () =>
+                vendor.tools.getRawComposioToolBySlug(call.slug, {
+                  version: call.version,
+                }),
+            );
+
+      if (resolved !== undefined) {
         /*
-         * REFUSED RATHER THAN FORWARDED, and both apps are named.
+         * AN UNREADABLE APP IS NOT THE SAME FACT AS NO APP, AND THEIR REMEDIES DIFFER. The mismatch
+         * refusal below ends by telling an administrator to refresh this app's tools, which is right
+         * for a slug recorded against a url that has since changed and useless for an SDK that has
+         * begun answering a different shape. So a toolkit whose slug is not a usable name is refused
+         * as what it is rather than folded into "no app at all", where it would arrive wearing a
+         * remedy that cannot work.
          *
-         * The gate in `./access` cleared this run against the app the connection's url names
-         * NOW; the slug was recorded by a listing made at some earlier time. Where the two
-         * disagree — a url edited between a refresh and a call — forwarding runs one person's
-         * Gmail action under a gate that only ever examined their Slack connection. A reader
-         * holding only one of the two names cannot tell which of the two is the wrong one, so
-         * both go in the sentence. An app the vendor did not name at all is the same refusal:
-         * this deployment cannot show that the call is about the app it was gated on.
+         * AND IT IS STILL READ, DESPITE `ToolkitSchema` SPELLING THE SLUG REQUIRED, for the reason
+         * {@link actionOf} reads the action's own: `z.string()` is satisfied by the empty string, so
+         * a passing parse still admits an app with no name — which would compare unequal to every
+         * toolkit and refuse this call as a mismatch with nothing on the other side of the sentence.
          */
-        throw new Error(
-          `${call.slug} was not sent to Composio: this connection is for ${call.toolkit}, and Composio resolves that action to ${
-            ran ?? "no app at all"
-          }. Refreshing this app's tools on App connections recovers it where the action was recorded against a url that has since changed.`,
-        );
+        /*
+         * `?? undefined` BECAUSE ABSENT ALREADY HAS A SENTENCE HERE AND `null` IS THE OTHER SPELLING
+         * OF IT. The mismatch refusal below already says "no app at all" for an action the vendor
+         * attributes to nothing, so absence is an answer on this path rather than a fault. Exempting
+         * only `undefined` read a `null` as an app that was PRESENT and then took `.slug` off it —
+         * `null is not an object (evaluating 'answeredApp.slug')`, thrown from outside every vendor
+         * `try` in this file, which `./composio` puts into a model's context and an audit row as this
+         * deployment's account of what happened. That is the same `undefined`-only exemption the
+         * three field guards in {@link actionOf} carried, failing the loud way instead of the total
+         * one.
+         */
+        const answeredApp = resolved.toolkit ?? undefined;
+        let ran: string | undefined;
+        if (answeredApp !== undefined) {
+          /*
+           * `answeredSlug` RATHER THAN `named`, WHICH IS ONLY A RENAME AND IS WORTH ONE LINE. This
+           * binding was called `named` and shadowed the module helper of that name for the rest of
+           * the block — so {@link named} was unreachable here, and an edit reaching for it would have
+           * been calling a string. Nothing was wrong today; the next change to this block is what the
+           * rename is for.
+           */
+          const answeredSlug = textOf(answeredApp.slug);
+          if (answeredSlug === null) {
+            throw new Error(
+              `Composio sent ${sent(answeredApp.slug)} where the slug of the app ${call.slug} belongs to should be, so nothing was run: a name this deployment cannot read is not one it can compare with ${call.toolkit}. ${VENDOR_SHAPE_REMEDY}`,
+            );
+          }
+          ran = answeredSlug;
+        }
+
+        if (ran !== call.toolkit) {
+          /*
+           * REFUSED RATHER THAN FORWARDED, and both apps are named.
+           *
+           * The gate in `./access` cleared this run against the app the connection's url names
+           * NOW; the slug was recorded by a listing made at some earlier time. Where the two
+           * disagree — a url edited between a refresh and a call — forwarding runs one person's
+           * Gmail action under a gate that only ever examined their Slack connection. A reader
+           * holding only one of the two names cannot tell which of the two is the wrong one, so
+           * both go in the sentence. An app the vendor did not name at all is the same refusal:
+           * this deployment cannot show that the call is about the app it was gated on.
+           */
+          throw new Error(
+            `${call.slug} was not sent to Composio: this connection is for ${call.toolkit}, and Composio resolves that action to ${
+              ran ?? "no app at all"
+            }. Refreshing this app's tools on App connections recovers it where the action was recorded against a url that has since changed.`,
+          );
+        }
       }
 
       return askVendor(
@@ -3016,10 +3192,20 @@ export function buildComposioClient(
         return await configsFor(slug);
       }
 
-      const detail = (await askVendor(
+      /*
+       * The vendor's own row, typed by what this file reads off it and nothing more.
+       *
+       * `VendorToolkit` already describes the toolkit shape this adapter understands, and the SDK's
+       * return type is a model with far more required fields than a partial read can satisfy — which
+       * is why this said `any`. `unknown` through the ask, then the shape, keeps the vendor's type
+       * out of the file and still refuses a row that is not a toolkit.
+       */
+      const detail: VendorToolkit | null = await askVendor<unknown>(
         { outcome: `what ${slug} asks for could not be read`, app: slug },
-        () => vendor.toolkits.retrieve(slug) as Promise<any>,
-      )) as any;
+        () => vendor.toolkits.retrieve(slug) as Promise<unknown>,
+      ).then((row) =>
+        typeof row === "object" && row !== null ? (row as VendorToolkit) : null,
+      );
       if (detail && typeof detail === "object") {
         const conn = connectionOf(detail);
         const name = textOf(detail.name) ?? slug;
@@ -3244,6 +3430,7 @@ export function buildComposioClient(
       }
 
       // Made here, as `connection`'s scheme, which is what lets the caller record that scheme.
+      forgetLists();
       return "created";
     },
 
@@ -3381,6 +3568,15 @@ export function buildComposioClient(
             vendor.authConfigs.delete(config.id, { revoke_on_delete: true }),
         ),
       );
+      /*
+       * UNSET THE LISTING THAT JUST LIED.
+       *
+       * The configs cache could hold the rows this loop just deleted for up to
+       * `LIST_TTL_MS`, and every caller of `configsFor` reads the listing and branches on it — an
+       * administrator who removed this app and then got the answer that it stood would read that
+       * as Composio arguing with them, which is exactly what it is when the listing is stale.
+       */
+      forgetLists();
       if (refused.length > 0 || unreadable.length > 0) {
         /*
          * LOUD, because the caller is `removeServer` and the thing it is in the middle of is taking
@@ -3636,7 +3832,13 @@ export function buildComposioClient(
         () =>
           vendor.connectedAccounts.link(userId, config.id, {
             callbackUrl: returnUrl,
-            ...({ allowMultiple: true } as any),
+            /*
+             * `allowMultiple` is asked for on purpose — it is what lets one person hold two accounts
+             * of the same app — and the installed SDK's option type does not carry it, so this is a
+             * cast rather than a field. `unknown` keeps the assertion from spreading `any` through the
+             * object it is spread into.
+             */
+            ...({ allowMultiple: true } as unknown as Record<string, boolean>),
           }),
       );
 
@@ -3725,7 +3927,7 @@ export function buildComposioClient(
     async listAccounts({ userId, toolkit }): Promise<ConnectedAccountItem[]> {
       const rows = await accountsFor(userId, toolkit, CONNECTED);
       return rows
-        .map((r: any) => {
+        .map((r) => {
           const id = textOf(r.id) ?? "";
           const label =
             textOf(r.alias) ??
@@ -3911,6 +4113,12 @@ export function buildComposioClient(
         if (declined !== null) throw declined;
       });
 
+      /*
+       * Undo the answered listing before the next one lands, for the same reason `deleteAuthConfig`
+       * does: a caller that reads a stale connected-accounts listing reads "still connected" about
+       * the account this loop just ended.
+       */
+      forgetLists();
       if (refused.length > 0 || nameless.length > 0 || unreadable.length > 0) {
         /*
          * A PARTIAL WITHDRAWAL IS A FAILURE AND NOT A `true`, and the reason is the row this throw
@@ -4694,7 +4902,10 @@ export function buildComposioClient(
           }),
       );
 
-      if (answer === null || answer === undefined) return;
+      if (answer === null || answer === undefined) {
+        forgetLists();
+        return;
+      }
       /*
        * AND A REPLY THAT IS NOT A DOCUMENT IS NOT A DOCUMENT WITH ITS VERDICT MISSING, which is the
        * distinction {@link withdrawalDeclined} draws one method away and for the same reason. The
@@ -4708,7 +4919,10 @@ export function buildComposioClient(
         );
       }
       const verdict = (answer as { success?: unknown }).success;
-      if (verdict === true) return;
+      if (verdict === true) {
+        forgetLists();
+        return;
+      }
       if (verdict === false) {
         throw new BrokerRefusalError(
           `Composio answered the withdrawal of the account this connection just made with success: false, so it did not delete the account and started no revocation of the credential behind it. That account is still standing at Composio and the credential behind it is still live there.`,

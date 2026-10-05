@@ -77,6 +77,15 @@ export const MAX_RUN_ERROR = 400;
  */
 const FAILURE_SCAN_LIMIT = 20;
 
+/**
+ * Consecutive failures after which the fatigue rule switches a routine off.
+ *
+ * Named here because the routines page reports the streak against it, and a number that decides
+ * when a person's standing work stops should not be a literal spelled into a sentence somewhere
+ * else. The rule that acts on it lives in `runner.ts`; this is the threshold both read.
+ */
+export const FATIGUE_THRESHOLD = 10;
+
 const NO_SHARED_CHANNEL =
   "I can only post into a channel you and I are both in.";
 const NO_CHANNEL_AT_ALL =
@@ -130,6 +139,18 @@ export type RoutineSummary = {
   channelDeleted: boolean;
   /** The most recent firing, or null when it has never fired. */
   lastRun: { status: RoutineRunOutcome | null; finishedAt: Date | null } | null;
+  /**
+   * Failed firings in a row, up to the fatigue rule's own threshold.
+   *
+   * Read here rather than left to the client because the count is what the fatigue rule acts on,
+   * and the number that switches a routine off is the one a person needs to see coming: at nine,
+   * one more failed night ends it. Zero whenever the newest finished outcome was not a failure,
+   * because a skip neither counts nor breaks the streak (see `consecutiveFailures`).
+   *
+   * Capped at the threshold rather than counted without limit, so the page can show progress
+   * toward the switch-off without this growing into a count of a routine's whole history.
+   */
+  consecutiveFailures: number;
 };
 
 export type RoutineInput = {
@@ -615,6 +636,72 @@ export function createRoutineStore(database: Database): RoutineStore {
         }
       }
 
+      /*
+       * The failure streak, for every routine on the page in one statement.
+       *
+       * The same tail scan `consecutiveFailures` does, widened to the whole id set: the page reads
+       * this once for the person it belongs to, and the routines list is small (a person's own,
+       * capped at twenty enabled), so one bounded query over all of them beats one query each.
+       *
+       * `skipped` is excluded in SQL rather than skipped over in the loop, for the reason it is in
+       * `consecutiveFailures`: a run of skips must not consume slots in the window, or a routine
+       * whose channel flaps could never reach the fatigue rule at all.
+       */
+      const streaks = new Map<string, number>();
+      /*
+       * Routines whose streak is already settled. A separate set rather than a sentinel value
+       * inside `streaks`, because the two are different facts: a routine that has failed ten times
+       * reads as ten, and a routine whose last outcome was a success reads as zero. Encoding the
+       * second as the same number as the first is how a page ends up claiming ten failures for a
+       * routine that has never failed.
+       */
+      const settled = new Set<string>();
+      if (routineIds.length > 0) {
+        const outcomeRows = await database
+          .select({
+            routineId: routineRuns.routineId,
+            status: routineRuns.status,
+          })
+          .from(routineRuns)
+          .where(
+            and(
+              inArray(routineRuns.routineId, routineIds),
+              isNotNull(routineRuns.status),
+              ne(routineRuns.status, "skipped"),
+            ),
+          )
+          .orderBy(
+            routineRuns.routineId,
+            desc(routineRuns.startedAt),
+            // Same tiebreak the last-run scan above uses, for the same reason: two runs of one
+            // routine in the same instant must not make the page flicker between two answers.
+            desc(routineRuns.id),
+          );
+        // Counted per routine in one pass. The list is grouped by id, so a streak ends at the first
+        // row for that routine whose outcome is not a failure — which is exactly the rule the
+        // fatigue rule applies, rather than a second version of it.
+        for (const row of outcomeRows) {
+          if (settled.has(row.routineId)) continue;
+          const counted = streaks.get(row.routineId) ?? 0;
+          // Capped: past the threshold the rule has already switched the routine off, and a bigger
+          // number would read as a streak still climbing rather than one that has ended.
+          if (counted >= FATIGUE_THRESHOLD) {
+            settled.add(row.routineId);
+            continue;
+          }
+          if (row.status !== "failed") {
+            /*
+             * Not a failure, so the streak ends here. Only settled — the count gathered above it
+             * stands, and setting it to zero would discard the very streak this row terminates. A
+             * routine with no streak at all simply has no entry and reads zero from the map.
+             */
+            settled.add(row.routineId);
+            continue;
+          }
+          streaks.set(row.routineId, counted + 1);
+        }
+      }
+
       return rows.map(
         ({ routine, channelName, channelDeletedAt, channelExists }) => ({
           id: routine.id,
@@ -628,6 +715,7 @@ export function createRoutineStore(database: Database): RoutineStore {
           channelName,
           channelDeleted: channelExists === null || channelDeletedAt !== null,
           lastRun: lastRuns.get(routine.id) ?? null,
+          consecutiveFailures: streaks.get(routine.id) ?? 0,
         }),
       );
     },

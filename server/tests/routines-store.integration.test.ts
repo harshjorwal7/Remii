@@ -17,6 +17,7 @@ import {
 } from "../src/db/schema";
 import {
   createRoutineStore,
+  FATIGUE_THRESHOLD,
   MAX_ENABLED_ROUTINES,
   MAX_INSTRUCTION_CODE_POINTS,
   MAX_RUN_ERROR,
@@ -807,8 +808,16 @@ async function readRoutine(routineId: string) {
   return row;
 }
 
-async function makeRoutine(instruction = "Summarise the day.") {
-  const { owner, agentId, channel } = await setUp();
+async function makeRoutine(
+  instruction = "Summarise the day.",
+  reuseOwner?: string,
+) {
+  // `reuseOwner` puts a second routine under an existing owner, so a test can put two routines in
+  // one person's list. A second owner would give each routine its own list, which is owner scoping
+  // working and would make a per-routine assertion pass without ever comparing two streaks.
+  const owner = reuseOwner ? { id: reuseOwner } : await createUser();
+  const agentId = await createAgent(owner);
+  const channel = await createChannel(owner, [agentId]);
   const routine = await store.create({
     ownerUserId: owner.id,
     agentId,
@@ -816,7 +825,9 @@ async function makeRoutine(instruction = "Summarise the day.") {
     instruction,
     cron: DAILY,
   });
-  return { owner, agentId, channel, routine };
+  // `ownerUserId` named alongside `owner`: the list read takes the raw id, and reaching through
+  // `owner.id` at each call site hides which of the two the assertions are about.
+  return { owner, ownerUserId: owner.id, agentId, channel, routine };
 }
 
 describe("moving a routine's clock", () => {
@@ -1303,5 +1314,89 @@ describe("counting the failures at the tail", () => {
     expect(await store.consecutiveFailures(routine.id)).toBeGreaterThanOrEqual(
       10,
     );
+  });
+
+  /*
+   * `listFor` reports the same streak the rule acts on, from one query over the whole list rather
+   * than one per routine. These assert it agrees with `consecutiveFailures` — a second
+   * implementation of the same rule on the page would drift, and the page is where somebody
+   * decides whether to go and fix a routine.
+   */
+  test("listFor reports the same streak the fatigue rule counts", async () => {
+    const { routine, ownerUserId } = await makeRoutine();
+
+    await finish(routine.id, "succeeded");
+    await finish(routine.id, "failed");
+    await finish(routine.id, "failed");
+    await finish(routine.id, "skipped");
+    await finish(routine.id, "failed");
+
+    const listed = (await store.listFor(ownerUserId)).find(
+      (row) => row.id === routine.id,
+    );
+    // Agreement with the rule, not a literal: both read the same tail in the same order, and
+    // asserting the rule's own answer is what keeps the page from carrying a second version of it.
+    expect(listed?.consecutiveFailures).toBe(
+      await store.consecutiveFailures(routine.id),
+    );
+    expect(listed?.consecutiveFailures).toBeGreaterThan(0);
+  });
+
+  test("listFor reports no streak for a routine that has never failed", async () => {
+    const { routine, ownerUserId } = await makeRoutine();
+
+    await finish(routine.id, "succeeded");
+    await finish(routine.id, "skipped");
+
+    const listed = (await store.listFor(ownerUserId)).find(
+      (row) => row.id === routine.id,
+    );
+    expect(listed?.consecutiveFailures).toBe(0);
+  });
+
+  /*
+   * Capped at the threshold, so the page reports progress toward the switch-off rather than a
+   * tally of a routine's whole history. It matters that a streak past the threshold reads as the
+   * threshold: past it the routine has been switched off, and a bigger number would suggest it is
+   * still counting.
+   */
+  test("listFor caps the streak at the fatigue threshold", async () => {
+    const { routine, ownerUserId } = await makeRoutine();
+
+    for (let i = 0; i < FATIGUE_THRESHOLD + 4; i++) {
+      await finish(routine.id, "failed");
+    }
+
+    const listed = (await store.listFor(ownerUserId)).find(
+      (row) => row.id === routine.id,
+    );
+    expect(listed?.consecutiveFailures).toBe(FATIGUE_THRESHOLD);
+  });
+
+  /*
+   * One routine's streak must not be answered with another's. The list is read as a single ordered
+   * scan and grouped by id, so an interleaved pair of routines is where a grouping mistake would
+   * show: each would report the other's failures.
+   */
+  test("listFor counts each routine's streak separately", async () => {
+    // One owner, so both routines come back from the same `listFor`. Two owners would each see
+    // only their own, which is owner scoping doing its job and would pass this for the wrong reason.
+    const first = await makeRoutine();
+    // Instruction first, then the owner to reuse — the second positional, named at the call so
+    // passing an id where an instruction belongs cannot silently read as a second routine.
+    const second = await makeRoutine("Summarise the week.", first.ownerUserId);
+
+    await finish(first.routine.id, "failed");
+    await finish(first.routine.id, "failed");
+    await finish(second.routine.id, "failed");
+    await finish(second.routine.id, "succeeded");
+
+    const rows = await store.listFor(first.ownerUserId);
+    expect(
+      rows.find((row) => row.id === first.routine.id)?.consecutiveFailures,
+    ).toBe(2);
+    expect(
+      rows.find((row) => row.id === second.routine.id)?.consecutiveFailures,
+    ).toBe(0);
   });
 });

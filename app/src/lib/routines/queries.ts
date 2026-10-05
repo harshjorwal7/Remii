@@ -29,12 +29,30 @@ export type RoutineRecord = {
     status: "succeeded" | "failed" | "skipped" | null;
     at: string | null;
   } | null;
+  /**
+   * Failed firings in a row, which is what the fatigue rule counts.
+   *
+   * Zero when the newest finished outcome was not a failure. Capped server-side at the threshold
+   * the rule acts on, so this reads as "this many failures so far" and never as a tally of a
+   * routine's whole history — showing a number past the threshold would suggest the routine is
+   * still counting when it has in fact already been switched off.
+   */
+  consecutiveFailures: number;
 };
 
 export type SweepRecord = {
   lastSweptAt: string | null;
   working: boolean;
 };
+
+/**
+ * Consecutive failures after which the server's fatigue rule switches a routine off.
+ *
+ * The number itself arrives on each row; this is only for the two wordings that have to name it —
+ * "Failed 10 times — switching off" and the arithmetic of "one more and it stops". Kept beside the
+ * type it describes so it is changed with the shape rather than drifting in a component.
+ */
+export const FATIGUE_THRESHOLD = 10;
 
 export type RoutinesPage = {
   routines: RoutineRecord[];

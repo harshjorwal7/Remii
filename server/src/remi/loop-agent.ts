@@ -13,6 +13,11 @@ import { NO_ANSWER_CAME } from "../../../shared/bot-prompt";
 import { sanitizeSeededHistory } from "../agents/history-sanitize";
 import type { LoadAttachment, MarkAttachmentsSent } from "../copilot";
 import { inlineAttachments } from "../copilot";
+import {
+  type ResultBudgetClass,
+  resultBudgetFor,
+  shapeToolResultForContext,
+} from "../plugins/result-budget";
 import type { GrantedTool, ToolResult } from "../plugins/tools";
 import { toolResultText } from "../plugins/tools";
 import {
@@ -175,10 +180,6 @@ const REMI_TOOL_TIMEOUT_MS = 120_000;
 const HEARTBEAT_MS = 15_000;
 /** ~200k tokens at four chars each, the Remi window. */
 const REMI_CONTEXT_BUDGET_CHARS = 800_000;
-/** Truncation budget per tool result, the Remi shape. */
-const MAX_TOOL_STRING = 1500;
-const MAX_TOOL_ITEMS = 15;
-const MAX_TOOL_JSON = 4000;
 
 /**
  * HOW MANY TIMES A RUN MAY ASK THE MODEL TO FINISH WHAT IT STARTED.
@@ -247,65 +248,52 @@ function textOfMessage(message: Message): string {
 }
 
 /**
- * Shorten a tool result that is too long to keep whole.
+ * Keep loop context small: full results are stored, the model gets what its budget allows.
  *
- * THE HEAD IS WHAT MATTERS, so the head is what survives. This used to keep the first 2500 characters
- * AND the last 1000, on the reasoning that a tail often carries the answer. For structured output that is
- * a reasonable bet; for the one tool that returns a document — `computer_read_file` — it silently
- * produces a plausible-looking splice of the beginning and end of a file with the middle removed, and
- * nothing marks where the join is. A model given that will reason about a file it has never seen and
- * answer confidently.
+ * The bound is per TOOL, not per run, and that is the whole of the fix for app results losing their
+ * contents. Gmail's answers parse as JSON, so they took the structured branch, where a 4,000-char
+ * total sat behind a 1,500-char per-string and a 15-item per-array limit — a mailbox reduced to two
+ * headers while the model was told only that the result was truncated. It could not tell a trimmed
+ * mailbox from a short one, so it answered from what it had. See `./plugins/result-budget`, which
+ * holds the bounds and is shared with the Composio transport so the callback path and this loop
+ * cannot disagree about what a model is shown.
  *
- * So the cut is a clean prefix with the omission stated, and it is stated as a count so the model can
- * decide whether to go and read the rest rather than assuming it has.
+ * A name is accepted as well as a tool because the exemption below is written against one, and a
+ * tool that declares no class gets the screen bound — the one every desktop tool was written against
+ * and the one unchanged here.
  */
-function truncateToolText(value: string): string {
-  if (value.length <= MAX_TOOL_JSON) return value;
-  const kept = MAX_TOOL_JSON - 200;
-  return `${value.slice(0, kept)}\n\n[Truncated: ${value.length - kept} more characters were not shown. Do not assume this is the whole result — read the rest or narrow the query.]`;
-}
-
-export function truncateToolValue(value: unknown, depth = 0): unknown {
-  if (depth > 6) return "[Object]";
-  if (typeof value === "string") {
-    return value.length > MAX_TOOL_STRING
-      ? `${value.slice(0, MAX_TOOL_STRING)}... [Truncated ${value.length - MAX_TOOL_STRING} chars]`
-      : value;
-  }
-  if (Array.isArray(value)) {
-    const items = value
-      .slice(0, MAX_TOOL_ITEMS)
-      .map((item) => truncateToolValue(item, depth + 1));
-    if (value.length > MAX_TOOL_ITEMS) {
-      items.push(`[... ${value.length - MAX_TOOL_ITEMS} items truncated]`);
-    }
-    return items;
-  }
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value)) {
-      if (key === "imageDataUrl" || key === "base64") continue;
-      out[key] = truncateToolValue(entry, depth + 1);
-    }
-    return out;
-  }
-  return value;
-}
-
-/** Keep loop context small: full results are stored, the model only needs the gist. */
 export function truncateToolResultForContext(
   result: string,
-  toolName: string,
+  tool: string | { name: string; resultBudget?: ResultBudgetClass },
 ): string {
-  if (toolName === "artifact_read") return result;
-  try {
-    const parsed: unknown = JSON.parse(result);
-    const pruned = truncateToolValue(parsed);
-    const text = JSON.stringify(pruned);
-    return text.length > MAX_TOOL_JSON ? truncateToolText(text) : text;
-  } catch {
-    return truncateToolText(result);
+  if (
+    typeof tool === "string"
+      ? tool === "artifact_read"
+      : tool.name === "artifact_read"
+  ) {
+    return result;
   }
+  return shapeToolResultForContext(
+    result,
+    resultBudgetFor(
+      typeof tool === "string" ? { resultBudget: budgetClassFor(tool) } : tool,
+    ),
+  );
+}
+
+/**
+ * The bound a bare tool NAME gets, for the callers that hold nothing but one.
+ *
+ * This exists for one caller — a result arriving on its own, with no {@link GrantedTool} in reach —
+ * and it is an INFERENCE, deliberately the only one in the tree: `mcp__` is what `toolNameFor` writes
+ * for every granted vendor tool and `gog_` for the local Google CLI, and both return vendor data
+ * rather than our own machine's screen. Everywhere a tool object exists the declaration on it is read
+ * instead, so this cannot drift into being the authority.
+ */
+function budgetClassFor(toolName: string): ResultBudgetClass {
+  return toolName.startsWith("mcp__") || toolName.startsWith("gog_")
+    ? "app"
+    : "screen";
 }
 
 /** The image mime types a provider will accept, and nothing else. */
@@ -380,9 +368,9 @@ function usableToolImages(
  */
 export function toolResultContent(
   result: ToolResult,
-  toolName: string,
+  tool: string | { name: string; resultBudget?: ResultBudgetClass },
 ): OpenAIMessage["content"] {
-  const text = truncateToolResultForContext(toolResultText(result), toolName);
+  const text = truncateToolResultForContext(toolResultText(result), tool);
   if (typeof result === "string") return text;
   const images = usableToolImages(result.images);
   if (images.length === 0) return text;
@@ -635,17 +623,29 @@ export function historyToOpenAI(history: Message[]): OpenAIMessage[] {
   return out;
 }
 
+/*
+ * MEMOISED ON THE ZOD OBJECT. Built fresh per run from the tools list, but the schema is the same
+ * one the grant produced, and `z.toJSONSchema` over an app catalogue is exactly the cost the
+ * fromJSONSchema cache next door already pays. WeakMap so the entry dies with the grant cache's next
+ * refresh rather than pinning a schema the deployment has since replaced.
+ */
+const jsonSchemaByZod = new WeakMap<z.ZodType, Record<string, unknown>>();
+
 function grantedToolToOpenAI(tool: GrantedTool): OpenAITool {
-  let parameters: Record<string, unknown> = {
+  const held = jsonSchemaByZod.get(tool.parameters);
+  let parameters: Record<string, unknown> = held ?? {
     type: "object",
     properties: {},
   };
-  try {
-    const schema = z.toJSONSchema(tool.parameters) as Record<string, unknown>;
-    if (schema && typeof schema === "object") parameters = schema;
-  } catch {
-    // An unreadable schema must not stop the tool being offered: an open object lets the
-    // model call it and the execution end validate the arguments instead.
+  if (!held) {
+    try {
+      const schema = z.toJSONSchema(tool.parameters) as Record<string, unknown>;
+      if (schema && typeof schema === "object") parameters = schema;
+      jsonSchemaByZod.set(tool.parameters, parameters);
+    } catch {
+      // An unreadable schema must not stop the tool being offered: an open object lets the
+      // model call it and the execution end validate the arguments instead.
+    }
   }
   return {
     type: "function",
@@ -1126,7 +1126,6 @@ export class RemiLoopAgent extends AbstractAgent {
     let usedModel = chain[0]?.model ?? config.model.model;
     const calls: { name: string; args: string; result: string }[] = [];
     let assistantText = "";
-    let reasoningId: string | null = null;
 
     const checkAbort = () => {
       if (signal.aborted) {
@@ -1136,21 +1135,92 @@ export class RemiLoopAgent extends AbstractAgent {
       }
     };
 
-    const emitReasoning = (delta: string) => {
-      if (!reasoningId) {
-        reasoningId = randomUUID();
-        emit({ type: EventType.REASONING_START, messageId: reasoningId });
-        emit({
-          type: EventType.REASONING_MESSAGE_START,
-          messageId: reasoningId,
-          role: "reasoning",
-        });
-      }
-      emit({
-        type: EventType.REASONING_MESSAGE_CONTENT,
-        messageId: reasoningId,
-        delta,
-      });
+    /*
+     * ONE REASONING LANE PER STEP, opened on the first delta and closed when the step's stream ends.
+     *
+     * This used to be a single `reasoningId` for the whole run, which was the same defect
+     * `messageId` carried above and had the same fix: one id per step, not one per run. Three
+     * things were wrong with sharing it, and only the first was visible.
+     *
+     * THE TRANSCRIPT: every step's thinking appended to one `{role: "reasoning"}` message, so a
+     * ten-step turn drew a single thinking row holding all ten steps. The projection maps one
+     * reasoning message to one row (`chat-messages.ts`), so per-step rows need per-step ids.
+     *
+     * NEVER CLOSED: no `REASONING_MESSAGE_END` or `REASONING_END` was ever emitted for real
+     * reasoning, leaving the SDK's lane bookkeeping holding an open stream for the whole run.
+     *
+     * AND IT DISABLED THE HEARTBEAT, which is the one that ended turns. `heartbeat` below stands
+     * down whenever reasoning is streaming, and "this run has reasoned" is not "reasoning is
+     * streaming" — step 1 reasons, so from then on the guard was permanently true and no heartbeat
+     * beat for the rest of the turn. A tool that took over a minute was then silent long enough for
+     * the stall watchdog to end the turn and write `AGENT_STREAM_STALLED` over it, which is the
+     * "stuck mid-work" report. The guard now reads the lanes that are open RIGHT NOW, and a step's
+     * lane is closed before its tools run, which is exactly when the heartbeat is needed.
+     *
+     * A model that never reasons opens no lane and therefore emits no reasoning events at all,
+     * which is what happened before any of this and is what should still happen.
+     */
+    type ReasoningLane = {
+      /** Whether this lane has been opened and not yet closed. */
+      readonly open: boolean;
+      /** Append a delta, opening the lane on the first one. */
+      push: (delta: string) => void;
+      /** Emit the closing pair. A no-op on a lane that never opened. */
+      close: () => void;
+    };
+
+    /** Every lane currently mid-stream, so a leak can be closed and a heartbeat can ask. */
+    const openLanes = new Set<ReasoningLane>();
+
+    const openReasoning = (): ReasoningLane => {
+      let id: string | null = null;
+      const lane: ReasoningLane = {
+        get open() {
+          return id !== null;
+        },
+        push: (delta: string) => {
+          if (id === null) {
+            id = randomUUID();
+            openLanes.add(lane);
+            emit({ type: EventType.REASONING_START, messageId: id });
+            emit({
+              type: EventType.REASONING_MESSAGE_START,
+              messageId: id,
+              role: "reasoning",
+            });
+          }
+          emit({
+            type: EventType.REASONING_MESSAGE_CONTENT,
+            messageId: id,
+            delta,
+          });
+        },
+        close: () => {
+          if (id === null) return;
+          const messageId = id;
+          id = null;
+          openLanes.delete(lane);
+          emit({
+            type: EventType.REASONING_MESSAGE_END,
+            messageId,
+            role: "reasoning",
+          });
+          emit({ type: EventType.REASONING_END, messageId });
+        },
+      };
+      return lane;
+    };
+
+    /**
+     * Close anything still open, for the paths that leave the loop without closing their own lane.
+     *
+     * The step body closes its lane in a `finally`, so this is the backstop rather than the
+     * mechanism — an exception thrown between opening a lane and the `finally` that closes it would
+     * otherwise reach the SDK as an unterminated stream. Cheap and idempotent, because `close` on a
+     * closed lane does nothing.
+     */
+    const closeEveryReasoningLane = () => {
+      for (const lane of [...openLanes]) lane.close();
     };
 
     const runStep = async (
@@ -1397,38 +1467,53 @@ export class RemiLoopAgent extends AbstractAgent {
         if (pruned !== messages) messages.splice(0, messages.length, ...pruned);
 
         let stepText = "";
-        const { calls: found } = await runStep(
-          modelTools,
-          (delta) => {
-            stepText += delta;
-            assistantText += delta;
-            emit({
-              type: EventType.TEXT_MESSAGE_CHUNK,
-              role: "assistant",
-              messageId,
-              delta,
-            });
-          },
-          (delta) => {
-            emitReasoning(delta);
-          },
-          (call) => {
-            emit({
-              type: EventType.TOOL_CALL_START,
-              parentMessageId: messageId,
-              toolCallId: call.id,
-              toolCallName: call.name,
-            });
-            if (call.argsJson && call.argsJson !== "{}") {
+        /*
+         * THIS STEP'S REASONING LANE, closed in the `finally` below rather than at each exit.
+         *
+         * Closing on the way out of `runStep` is what makes the heartbeat work again: the tools that
+         * follow run with no lane open, so `heartbeat` beats through exactly the window where a slow
+         * tool used to be mistaken for a dead Bot. A `finally` rather than a statement after the call
+         * because an abort mid-stream throws out of `runStep` with the lane open, and that is the
+         * case that must not leak one.
+         */
+        const reasoning = openReasoning();
+        let found: StreamedCall[];
+        try {
+          ({ calls: found } = await runStep(
+            modelTools,
+            (delta) => {
+              stepText += delta;
+              assistantText += delta;
               emit({
-                type: EventType.TOOL_CALL_ARGS,
-                toolCallId: call.id,
-                delta: call.argsJson,
+                type: EventType.TEXT_MESSAGE_CHUNK,
+                role: "assistant",
+                messageId,
+                delta,
               });
-            }
-            emit({ type: EventType.TOOL_CALL_END, toolCallId: call.id });
-          },
-        );
+            },
+            (delta) => {
+              reasoning.push(delta);
+            },
+            (call) => {
+              emit({
+                type: EventType.TOOL_CALL_START,
+                parentMessageId: messageId,
+                toolCallId: call.id,
+                toolCallName: call.name,
+              });
+              if (call.argsJson && call.argsJson !== "{}") {
+                emit({
+                  type: EventType.TOOL_CALL_ARGS,
+                  toolCallId: call.id,
+                  delta: call.argsJson,
+                });
+              }
+              emit({ type: EventType.TOOL_CALL_END, toolCallId: call.id });
+            },
+          ));
+        } finally {
+          reasoning.close();
+        }
 
         /*
          * THE MODEL STOPPED ASKING FOR TOOLS, which is where a run used to end — silently, on the
@@ -1509,12 +1594,18 @@ export class RemiLoopAgent extends AbstractAgent {
          * the deployment is most likely to be configured with, so the gap between heartbeats stays well
          * inside even a 60s watchdog rather than merely inside a two-minute one.
          *
-         * A no-op when reasoning is already streaming (`emitReasoning` owns `reasoningId`), because a
-         * second interleaved reasoning stream would be a different thing to render. Text still arrives
-         * on every step from the model's own chunks, so this only ever covers tool waits.
+         * A no-op only while a reasoning lane is ACTUALLY mid-stream, because a second interleaved
+         * reasoning stream would be a different thing to render. Text still arrives on every step
+         * from the model's own chunks, so this only ever covers tool waits.
+         *
+         * `openLanes.size`, and not a flag saying this run has ever reasoned. That flag is what
+         * disabled this heartbeat: step 1 reasons, the flag latches, and every tool call after it
+         * ran unannounced — so a tool that took over a minute was ended by the watchdog at 60s with
+         * a sentence blaming the Bot. A step's lane is closed before its tools run (see the `finally`
+         * by `runStep`), so the window this needs to cover is exactly the one with no lane open.
          */
         const heartbeat = () => {
-          if (reasoningId) return;
+          if (openLanes.size > 0) return;
           const heartbeatId = randomUUID();
           emit({ type: EventType.REASONING_START, messageId: heartbeatId });
           emit({
@@ -1573,10 +1664,20 @@ export class RemiLoopAgent extends AbstractAgent {
               toolCallId: call.id,
               content: JSON.stringify(said),
             });
-            return { id: call.id, name: call.name, result };
+            /*
+             * The TOOL, not its name, so the result is cut with the budget that tool declared. A name
+             * would have to be guessed back into a class, and a guess is what put a 4,000-character
+             * bound on a mailbox in the first place.
+             */
+            return {
+              id: call.id,
+              name: call.name,
+              result,
+              tool: serverTools.get(call.name),
+            };
           }),
         );
-        for (const { id, name, result } of results) {
+        for (const { id, result, tool } of results) {
           messages.push({
             role: "tool",
             tool_call_id: id,
@@ -1587,7 +1688,15 @@ export class RemiLoopAgent extends AbstractAgent {
              * very same `ChatCompletionMessageParam`. Without the cast the type forbids sending a
              * screenshot back to a model that just asked for one, which is the bug being fixed.
              */
-            content: toolResultContent(result, name),
+            content: toolResultContent(
+              result,
+              /*
+               * An unknown tool answers with one sentence about itself having no execute function, so
+               * there is nothing here worth a budget of its own. An empty name takes the screen
+               * bound, which is the one that was always applied to it.
+               */
+              tool ?? { name: "" },
+            ),
           } as OpenAIMessage);
         }
         /*
@@ -1663,6 +1772,11 @@ export class RemiLoopAgent extends AbstractAgent {
         // Its own message: this is a turn of its own, and reusing the loop's last id would merge
         // this closing answer into whichever step happened to be last.
         const summaryMessageId = randomUUID();
+        /*
+         * Its own lane, on the same terms as a step's: this pass is a turn of its own, so it gets its
+         * own reasoning message rather than appending to whichever step the budget ran out on.
+         */
+        const summaryReasoning = openReasoning();
         try {
           await runStep(
             [],
@@ -1676,7 +1790,7 @@ export class RemiLoopAgent extends AbstractAgent {
               });
             },
             (delta) => {
-              emitReasoning(delta);
+              summaryReasoning.push(delta);
             },
             () => {},
           );
@@ -1687,8 +1801,19 @@ export class RemiLoopAgent extends AbstractAgent {
            * this catch the finish event below is the only thing left the browser will see.
            */
           summaryFailed = true;
+        } finally {
+          summaryReasoning.close();
         }
       }
+
+      /*
+       * Nothing above leaves a lane open — each step and the summary pass close their own in a
+       * `finally` — so this is the assertion rather than the mechanism, and it runs once per run
+       * rather than once per step. A lane still open here would reach the SDK as a reasoning stream
+       * that never terminates, which is the shape that leaves it holding lane bookkeeping for a run
+       * that has already finished.
+       */
+      closeEveryReasoningLane();
 
       const finishReason = summaryFailed
         ? "The work is done, but the Bot could not summarize it: its closing request failed. " +
@@ -1765,6 +1890,14 @@ export class RemiLoopAgent extends AbstractAgent {
         // Housekeeping must never fail the turn it follows.
       }
     } catch (error) {
+      /*
+       * The abort path, where a lane can still be open: every step closes its own in a `finally`,
+       * but an abort thrown between opening a lane and reaching it — or out of the `results` wait,
+       * which no step owns — would otherwise leave the SDK holding a reasoning stream that never
+       * terminates. Closed before the run announces its own ending, so the last thing on the wire is
+       * a terminated lane rather than an open one.
+       */
+      closeEveryReasoningLane();
       if (signal.aborted || (error as Error)?.name === "AbortError") {
         /*
          * `RUN_ERROR`, NOT A BARE `RUN_FINISHED`.

@@ -105,6 +105,14 @@ type RoutineDto = {
   enabled: boolean;
   nextRunAt: string;
   lastRun: { status: RoutineRunOutcome | null; at: string | null } | null;
+  /**
+   * Failed firings in a row, which is what the fatigue rule counts.
+   *
+   * Reported so a person can see a routine is heading for being switched off rather than
+   * discovering it from a channel message saying so after the fact. Capped at the threshold
+   * server-side, so this never grows into a routine's whole history.
+   */
+  consecutiveFailures: number;
 };
 
 export const SWEEP_SILENCE_MS = MINIMUM_INTERVAL_MS;
@@ -142,6 +150,7 @@ function routineDto(routine: RoutineSummary): RoutineDto {
           at: routine.lastRun.finishedAt?.toISOString() ?? null,
         }
       : null,
+    consecutiveFailures: routine.consecutiveFailures,
   };
 }
 

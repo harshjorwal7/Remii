@@ -56,6 +56,7 @@ import {
   latestUserText,
   SELECTION_FLOOR,
   selectTools,
+  selectToolsForApps,
 } from "./plugins/selection";
 import type { GrantedTool } from "./plugins/tools";
 import { grantedToolGuidance } from "./plugins/tools";
@@ -1009,11 +1010,32 @@ async function buildAgent(
     input: RunAgentInput,
     signal?: AbortSignal,
   ): Promise<GrantedTool[]> => {
-    if (!narrowing) return granted;
+    const text = latestUserText(input.messages);
+    /*
+     * ONE OF THESE TWO RUNS, NEVER BOTH, and which one is a decision rather than a preference.
+     *
+     * The skill pass is an ADMINISTRATOR'S DECLARATION: somebody wrote down which tools a capability
+     * needs, so its answer is exact and overriding it would be overriding a person. The app pass is a
+     * substring heuristic over a message, and its worst case — an action it ranked out that a declared
+     * skill needed — is precisely the capability the declaration promised. Run together the app cap
+     * silently trimmed `selectTools`' own promise that a tool no skill claims is still offered, which
+     * is a guarantee that pass exists to make.
+     *
+     * So a deployment that has written skills gets exactly what it declared, which is what it asked
+     * for, and a deployment that has written none — every deployment on day one, and the one the
+     * Gmail problem lives in — gets the app pass. The skill pass is also the one gated on a floor of
+     * 64, which Gmail misses by one action, so the common case is the case that needed a pass of its
+     * own.
+     */
+    if (!narrowing) {
+      const byApp = await selectToolsForApps({ tools: granted, text, signal });
+      signal?.throwIfAborted();
+      return byApp.offered;
+    }
     const chosen = await selectTools({
       tools: granted,
       skills,
-      text: latestUserText(input.messages),
+      text,
       choose: narrowing.choose,
       signal,
       ...(narrowing.floor === undefined ? {} : { floor: narrowing.floor }),
@@ -1058,7 +1080,13 @@ async function buildAgent(
       granted,
       signRun,
       connectedVendors,
-      narrowing ? offeredFor : undefined,
+      /*
+       * ALWAYS, WHERE IT USED TO BE CONDITIONAL ON A SKILL DECLARATION. The remote path narrows
+       * inside its own middleware rather than by being wrapped, so this is where a remote Bot's
+       * catalogue gets trimmed — and a remote Bot is where the trim matters most, since its endpoint
+       * bills the prompt it is handed and holds its own copy of every tool definition it is sent.
+       */
+      offeredFor,
       loadAttachment,
       markAttachmentsSent,
       handoff,
@@ -1071,10 +1099,23 @@ async function buildAgent(
    * here, which is what keeps a narrowed run from being told it holds something it was not
    * offered.
    *
-   * Search and batch join the set they search: they rank and run the very tools handed here,
-   * narrowed and handed-on ones included, with no second grants read.
+   * TWO SETS, AND THE DIFFERENCE IS THE WHOLE OF THE CHANGE.
+   *
+   * `tools` is what the model is offered. `searchable` is everything the run holds, and it is what
+   * `composio_search_tools` and `multi_execute` rank over. They are the same set for every deployment
+   * that declares no skills and connects one app, and they DIVERGE as soon as app narrowing fires —
+   * which is the only way narrowing can narrow without ever taking a capability away: an action not
+   * offered is still found by search, and `callTool` still decides whether it runs.
+   *
+   * When the app pass is in play the offered set is smaller, so the prompt is smaller too, which is
+   * where the saving is: sixty-three Gmail tool definitions and schemas went out on every run of every
+   * Gmail Bot, and the module that warns about exactly that in `./plugins/selection` exempted them by
+   * one action.
    */
-  const withTools = (tools: GrantedTool[]) => {
+  const withTools = (
+    tools: GrantedTool[],
+    searchable0: GrantedTool[] = tools,
+  ) => {
     /*
      * Gate two of three: the capabilities a supervisor is not given.
      *
@@ -1091,7 +1132,21 @@ async function buildAgent(
      * searches for tools it does not have.
      */
     const held = supervisor ? withoutSupervisorTools(tools) : tools;
-    const full = supervisor ? held : [...held, ...searchAndBatchToolsFor(held)];
+    /*
+     * SEARCHED OVER THE WHOLE, OFFERED THE SHORTLIST. Both go through the supervisor gate, because a
+     * supervisor holding nothing must not be offered a tool that searches for tools it does not have
+     * — and that gate has to be applied to the searched-over set too, or the search would be a way
+     * round it.
+     *
+     * No filter on the non-supervisor branch, deliberately: `withoutSupervisorTools` removes the
+     * passthrough tools that ONLY a supervisor must not hold, and a Bot that is not a supervisor may
+     * be handed them — so stripping them from the search would make `composio_search_tools` unable to
+     * find the workbench it should be able to find for this run.
+     */
+    const searchable = supervisor ? held : searchable0;
+    const full = supervisor
+      ? held
+      : [...held, ...searchAndBatchToolsFor(searchable)];
     return new RemiLoopAgent(
       {
         botId: agent.id,
@@ -1147,13 +1202,22 @@ async function buildAgent(
   };
 
   const whole = withTools(granted);
-  if (!narrowing && !handoff) return whole;
 
+  /*
+   * ALWAYS WRAPPED, WHICH IT WAS NOT BEFORE, and that is a real behaviour change with a real reason.
+   *
+   * App narrowing reads the message, so it cannot happen before the run exists, so a Bot that needs it
+   * cannot be one object built at request time. This used to return `whole` outright whenever there
+   * was no skill declaration and no handoff — which is the common case, and it is why every run of a
+   * Gmail Bot was handed all sixty-three of Gmail's actions. `RunBuiltAgent` is a wrapper, not a
+   * rebuild: the fallback passed here is still reused verbatim whenever a run needs nothing narrower,
+   * so the allocation-for-allocation path survives for the deployments that do not fire the pass.
+   */
   return new RunBuiltAgent(
     { agentId: agent.id, description: agent.name },
     whole,
     async (input, signal) => {
-      const offered = narrowing ? await offeredFor(input, signal) : granted;
+      const offered = await offeredFor(input, signal);
       signal.throwIfAborted();
       /*
        * The tool for handing work to another Bot is made per run, not per request.
@@ -1166,11 +1230,20 @@ async function buildAgent(
       const passing = (await handoff?.(agent.id, input)) ?? [];
       signal.throwIfAborted();
       const tools = passing.length > 0 ? [...offered, ...passing] : offered;
+      /*
+       * The search set is the whole grant even when the offered set is not, and it is `granted` rather
+       * than `offered` because a Bot that narrowed to Gmail's reads must still be able to search for
+       * Gmail's drafts — otherwise narrowing would take a capability away, which is the one thing
+       * this pass must never do. Handed-on tools join both: they were granted to this run too, and a
+       * search that could not find them would be a worse answer than no search.
+       */
+      const searchable =
+        passing.length === 0 ? granted : [...granted, ...passing];
       // Nothing added and nothing narrowed means nothing to rebuild, and reusing the agent already
       // built for this request keeps that path allocation-for-allocation what it was.
       return tools.length === granted.length && passing.length === 0
         ? whole
-        : withTools(tools);
+        : withTools(tools, searchable);
     },
   );
 }

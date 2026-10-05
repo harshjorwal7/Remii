@@ -1,6 +1,12 @@
 import { cutAtCodeUnits } from "../channels/text";
 import { brokerSentence, flagOf } from "./broker";
 import { type ListedTool, MAX_RESULT_CHARS, type McpCallResult } from "./mcp";
+import { nextPageHint } from "./page-size";
+import {
+  RESULT_BUDGETS,
+  shapeToolResult,
+  stripMimePayloads,
+} from "./result-budget";
 
 /**
  * The Composio transport: an app somebody enabled, reached as the person asking.
@@ -1374,11 +1380,17 @@ function listingSentence(toolkit: string, error: unknown): string {
  * in a model's context exactly as a result does, and a vendor's sentence is no shorter for being a
  * failure — so {@link failure} capping nothing and reporting `truncated: false` was the silent
  * truncation's mirror image: unbounded text, plus a field stating that nothing had been cut.
+ *
+ * THE MARKER NOW CARRIES THE ORIGINAL LENGTH, which is the part a model acts on. `[truncated]` told a
+ * model that something had been cut without telling it that a result of four characters had been cut,
+ * so "truncated" and "that was all of it" were indistinguishable from the text alone — and on a
+ * Gmail action, where the cut lands wherever the bytes fall in the document, that is the difference
+ * between narrowing the query and answering from half a mailbox.
  */
 function cap(text: string): { text: string; truncated: boolean } {
   if (text.length <= MAX_RESULT_CHARS) return { text, truncated: false };
   return {
-    text: `${cutAtCodeUnits(text, MAX_RESULT_CHARS)}\n\n[truncated]`,
+    text: `${cutAtCodeUnits(text, MAX_RESULT_CHARS)}\n\n[the action returned ${text.length} characters; this is the first ${MAX_RESULT_CHARS}. Narrow the query, lower its page size, or fetch the next page.]`,
     truncated: true,
   };
 }
@@ -1461,7 +1473,26 @@ const NOTHING = new Set(["", "null", "{}"]);
  * CAN THROW, and is called from outside the vendor's `try` for that reason. See {@link callTool}.
  */
 function resultOf(data: ComposioResult["data"] | undefined): McpCallResult {
-  const text: string | undefined = JSON.stringify(data ?? null, null, 2);
+  /*
+   * THINGS ARE REMOVED BEFORE THE SIZE IS TAKEN, which is the difference between this being a cap and
+   * this being truncation.
+   *
+   * Every Gmail action returns messages as the Gmail API represents them: a `payload` tree whose leaf
+   * parts carry their content as base64 under `body.data`. That is the entire text of every email in
+   * the result, it is by a wide margin the largest thing in the answer, and it is unreadable as it
+   * stands. Serialized whole, it crowded out the headers and snippets a model can actually use, so
+   * the cap decided what a Bot knew about a mailbox by where the bytes happened to fall.
+   *
+   * Removing the bodies first means the cap spends itself on messages. See
+   * {@link stripMimePayloads} for the two shapes it recognises and why neither can be "any `data`".
+   */
+  const usable = stripMimePayloads(data ?? null);
+  /*
+   * NO INDENTATION. Composio's envelope is JSON and this is the only place it is written out, and
+   * `JSON.stringify(data, null, 2)` spent roughly a third of the ceiling on whitespace before a
+   * single header survived. A result measured in characters should be measured in information.
+   */
+  const text: string | undefined = JSON.stringify(usable);
   /*
    * `JSON.stringify` ANSWERS `undefined` RATHER THAN THROWING for a value with no JSON form — a
    * function, a symbol — and this field is the vendor's while the type saying it is a record is
@@ -1482,7 +1513,37 @@ function resultOf(data: ComposioResult["data"] | undefined): McpCallResult {
       truncated: false,
     };
   }
-  return { ...cap(text), isError: false };
+  /*
+   * SHAPED WITH THE APP BOUND, not merely capped, and this is where the two agent topologies stop
+   * disagreeing. The in-process loop shapes a result for the model again on its way into the
+   * context; a framework Bot running its own loop — LangGraph, AG-UI, Mastra — gets the text this
+   * returns and shapes nothing at all. So a Gmail answer reached one Bot cut to 4,000 characters and
+   * another whole at 20,000, and which one a deployment got was decided by wiring.
+   *
+   * Shaping here with the same module and the same bound makes the answer a model receives the same
+   * whichever door it came through. It is idempotent against the loop's own shaping, so doing it here
+   * too costs a walk over an already-shaped value and changes nothing.
+   *
+   * THE APP BOUND'S TOTAL IS `MAX_RESULT_CHARS`, which is why {@link cap} no longer fires on this path:
+   * the same ceiling is enforced one shape earlier, with the cut placed at the field and array that
+   * needed it rather than at whichever byte happened to be last. `cap` remains for refusals, which are
+   * prose and have no shape to walk.
+   */
+  const shaped = shapeToolResult(text, RESULT_BUDGETS.app);
+  /*
+   * APPENDED AFTER THE SHAPE, and read from the vendor's own answer rather than from `shaped`.
+   *
+   * Read before, because the shaped value is a document with a note on the end of it and no longer
+   * parses — a hint found by reading the final text would find nothing, which is precisely the bug
+   * this fixes. Appended after, because a hint appended before is a hint the shape can cut off, on
+   * exactly the large results that most need to be told there is more of them.
+   *
+   * Empty for every result that is not a page: a send, a fetch, a delete. This runs on every single
+   * Composio call, so it is written to be a no-op that costs one shallow walk.
+   */
+  const hint = nextPageHint(usable);
+  const withHint = hint ? `${shaped.text}\n\n${hint}` : shaped.text;
+  return { ...cap(withHint), isError: false, truncated: shaped.truncated };
 }
 
 /**

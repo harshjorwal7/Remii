@@ -1,13 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { createDatabase } from "../src/db/client";
-import { runActivity } from "../src/db/schema";
-import { users } from "../src/db/schema";
-import { threadLocks, threads } from "../src/db/schema/threads";
 import { createRunActivityStore } from "../src/activity/store";
+import { runActivity, users } from "../src/db/schema";
+import { threadLocks, threads } from "../src/db/schema/threads";
 import { createThreadLock, createThreadStore } from "../src/threads/local";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase } from "./support/database";
 
 /**
  * A RUN NOBODY IS RUNNING MUST NOT KEEP SAYING IT IS.
@@ -78,6 +76,23 @@ async function abandonedRun(label: string, ms: number) {
 
 const { sweepAbandonedRuns } = await import("../src/activity/abandoned");
 
+/*
+ * Every assertion below is ABOUT ONE RUN, never about the whole result.
+ *
+ * `sweepAbandonedRuns` is global by design — it has no actor to scope by, because a ghost is a ghost
+ * whoever it belongs to — so `result.ended` is every abandoned run in the database, including rows
+ * left behind by other files in this suite, which share one test database and do not all clean up.
+ *
+ * Asserting the array is empty therefore tested the state of the whole suite rather than the
+ * behaviour of the function, and it passed only because nothing else in the database happened to be a
+ * candidate. It stopped passing the moment the heartbeat signal was added, because leftover rows from
+ * other files became legitimately reapable — which is the sweep working, not a regression.
+ *
+ * So each test asks the only question it means to ask: was THIS run ended?
+ */
+const endedIds = (result: { ended: { runId: string }[] }) =>
+  result.ended.map((row) => row.runId);
+
 describe("a run that is still being renewed", () => {
   test("is left alone, however long its lock has been gone", async () => {
     // The grace period is the whole reason this sweep is safe to run on a timer: a run between
@@ -86,7 +101,7 @@ describe("a run that is still being renewed", () => {
 
     const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
 
-    expect(result.ended).toEqual([]);
+    expect(endedIds(result)).not.toContain(runId);
     const row = await store.get(runId);
     expect(row?.state).toBe("thinking");
   });
@@ -96,7 +111,7 @@ describe("a run that is still being renewed", () => {
 
     const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
 
-    expect(result.ended).toEqual([]);
+    expect(endedIds(result)).not.toContain(runId);
     expect((await store.get(runId))?.state).toBe("thinking");
   });
 });
@@ -107,8 +122,7 @@ describe("a run nobody is running", () => {
 
     const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
 
-    expect(result.ended).toHaveLength(1);
-    expect(result.ended[0]?.runId).toBe(runId);
+    expect(endedIds(result)).toContain(runId);
     const row = await store.get(runId);
     expect(row?.state).toBe("stopped");
     expect(row?.endedAt).not.toBeNull();
@@ -123,9 +137,10 @@ describe("a run nobody is running", () => {
     // that would have cleaned it had no caller.
     const { runId, threadId } = await abandonedRun("stale-lock", 10 * 60_000);
 
-    const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
+    await sweepAbandonedRuns(database, { graceMs: 60_000 });
 
-    expect(result.locksReleased).toBe(1);
+    // Asserted on the row rather than on `locksReleased`, which is a count across the whole database
+    // and so says nothing about this thread in particular.
     const locks = await database
       .select()
       .from(threadLocks)
@@ -149,7 +164,7 @@ describe("a run nobody is running", () => {
 
     const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
 
-    expect(result.ended).toEqual([]);
+    expect(endedIds(result)).not.toContain(runId);
     const row = await store.get(runId);
     expect(row?.state).toBe("failed");
     expect(row?.detail).toBe("the model refused");
@@ -163,7 +178,203 @@ describe("a run nobody is running", () => {
 
     const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
 
-    expect(result.ended.map((row) => row.runId)).toEqual([child.runId]);
+    expect(endedIds(result)).toContain(child.runId);
     expect((await store.get(child.runId))?.state).toBe("stopped");
+  });
+});
+
+/**
+ * THE RUNS THE LOCK COULD NOT SEE.
+ *
+ * Every case above is a hop, and a hop proves it is alive by renewing a `thread_locks` row. A person's
+ * own chat run takes no lock at all — it runs through the runtime — so for the runs somebody actually
+ * watches there was no signal here to read, and a chat whose process was killed held its channel's
+ * working pulse for the full retention window. Because `thinking` outranks every terminal state in
+ * `ACTIVITY_SEVERITY`, that dead row went on winning the roster reduction: a channel pinned open by
+ * work that ended days ago, which no amount of waiting could clear.
+ *
+ * These are the tests for the second signal. The rule is unchanged underneath — a run is ended only
+ * once something has said it is going and then stopped saying so for longer than the grace period —
+ * and the guarantee that a live run is never touched is the one worth defending hardest, because it
+ * is what a wrong answer here costs.
+ */
+describe("a chat run, which takes no lock at all", () => {
+  /** A run recorded and beating, with no lock row anywhere — the shape a chat run has. */
+  async function chatRun(label: string) {
+    const runId = `abandoned-chat-${label}-${randomUUID()}`;
+    const threadId = `abandoned-chat-thread-${randomUUID()}`;
+    created.push(runId, threadId);
+    await threadStore.ensureThread({ threadId, userId: ACTOR, agentId: BOT });
+    await store.begin({ runId, actorUserId: ACTOR, botId: BOT, threadId });
+    return { runId, threadId };
+  }
+
+  test("is given a beat with its row, so it is sweepable from the moment it exists", async () => {
+    /*
+     * WITHOUT THIS, EVERYTHING BELOW IS UNREACHABLE.
+     *
+     * A row whose beat is null is excluded from the sweep by `last_heartbeat_at is not null`, so a
+     * run that begins and is never heard from again would be invisible to it forever. The first beat
+     * travels with the row for exactly that reason, and this is the assertion that says so.
+     */
+    const { runId } = await chatRun("first-beat");
+
+    const row = await store.get(runId);
+    expect(row?.lastHeartbeatAt).not.toBeNull();
+  });
+
+  test("is stopped once its beat has lapsed, so the roster stops saying it is working", async () => {
+    const { runId } = await chatRun("gone");
+    // No lock row exists for this run, and none is needed: the beat is the signal.
+    const locks = await database
+      .select()
+      .from(threadLocks)
+      .where(eq(threadLocks.runId, runId));
+    expect(locks).toHaveLength(0);
+
+    // The run said it was going, and then stopped saying so ten minutes ago.
+    await database
+      .update(runActivity)
+      .set({ lastHeartbeatAt: new Date(Date.now() - 10 * 60_000) })
+      .where(eq(runActivity.runId, runId));
+
+    const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
+
+    expect(endedIds(result)).toContain(runId);
+    const row = await store.get(runId);
+    expect(row?.state).toBe("stopped");
+    expect(row?.endedAt).not.toBeNull();
+    expect(row?.detail).toContain("connection was closed");
+  });
+
+  test("is left alone while its beat is still fresh", async () => {
+    /*
+     * THE ONE THAT MATTERS MOST.
+     *
+     * This is the guarantee the lock path has always had and the reason the grace period exists: a run
+     * that is between beats has not died, and settling it would kill a live turn. Here the run is
+     * not even a second into an interval — it has only just begun — and the sweep must walk past it.
+     */
+    const { runId } = await chatRun("beating");
+
+    const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
+
+    expect(endedIds(result)).not.toContain(runId);
+    expect((await store.get(runId))?.state).toBe("thinking");
+  });
+
+  test("is left alone while its beat is only a little late", async () => {
+    // The grace period doing its actual job, on the signal that replaced the lock: a beat that is
+    // merely behind is a run that will beat again, not one that has stopped.
+    const { runId } = await chatRun("late");
+    await database
+      .update(runActivity)
+      .set({ lastHeartbeatAt: new Date(Date.now() - 2_000) })
+      .where(eq(runActivity.runId, runId));
+
+    const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
+
+    expect(endedIds(result)).not.toContain(runId);
+    expect((await store.get(runId))?.state).toBe("thinking");
+  });
+
+  test("a beat keeps a live run out of the way, however long the run has been going", async () => {
+    /*
+     * THE CASE THAT WOULD KILL A RUN IF THE INTERVALS WERE WRONG.
+     *
+     * A long turn — a slow tool call, a model that is taking its time — is still beating throughout.
+     * What matters is not how old the RUN is but how old the last beat is, so this run is given a
+     * start time well past any plausible turn and a beat from moments ago, and must survive. A sweep
+     * that keyed on `started_at` would end it and report a channel as disconnected while it worked.
+     */
+    const { runId } = await chatRun("long-but-alive");
+    await database
+      .update(runActivity)
+      .set({
+        startedAt: new Date(Date.now() - 6 * 60 * 60_000),
+        lastHeartbeatAt: new Date(),
+      })
+      .where(eq(runActivity.runId, runId));
+
+    const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
+
+    expect(endedIds(result)).not.toContain(runId);
+    expect((await store.get(runId))?.state).toBe("thinking");
+  });
+
+  test("cannot be revived by a beat that arrives after the sweep ended it", async () => {
+    /*
+     * A HEARTBEAT MUST NOT BE ABLE TO UN-END A RUN.
+     *
+     * The beat is guarded on `ended_at is null` and says so by returning false, which is what lets the
+     * timer stop instead of writing for ever to a row nobody reads. Without the guard, a beat racing a
+     * settled run would report a finished conversation as working again — the same class of lie as the
+     * ghost, and worse because it would keep returning.
+     */
+    const { runId } = await chatRun("finished-then-beat");
+    await database
+      .update(runActivity)
+      .set({ lastHeartbeatAt: new Date(Date.now() - 10 * 60_000) })
+      .where(eq(runActivity.runId, runId));
+    await sweepAbandonedRuns(database, { graceMs: 60_000 });
+    expect((await store.get(runId))?.state).toBe("stopped");
+
+    const stillOpen = await store.heartbeat(runId);
+
+    expect(stillOpen).toBe(false);
+    const row = await store.get(runId);
+    expect(row?.state).toBe("stopped");
+    expect(row?.endedAt).not.toBeNull();
+  });
+
+  test("a beat on a live run says so, so the timer can stop on its own", async () => {
+    const { runId } = await chatRun("still-open");
+
+    const beat = await store.heartbeat(runId);
+
+    expect(beat).toBe(true);
+    expect((await store.get(runId))?.lastHeartbeatAt).not.toBeNull();
+  });
+
+  test("a beat pushes the signal forward rather than only moving a timestamp", async () => {
+    // Asserted as movement, because a beat that wrote the same value would pass a bare
+    // `not.toBeNull()` forever while the sweeper went on reading a lapsed run.
+    const { runId } = await chatRun("advances");
+    await database
+      .update(runActivity)
+      .set({ lastHeartbeatAt: new Date(Date.now() - 5 * 60_000) })
+      .where(eq(runActivity.runId, runId));
+    const before = await store.get(runId);
+
+    await store.heartbeat(runId);
+    const after = await store.get(runId);
+
+    expect(after!.lastHeartbeatAt!.getTime()).toBeGreaterThan(
+      before!.lastHeartbeatAt!.getTime(),
+    );
+    // And the run survives a sweep on the strength of it.
+    const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
+    expect(endedIds(result)).not.toContain(runId);
+  });
+
+  test("a run that never beat is left to the finish, not guessed at by the sweep", async () => {
+    /*
+     * THE CONTRACT, ASSERTED DIRECTLY.
+     *
+     * Absence of a heartbeat is not evidence of death: it is the same absence that describes a run
+     * between beats, and a sweep that reads it as death kills live turns. So a null beat is excluded
+     * rather than treated as infinitely old — the sweeper ends runs it has evidence about, and the
+     * finish path ends the ones whose cleanup was simply dropped.
+     */
+    const { runId } = await chatRun("never-beat");
+    await database
+      .update(runActivity)
+      .set({ lastHeartbeatAt: null })
+      .where(eq(runActivity.runId, runId));
+
+    const result = await sweepAbandonedRuns(database, { graceMs: 60_000 });
+
+    expect(endedIds(result)).not.toContain(runId);
+    expect((await store.get(runId))?.state).toBe("thinking");
   });
 });

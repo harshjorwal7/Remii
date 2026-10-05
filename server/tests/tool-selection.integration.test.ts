@@ -949,7 +949,24 @@ describe("when selection cannot help", () => {
       },
     );
     await ask(agents.analyst as never, "read the Drive doc");
-    expect(toolsOfferedToModel()).toHaveLength(granted.length);
+    /*
+     * THE REAL CLAIM IS THE ONE ABOVE IT: `choose` throws, so reaching pass one at all fails this
+     * test. What is asserted here is what the model is offered once the selector is out of the
+     * picture, and that is no longer "everything" — it is the app pass.
+     *
+     * Which is the point of the whole change, so it is pinned rather than loosened. A Bot holding 144
+     * actions across Drive, Slack and GitHub was handed all 144 on every run, and the module that
+     * warns about exactly that exempted this deployment because it declares no skills. "Read the Drive
+     * doc" now offers Drive's actions and leaves the rest to `composio_search_tools`, which is built
+     * over the whole grant — so nothing became unreachable, and the prompt stopped carrying two
+     * vendors' worth of tools the run had no use for.
+     */
+    const offered = toolsOfferedToModel();
+    expect(offered.length).toBeGreaterThan(0);
+    expect(offered.length).toBeLessThan(granted.length);
+    expect(offered.every((name) => name.startsWith("mcp__drive__"))).toBe(true);
+    expect(offered).not.toContain("mcp__slack__tool_0");
+    expect(offered).not.toContain("mcp__github__tool_0");
   });
 
   test("skills that cannot be read are diagnosed and leave the Bot with all of its tools", async () => {
@@ -974,7 +991,17 @@ describe("when selection cannot help", () => {
       );
       await ask(agents.analyst as never, "read the Drive doc");
       const offered = toolsOfferedToModel();
-      expect(offered).toHaveLength(granted.length);
+      /*
+       * An unreadable skill list means no skill pass, so this is the same case as above: the app
+       * pass is what remains, and the Bot keeps its Drive tools. What must NOT happen is the third
+       * outcome — a read failure that narrowed by skill declaration anyway, which is the failure
+       * direction the selection module is written against, and which the diagnostic below is there to
+       * make visible rather than to act on.
+       */
+      expect(offered.length).toBeGreaterThan(0);
+      expect(offered.every((name) => name.startsWith("mcp__drive__"))).toBe(
+        true,
+      );
       expect(offered).not.toContain("mcp__github__tool_0");
       expect(diagnostic).toHaveBeenCalledTimes(1);
       expect(diagnostic).toHaveBeenCalledWith({

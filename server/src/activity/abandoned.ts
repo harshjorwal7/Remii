@@ -24,6 +24,14 @@ import { threadLocks } from "../db/schema/threads";
  * gets its lock back and must not be reported dead — so nothing here acts on a lock that expired
  * within the window, only on one that has been gone long enough that the run is certainly over.
  *
+ * WHY THERE ARE TWO SIGNALS, which is the correction this version carries. The lock covers hops. A
+ * person's own chat run takes no lock at all, so for the runs a person actually watches there was no
+ * signal here to read, and a chat whose process was killed held its channel's working pulse for the
+ * full retention window. `run_activity` now carries `last_heartbeat_at` for exactly that case, and a
+ * chat run beats on it while it works. The same grace period, the same rule, and the same refusal to
+ * treat silence as death: a beat that is PRESENT AND LAPSED is evidence, and a beat that is merely
+ * absent is not.
+ *
  * This is the same signal `ThreadLock.sweepExpired` already computes and then throws away with a
  * `void rows`. That function had no caller at all, so nothing swept a stale lock either. It is left
  * in place for whoever owns the lock table; this module does the sweep it was written for, because
@@ -83,21 +91,29 @@ export async function sweepAbandonedRuns(
    * activity row is finished, so there is no window in which a run is reported dead and its lock is
    * still held — which would be the one ordering that could kill a live run.
    *
-   * LOCKS ONLY, AND THAT IS A LIMITATION RATHER THAN AN OVERSIGHT.
+   * TWO CANDIDATE SETS, BECAUSE THERE ARE TWO PROOFS OF LIVENESS AND ONE OF THEM USED TO BE MISSING.
    *
-   * A hop proves it is alive by renewing a lock row, so an expired lock is real evidence that it is
-   * not. A CHAT RUN DOES NOT TAKE A LOCK ROW AT ALL — it runs through the runtime — so this sweep
-   * cannot see a person's own conversation, and a chat whose process was killed leaves its
-   * activity row `thinking` with no `ended_at` that nothing will ever move.
+   * The lock set is the original signal and is unchanged: a hop renews a lock row on a heartbeat, so
+   * a lock gone past the grace period is real evidence that nothing is renewing it.
    *
-   * Treating "an open activity row with no lock" as evidence of death was tried and reverted, and
-   * the reason is the whole contract of this function: absence of a heartbeat is not evidence that
-   * a run has stopped. It is the same absence that describes a run between renewals, and a sweeper
-   * that reads it as death will kill live turns. The test `is left alone, however long its lock has
-   * been gone` is that guarantee, and it outranks the ghost it was aimed at.
+   * The heartbeat set is the one that closes the gap this function used to have. A person's own chat
+   * run takes NO lock row at all — it runs through the runtime — so before `run_activity` carried a
+   * `last_heartbeat_at`, a chat whose process was killed left an activity row `thinking` with no
+   * `ended_at` that nothing would ever move. The row below it, on the absent lock, is the honest
+   * record of that: the sweeper had no way to see a chat run at all.
    *
-   * So the ghost is fixed where it can be fixed honestly — by giving a chat run a heartbeat to be
-   * absent from — and not here.
+   * AND THE CONTRACT IS UNCHANGED, WHICH IS THE PART THAT MATTERS. Absence of a heartbeat is still
+   * not evidence of death. What is claimed here is a heartbeat that is PRESENT AND OLD — a run that
+   * said it was going, and has not said so since well past the grace period — and not the mere
+   * absence of one. Treating "open row with no lock and no beat" as death was tried and reverted,
+   * because that same absence describes a run between beats and a sweeper that reads it as death
+   * kills live turns. The test `is left alone, however long its lock has been gone` is that
+   * guarantee, and it outranks the ghost it was aimed at.
+   *
+   * The one thing that changed to earn the ghost is that a chat run now beats at all. A run is given
+   * its first beat with its row, and renews while it works, so "no beat in over a minute" is a
+   * statement about a run that was demonstrably alive and then went quiet — which is exactly what a
+   * killed process looks like, and is not what a run between beats looks like.
    */
   const lockCandidates = await database
     .select({ runId: threadLocks.runId })
@@ -105,7 +121,39 @@ export async function sweepAbandonedRuns(
     .where(lt(threadLocks.expiresAt, expiredBefore))
     .limit(batch);
 
-  const candidates = [...lockCandidates];
+  /*
+   * THE HEARTBEAT SET, and the grace period is the only thing keeping a live run out of it.
+   *
+   * There is deliberately NO "has this run done anything yet" condition here, and an earlier draft of
+   * this fix had one — which is worth recording, because it excluded the very ghosts it was written
+   * for. A run whose row was written and whose turn died in the same instant has `transitions` of
+   * zero: `begin` ran, nothing ever moved the state, and that is the commonest shape this sweep will
+   * ever meet. Filtering on a recorded transition would have left every one of them untouched.
+   *
+   * What protects a live run instead is the arithmetic between the two intervals, and it is the same
+   * arithmetic the lock path has always relied on. A running turn beats every
+   * `TURN_HEARTBEAT_MS`, so its beat is at most that old — and this query only selects beats older
+   * than the grace period, which is deliberately several times longer. A live run is therefore never
+   * a candidate, however long a single tool call takes, because it is still beating throughout.
+   *
+   * A beat that is merely ABSENT is still not treated as death: `last_heartbeat_at is not null` is in
+   * the predicate, so a row that has never beaten is left alone by this sweep rather than guessed at.
+   * It is ended by the finish that now reaches a run whose teardown used to be dropped, and by the
+   * repair that owns rows nothing will move.
+   */
+  const heartbeatCandidates = await database
+    .select({ runId: runActivity.runId })
+    .from(runActivity)
+    .where(
+      and(
+        isNull(runActivity.endedAt),
+        sql`${runActivity.lastHeartbeatAt} is not null`,
+        lt(runActivity.lastHeartbeatAt, expiredBefore),
+      ),
+    )
+    .limit(batch);
+
+  const candidates = [...lockCandidates, ...heartbeatCandidates];
   if (candidates.length === 0) return { ended: [], locksReleased: 0 };
 
   const runIds = [

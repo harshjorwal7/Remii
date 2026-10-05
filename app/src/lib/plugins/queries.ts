@@ -357,6 +357,24 @@ export function pluginsPageQueryOptions() {
 }
 
 /**
+ * Just the skills the caller can see — the same rows the Skills page draws, without the catalogue /
+ * server payload that `pluginsPageQueryOptions` also carries. The composer's `/` menu polls this;
+ * it does not need the rest.
+ */
+export function skillListQueryOptions() {
+  return queryOptions({
+    queryKey: ["plugins", "skills"] as const,
+    refetchInterval: 15_000,
+    queryFn: async (): Promise<{ skills: PluginSkill[] }> => {
+      const response = await client("/api/plugins/skills", {
+        fallback: "Skills could not be loaded.",
+      });
+      return response.json();
+    },
+  });
+}
+
+/**
  * The same page without per-tool detail: ids, titles, logos, connection
  * schemes, grants state — everything the connected-accounts screens draw.
  * With the whole broker catalogue enabled the full payload is tens of

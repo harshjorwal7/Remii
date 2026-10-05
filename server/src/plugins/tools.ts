@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AuditInitiator } from "../audit";
+import type { ResultBudgetClass } from "./result-budget";
 import type { SelectableSkill } from "./selection";
 import {
   isDeploymentFault,
@@ -200,6 +201,16 @@ export type GrantedTool = {
    * the two forms are converted (`toolNameFor`) and no second parser to drift from it.
    */
   ref: string;
+  /**
+   * How much of this tool's result a model is shown. See {@link ResultBudgetClass}.
+   *
+   * Declared here rather than inferred at the cut, because the answer's SIZE is what decides it and
+   * size is what this tool's vendor is: a screen tool returns what our own machine printed, a
+   * connected app returns somebody's mailbox, and one number for both was cutting the mailbox to
+   * the size of a screen reading. Absent means the screen bound, which is the one that was always
+   * applied and the one every desktop tool was written against.
+   */
+  resultBudget?: ResultBudgetClass;
   effect?: "read" | "write";
   execute: (args: unknown, signal?: AbortSignal) => Promise<ToolResult>;
 };
@@ -217,6 +228,27 @@ export function parametersFor(inputSchema: Record<string, unknown>): z.ZodType {
     if (converted instanceof z.ZodObject) return converted;
   } catch {}
   return z.object({}).catchall(z.unknown());
+}
+
+/*
+ * THE CONVERSION IS MEMOISED, keyed by the schema OBJECT rather than by a hash of it.
+ *
+ * The grant row's schema object is re-read from a five-minute cache (`SERVERS_TTL_MS`), which means
+ * the same object arrives on most requests, and `z.fromJSONSchema` over a sixty-tool catalogue is a
+ * real cost paid for every run that shares it. A hash would have to walk the whole schema to produce
+ * the key, which is the work it exists to avoid; the object identity is ready, and a WeakMap drops
+ * the entry the moment the grant cache replaces the object rather than leaking it into later ones.
+ */
+const zodBySchema = new WeakMap<Record<string, unknown>, z.ZodType>();
+
+export function parametersForCached(
+  inputSchema: Record<string, unknown>,
+): z.ZodType {
+  const cached = zodBySchema.get(inputSchema);
+  if (cached) return cached;
+  const converted = parametersFor(inputSchema);
+  zodBySchema.set(inputSchema, converted);
+  return converted;
 }
 
 /**
@@ -260,6 +292,22 @@ export function grantedToolGuidance(
     bySystem.set(system, [...(bySystem.get(system) ?? []), rest]);
   }
 
+  /*
+   * THE APP, NOT EVERY ACTION OF IT, and this is the sentence that used to be unreadable.
+   *
+   * It listed every action name it held, which for a Gmail Bot is sixty-three of them — several
+   * thousand characters pasted into the system prompt of every single run, above the question the
+   * model was asked, for no information the tool list did not already carry. The list right above it
+   * IS the tool array, and it names every action with its full description. So the same names
+   * appeared twice per run: once in prose where they can only be skimmed, and once where they are
+   * chosen from.
+   *
+   * What the sentence is FOR is the thing a tool array cannot say: that this system is reachable
+   * directly, as the person, with their own access, and that reaching for it beats a browser. Which
+   * systems those are is the whole content. The count is kept because "sixty-three actions" is what
+   * tells a model there is more here than it has been offered, and {@link composio_search_tools} is
+   * how it asks.
+   */
   const held = [...bySystem.keys()];
   const missing = connectedButNotHeld.filter(
     (system) => !held.includes(system),
@@ -280,6 +328,24 @@ export function grantedToolGuidance(
     ...(tools.length > 0
       ? [
           "You can reach these systems directly, as the person asking, with their own access:",
+        ]
+      : []),
+    ...[...bySystem.entries()].map(
+      ([system, names]) =>
+        `- ${system}${names.length > 1 ? ` (${names.length} actions)` : ""}`,
+    ),
+    ...(tools.length > 0
+      ? [
+          "The tools listed above are these systems' actions. If the part you need is not among them,",
+          "composio_search_tools finds the rest by describing what you want to do, and multi_execute runs",
+          "several at once. Use them for anything about those systems. Do NOT browse to one of their websites instead: your",
+          "browser is signed in as nobody, so it sees less than these tools do and will meet a sign-in wall",
+          "that connecting an account has already solved.",
+          "If one of these systems is involved and no tool above covers the part you need, that is a",
+          "missing grant and not something to work around. Say so plainly, name the capability you would",
+          "need, and say it can be granted on that connector under Settings → App connections. Do not reach for the",
+          "browser, do not ask the person to sign in, and do not ask them to fetch it for you: they already",
+          "have the access, and the thing that is missing is yours, not theirs.",
         ]
       : []),
     ...[...bySystem.entries()].map(
@@ -349,8 +415,15 @@ export async function grantedTools(options: {
       name: tool.toolName,
       ref: tool.ref,
       description: tool.description,
-      parameters: parametersFor(tool.inputSchema),
+      parameters: parametersForCached(tool.inputSchema),
       effect: tool.effect,
+      /*
+       * Every one of these is a vendor's answer, which is what the app bound is for. See
+       * `result-budget.ts`: a Gmail action returns structured JSON carrying whole messages, and the
+       * screen bound this replaces cut such a result to a couple of entries while being exactly right
+       * for the tools it was written next to.
+       */
+      resultBudget: "app" as const,
       execute: async (args: unknown, signal?: AbortSignal) => {
         try {
           signal?.throwIfAborted();

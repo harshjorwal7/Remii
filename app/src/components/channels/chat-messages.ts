@@ -633,14 +633,33 @@ export function toVisibleChatItems(
 }
 
 /**
+ * Predicate that decides whether a tool call is a drawn component rather than process work.
+ *
+ * Gallery components (`showBarChart`, `showTable`, ...) are the Bot's reply, not its process:
+ * they belong in their own row, not folded behind a chevron. Everything else — MCP tools, server
+ * tools, reasoning — folds into the turn's disclosure as before.
+ *
+ * Injected rather than imported from the gallery registry because `chat-messages.ts` is a pure
+ * projection module: it must stay testable under `bun test`, where the registry's eager
+ * `import.meta.glob` resolves to nothing.
+ */
+export type IsDrawnTool = (toolName: string) => boolean;
+
+/**
  * WHAT COUNTS AS WORK, as opposed to something the person is meant to read as a turn of its own.
  *
  * A tool call and a thought are both things the Bot did on the way to an answer, and neither is the
  * answer. Anything the reader sent, anything the Bot said back, and anything it drew stays where it
  * is: those are the conversation, and a disclosure across them would be hiding the reply.
+ *
+ * `isDrawn` is the one exception, and it is the one that mattered: a bar chart or a table arrives as
+ * a tool call like any other, so folding it made the thing the person came back to read disappear
+ * behind a chevron the moment the answer's first token landed.
  */
-function isWorkRow(item: VisibleChatItem): boolean {
-  return item.kind === "tool" || item.kind === "thinking";
+function isWorkRow(item: VisibleChatItem, isDrawn: IsDrawnTool): boolean {
+  if (item.kind === "thinking") return true;
+  if (item.kind !== "tool") return false;
+  return !isDrawn(item.toolCall.function.name);
 }
 
 /**
@@ -658,11 +677,12 @@ function isWorkRow(item: VisibleChatItem): boolean {
  * still in flight — a trailing run, a call whose result has not arrived — has nothing after it and
  * is `answered: false`, so it stays open and keeps saying so.
  *
- * WHY A GROUP CAN ALSO END AT AN ACTIVITY. A Bot that draws an interface mid-turn produces one
- * between a step's work and the next step's work, and a run broken by it would be two groups
- * claiming to be one turn's thinking. The activity is its own row and stays outside; the work either
- * side of it is folded with its own kind, and the reader sees the interface between two disclosures,
- * which is the order things happened in.
+ * WHY A GROUP CAN ALSO END AT SOMETHING DRAWN. A Bot that draws an interface mid-turn produces an
+ * activity between a step's work and the next step's work, and a run broken by it would be two groups
+ * claiming to be one turn's thinking. A drawn component — a chart, a table — is the same case and the
+ * same answer: it is its own row, outside the disclosure, and the work either side of it is folded
+ * with its own kind. The reader sees the drawing between two disclosures, which is the order things
+ * happened in, rather than a chart they have to go and open.
  *
  * RETURNED UNTOUCHED WHEN THERE IS NOTHING TO FOLD, so a transcript with no tools in it takes the
  * identical path it always did and this function cannot be the reason a plain conversation renders
@@ -670,25 +690,28 @@ function isWorkRow(item: VisibleChatItem): boolean {
  */
 export function groupChatWork(
   items: readonly VisibleChatItem[],
+  isDrawn: IsDrawnTool = () => false,
 ): VisibleChatItem[] {
-  const hasWork = items.some(isWorkRow);
+  const hasWork = items.some((item) => isWorkRow(item, isDrawn));
   if (!hasWork) return [...items];
 
   const out: VisibleChatItem[] = [];
   let index = 0;
   while (index < items.length) {
-    if (!isWorkRow(items[index] as VisibleChatItem)) {
+    if (!isWorkRow(items[index] as VisibleChatItem, isDrawn)) {
       out.push(items[index] as VisibleChatItem);
       index += 1;
       continue;
     }
 
     const rows: VisibleChatItem[] = [];
-    while (index < items.length && isWorkRow(items[index] as VisibleChatItem)) {
+    while (
+      index < items.length &&
+      isWorkRow(items[index] as VisibleChatItem, isDrawn)
+    ) {
       rows.push(items[index] as VisibleChatItem);
       index += 1;
     }
-    const next = items[index];
     out.push({
       kind: "work",
       // Keyed on the first row, which is a real id from the projection rather than one invented
@@ -696,12 +719,31 @@ export function groupChatWork(
       // than no row at all.
       id: (rows[0] as VisibleChatItem).id,
       rows,
-      answered:
-        next !== undefined &&
-        next.kind === "text" &&
-        next.role === "assistant" &&
-        next.text !== "",
+      // A drawn component or an activity sitting between the work and the prose does not stop the
+      // work being answered: skip past it and look for the answer itself.
+      answered: answersTent(items, index, isDrawn),
     });
   }
   return out;
+}
+
+/**
+ * Whether the work is answered, looking past the things that legitimately come between the work
+ * and the answer: a drawn component card, and an activity row. Either is the Bot already showing
+ * its reply, so it must not hold the disclosure open as though work were still in flight.
+ */
+function answersTent(
+  items: readonly VisibleChatItem[],
+  from: number,
+  isDrawn: IsDrawnTool,
+): boolean {
+  for (let index = from; index < items.length; index += 1) {
+    const item = items[index] as VisibleChatItem;
+    if (item.kind === "activity") continue;
+    if (item.kind === "tool" && isDrawn(item.toolCall.function.name)) continue;
+    return (
+      item.kind === "text" && item.role === "assistant" && item.text !== ""
+    );
+  }
+  return false;
 }

@@ -467,6 +467,13 @@ export function createPluginRoutes(
     }
   }
 
+  /** The skills the caller can see — the same list the Skills page shows, nothing more. */
+  routes.get("/skills", requireUser, async (context) => {
+    return context.json({
+      skills: await store.listSkills(skillActor(context)),
+    });
+  });
+
   /** Everything App connections draws: the catalogue, what is added, and the skills. */
   routes.get("/", requireUser, async (context) => {
     const slim = context.req.query("slim") === "1";

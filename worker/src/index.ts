@@ -32,6 +32,7 @@ import {
   memoryConsolidateUrl,
   routineRunUrl,
 } from "./env";
+import { shouldRunNightly } from "./nightly";
 import { runTelegramLoop } from "./telegram";
 import { workerStatus } from "./status";
 
@@ -113,8 +114,14 @@ function sleep(ms: number): Promise<void> {
 
 let tick = 0;
 
-/** The UTC day consolidation last ran, so it runs once a day, not once a tick. */
+/** The UTC day consolidation last SUCCEEDED on. See `shouldRunNightly` in ./nightly.ts. */
 let lastConsolidationDay = "";
+
+/** The UTC day the morning brief last SUCCEEDED on. Same cadence, tracked apart. */
+let lastBriefDay = "";
+
+/** When either nightly pass was last attempted, whatever the outcome. */
+let lastNightlyAttempt = 0;
 
 async function runOneTick(): Promise<void> {
   tick += 1;
@@ -168,15 +175,22 @@ async function runOneTick(): Promise<void> {
     }
   }
 
-  // Nightly memory consolidation, once per UTC day. The server merges duplicate memories and
-  // resolves contradictions per user; this loop only supplies the clock. Dry-run until the
-  // operator sets MEMORY_CONSOLIDATE_DRY_RUN=false: decisions are logged, nothing is linked.
-  // Its own try/catch, so a consolidation failure never touches the routines sweep below.
-  try {
-    const today = new Date().toISOString().slice(0, 10);
-    if (lastConsolidationDay !== today) {
-      lastConsolidationDay = today;
-      const dryRun = process.env.MEMORY_CONSOLIDATE_DRY_RUN !== "false";
+  /*
+   * Nightly memory consolidation, once per UTC day. The server merges duplicate memories and
+   * resolves contradictions per user; this loop only supplies the clock. Dry-run until the
+   * operator sets MEMORY_CONSOLIDATE_DRY_RUN=false: decisions are logged, nothing is linked.
+   *
+   * Each pass below has its own try/catch and its own day flag, so neither one is taken down by
+   * the other failing, and neither touches the routines sweep.
+   */
+  const nowNightly = Date.now();
+  const dryRun = process.env.MEMORY_CONSOLIDATE_DRY_RUN !== "false";
+
+  // Each pass decides for itself, and is marked done only once it has actually worked. See
+  // ./nightly.ts: marking the day before the request is what cost a whole UTC day to one timeout.
+  if (shouldRunNightly(nowNightly, lastConsolidationDay, lastNightlyAttempt)) {
+    lastNightlyAttempt = nowNightly;
+    try {
       const response = await fetch(memoryConsolidateUrl(serverInternalUrl), {
         method: "POST",
         headers: {
@@ -191,6 +205,11 @@ async function runOneTick(): Promise<void> {
         merged?: number;
         superseded?: number;
       } | null;
+      // Only a response that arrived counts. A 500 is the server having received the pass and
+      // failing it, which is a different thing from never arriving, and neither is a success.
+      if (response.ok) {
+        lastConsolidationDay = new Date(nowNightly).toISOString().slice(0, 10);
+      }
       console.info(
         JSON.stringify({
           type: "memory-consolidation",
@@ -201,50 +220,58 @@ async function runOneTick(): Promise<void> {
           superseded: summary?.superseded ?? 0,
         }),
       );
-      // The morning brief rides the same nightly pass: one clock, one log
-      // line family, its own failure note so a brief outage never touches
-      // consolidation above.
-      try {
-        const briefed = await fetch(
-          `${serverInternalUrl}/internal/memory/brief`,
-          {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${workerSharedSecret}`,
-              "content-type": "application/json",
-            },
-            body: "{}",
-            signal: AbortSignal.timeout(55_000),
-          },
-        );
-        const briefSummary = (await briefed.json().catch(() => null)) as {
-          users?: number;
-          briefed?: number;
-        } | null;
-        console.info(
-          JSON.stringify({
-            type: "memory-brief",
-            status: briefed.status,
-            users: briefSummary?.users ?? 0,
-            briefed: briefSummary?.briefed ?? 0,
-          }),
-        );
-      } catch (error) {
-        console.warn(
-          JSON.stringify({
-            type: "memory-brief-failed",
-            reason: error instanceof Error ? error.message : String(error),
-          }),
-        );
-      }
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          type: "memory-consolidation-failed",
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      );
     }
-  } catch (error) {
-    console.warn(
-      JSON.stringify({
-        type: "memory-consolidation-failed",
-        reason: error instanceof Error ? error.message : String(error),
-      }),
-    );
+  }
+
+  /*
+   * The morning brief: one clock and one log line family with consolidation above, but tracked
+   * separately so neither pass is lost because the other failed. It used to be nested inside the
+   * consolidation block, which meant a failed consolidation silently took the brief down with it.
+   */
+  if (shouldRunNightly(Date.now(), lastBriefDay, lastNightlyAttempt)) {
+    try {
+      const briefed = await fetch(
+        `${serverInternalUrl}/internal/memory/brief`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${workerSharedSecret}`,
+            "content-type": "application/json",
+          },
+          body: "{}",
+          signal: AbortSignal.timeout(55_000),
+        },
+      );
+      const briefSummary = (await briefed.json().catch(() => null)) as {
+        users?: number;
+        briefed?: number;
+      } | null;
+      if (briefed.ok) {
+        lastBriefDay = new Date().toISOString().slice(0, 10);
+      }
+      console.info(
+        JSON.stringify({
+          type: "memory-brief",
+          status: briefed.status,
+          users: briefSummary?.users ?? 0,
+          briefed: briefSummary?.briefed ?? 0,
+        }),
+      );
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          type: "memory-brief-failed",
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
   }
 
   // Remi's scheduled jobs, every other tick (about once a minute). The server claims due rows,

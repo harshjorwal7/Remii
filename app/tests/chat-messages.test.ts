@@ -1278,4 +1278,233 @@ describe("a turn's work, folded", () => {
     // because it is not the Bot thinking and not the Bot working — it is the Bot showing something.
     expect(drawn).toEqual(["work", "activity", "work", "text"]);
   });
+
+  /*
+   * A drawn component is the Bot's reply, not its process: it belongs in its own row beside the
+   * prose, never folded behind the work disclosure. Interleaving it must not corrupt the grouping
+   * of whatever real work sits on either side.
+   */
+  const drawnNames = new Set(["showBarChart", "showTable"]);
+  const isDrawn = (name: string) => drawnNames.has(name);
+  const itemsWithDrawn = (messages: Message[]) =>
+    groupChatWork(toVisibleChatItems(messages), isDrawn);
+
+  test("a drawn component is not folded into the work disclosure", () => {
+    const [work, chart, ...rest] = itemsWithDrawn([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "computer_shell", arguments: "{}" },
+          },
+          {
+            id: "c2",
+            type: "function",
+            function: { name: "showBarChart", arguments: "{}" },
+          },
+        ],
+      },
+      PROSE,
+    ]);
+
+    expect(work?.kind).toBe("work");
+    if (work?.kind !== "work") throw new Error("expected a work group");
+    expect(work.rows.map((row) => row.kind)).toEqual(["tool"]);
+    expect(chart?.kind).toBe("tool");
+    expect(rest.map((item) => item.kind)).toEqual(["text"]);
+  });
+
+  test("the work before a drawn component is already answered once prose follows", () => {
+    const [work] = itemsWithDrawn([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "computer_shell", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "c2",
+            type: "function",
+            function: { name: "showBarChart", arguments: "{}" },
+          },
+        ],
+      },
+      PROSE,
+    ]);
+
+    expect(work?.kind === "work" ? work.answered : null).toBe(true);
+  });
+
+  test("an activity row also counts as what follows the work, not as a blocker", () => {
+    const [work] = itemsWithDrawn([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "computer_shell", arguments: "{}" },
+          },
+        ],
+      },
+      DRAWING,
+      PROSE,
+    ]);
+
+    expect(work?.kind === "work" ? work.answered : null).toBe(true);
+  });
+
+  test("draws land in order beside the prose", () => {
+    const kinds = itemsWithDrawn([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "c2",
+            type: "function",
+            function: { name: "showTable", arguments: "{}" },
+          },
+        ],
+      },
+      PROSE,
+    ]).map((item) => item.kind);
+
+    expect(kinds).toEqual(["tool", "text"]);
+  });
+});
+
+/**
+ * WHAT A REASONING MODEL'S THINKING LOOKS LIKE ON SCREEN.
+ *
+ * The loop used to mint one reasoning id for the whole run, so every step's thinking accumulated
+ * into a single `{role: "reasoning"}` message and this projection drew it as one thinking row
+ * holding the entire turn — ten steps of deliberation as a single wall of text, with the tools it
+ * was doing between them nowhere to be seen. The loop now opens and closes a reasoning message per
+ * step (`server/src/remi/loop-agent.ts`), and these hold the half of that fix which lives here: a
+ * message per step is a ROW per step, in the order the steps happened, inside the work disclosure.
+ *
+ * The projection was always capable of this. It maps one reasoning message to one item keyed on that
+ * message's own id, so distinct ids were always going to produce distinct rows — the collapse was
+ * upstream, and asserting it here is what stops a future single-id shortcut from looking correct.
+ */
+describe("a reasoning model's thinking, step by step", () => {
+  const tool = (id: string): ToolCall => ({
+    id,
+    type: "function",
+    function: { name: "computer_shell", arguments: "{}" },
+  });
+
+  const items = (messages: Message[]) =>
+    groupChatWork(toVisibleChatItems(messages));
+
+  /** Two steps that each thought and each called a tool, then the answer. The shape under test. */
+  const twoSteps = () =>
+    [
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [tool("call-1")],
+      },
+      {
+        id: "reasoning-1",
+        role: "reasoning",
+        content: "I should read the issues first.",
+      },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        content: "",
+        toolCalls: [tool("call-2")],
+      },
+      {
+        id: "reasoning-2",
+        role: "reasoning",
+        content: "Now the second file.",
+      },
+      PROSE,
+    ] as Message[];
+
+  test("each step's thinking is its own row, in the order it happened", () => {
+    const [group] = items(twoSteps());
+
+    expect(group?.kind).toBe("work");
+    if (group?.kind !== "work") throw new Error("expected a work group");
+    // Two thinking rows and two tool rows, interleaved as they arrived. One row for the turn's
+    // thinking — which is what a single run-scoped reasoning id produced — would read
+    // ["tool", "tool", "thinking"].
+    expect(group.rows.map((row) => row.kind)).toEqual([
+      "tool",
+      "thinking",
+      "tool",
+      "thinking",
+    ]);
+  });
+
+  test("the thinking rows carry their own step's words, not a merged transcript", () => {
+    const [group] = items(twoSteps());
+    if (group?.kind !== "work") throw new Error("expected a work group");
+
+    const thinking = group.rows
+      .filter((row) => row.kind === "thinking")
+      .map((row) => (row.kind === "thinking" ? row.text : ""));
+
+    expect(thinking).toHaveLength(2);
+    expect(thinking[0]).toBe("I should read the issues first.");
+    expect(thinking[1]).toBe("Now the second file.");
+  });
+
+  test("a turn's thinking folds shut once the answer arrives", () => {
+    // The disclosure is open while the answer is still coming and a record once it is here, and the
+    // words of the answer are the only thing that decide it. Without this the shimmer over a
+    // finished turn is the "still working" line that never goes away.
+    const [group] = items(twoSteps());
+    expect(group?.kind === "work" ? group.answered : null).toBe(true);
+
+    const [running] = items(twoSteps().slice(0, 4));
+    expect(running?.kind === "work" ? running.answered : null).toBe(false);
+  });
+
+  test("the heartbeat's empty reasoning still draws nothing", () => {
+    // The loop emits reasoning with an EMPTY delta every few seconds while a slow tool runs, so the
+    // stall watchdog does not read a working turn as a dead Bot. Those are real messages with real
+    // ids, and projecting one unconditionally drew an empty paragraph for every fifteen seconds of
+    // a slow tool — a column of blank rows under a turn that was working perfectly well.
+    const rows = toVisibleChatItems([
+      { id: "reasoning-beat-1", role: "reasoning", content: "" },
+      { id: "reasoning-beat-2", role: "reasoning", content: "   " },
+      {
+        id: "reasoning-real",
+        role: "reasoning",
+        content: "Actually worth saying.",
+      },
+    ] as Message[]);
+
+    expect(rows).toEqual([
+      {
+        kind: "thinking",
+        id: "reasoning-real",
+        text: "Actually worth saying.",
+      },
+    ]);
+  });
 });

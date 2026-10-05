@@ -32,6 +32,7 @@ function summary(overrides: Partial<RoutineSummary> = {}): RoutineSummary {
       status: "succeeded",
       finishedAt: new Date("2026-08-26T09:00:00.000Z"),
     },
+    consecutiveFailures: 0,
     ...overrides,
   };
 }
@@ -130,10 +131,25 @@ describe("GET /", () => {
           enabled: true,
           nextRunAt: "2026-08-27T09:00:00.000Z",
           lastRun: { status: "succeeded", at: "2026-08-26T09:00:00.000Z" },
+          consecutiveFailures: 0,
         },
       ],
     });
     expect(store.calls).toEqual([["listFor", actor.id]]);
+  });
+
+  /*
+   * The streak is on the wire because a person needs to see a routine heading for being switched
+   * off before it is switched off. Without this field the only warning is a channel message
+   * arriving after the tenth failure has already happened.
+   */
+  test("carries the failure streak so the page can show progress toward the switch-off", async () => {
+    const store = fakeStore({
+      listFor: async () => [summary({ consecutiveFailures: 9 })],
+    });
+    const response = await appFor(store).request("http://remii.test/");
+
+    expect((await json(response)).routines[0].consecutiveFailures).toBe(9);
   });
 
   test("carries no lastRun when the routine has never fired", async () => {

@@ -6,10 +6,11 @@ import type {
   ChannelStore,
 } from "../src/channels/routes";
 import { createRoutineRunner, type TurnRunner } from "../src/routines/runner";
-import type {
-  RoutineRunContext,
-  RoutineRunOutcome,
-  RoutineStore,
+import {
+  FATIGUE_THRESHOLD,
+  type RoutineRunContext,
+  type RoutineRunOutcome,
+  type RoutineStore,
 } from "../src/routines/store";
 
 /**
@@ -67,6 +68,10 @@ function harness(options: {
   failures?: number;
   runTurn?: TurnRunner;
   recordActivity?: () => Promise<void>;
+  paused?: string | null;
+  pausedThrows?: boolean;
+  /** Omit the check entirely, the way a deployment with no profile store does. */
+  withoutPauseCheck?: boolean;
 }) {
   const recorded: Recorded = {
     finished: [],
@@ -133,7 +138,20 @@ function harness(options: {
 
   return {
     recorded,
-    runner: createRoutineRunner({ routineStore, channelStore, runTurn }),
+    runner: createRoutineRunner({
+      routineStore,
+      channelStore,
+      runTurn,
+      ...(options.withoutPauseCheck
+        ? {}
+        : {
+            pausedMessage: async (agentId) => {
+              if (options.pausedThrows) throw new Error("the database is down");
+              expect(agentId).toBe(CONTEXT.agentId);
+              return options.paused ?? null;
+            },
+          }),
+    }),
   };
 }
 
@@ -230,7 +248,9 @@ describe("createRoutineRunner", () => {
     ]);
     expect(recorded.activity).toHaveLength(1);
     expect(recorded.activity[0]?.activity.text).toBe(
-      "This routine has failed ten times in a row, so I have switched it off. Ask me to turn it back on when whatever it needs is working.",
+      // Interpolated from the threshold rather than re-spelled, so the sentence cannot claim a
+      // number the rule does not act on.
+      `This routine has failed ${FATIGUE_THRESHOLD} times in a row, so I have switched it off. Ask me to turn it back on when whatever it needs is working.`,
     );
   });
 
@@ -243,6 +263,64 @@ describe("createRoutineRunner", () => {
     expect(recorded.activity).toEqual([]);
     expect(recorded.finished).toEqual([
       { runId: RUN_ID, status: "skipped", error: "the channel is gone" },
+    ]);
+  });
+
+  /*
+   * A pause is the owner's decision and it is temporary, so it must read as a skip on every count
+   * that matters: no turn and so no spend, no channel message, and — above all — not a failure,
+   * because a failure walks the fatigue rule and would switch a routine off for being paused.
+   */
+  test("skips a firing whose coworker is paused, saying nothing and running no turn", async () => {
+    const { runner, recorded } = harness({ paused: "it is on hold" });
+
+    await runner.run(RUN_ID);
+
+    expect(recorded.turns).toEqual([]);
+    expect(recorded.activity).toEqual([]);
+    expect(recorded.finished).toEqual([
+      {
+        runId: RUN_ID,
+        status: "skipped",
+        error: "the coworker is paused: it is on hold",
+      },
+    ]);
+    // The pause must not switch the routine off, and must not consume a fatigue count.
+    expect(recorded.enabled).toEqual([]);
+  });
+
+  test("skips a paused coworker with no reason given", async () => {
+    const { runner, recorded } = harness({ paused: "" });
+
+    await runner.run(RUN_ID);
+
+    expect(recorded.finished).toEqual([
+      { runId: RUN_ID, status: "skipped", error: "the coworker is paused" },
+    ]);
+  });
+
+  /*
+   * A transient database error must not stop the whole feature. Reading as "not paused" lets one
+   * firing slip through; refusing every routine would take routines down deployment-wide.
+   */
+  test("runs the firing when the pause check itself fails", async () => {
+    const { runner, recorded } = harness({ pausedThrows: true });
+
+    await runner.run(RUN_ID);
+
+    expect(recorded.finished).toEqual([
+      { runId: RUN_ID, status: "succeeded", error: undefined },
+    ]);
+    expect(recorded.turns).toHaveLength(1);
+  });
+
+  test("still runs when the deployment wires no pause check at all", async () => {
+    const { runner, recorded } = harness({ withoutPauseCheck: true });
+
+    await runner.run(RUN_ID);
+
+    expect(recorded.finished).toEqual([
+      { runId: RUN_ID, status: "succeeded", error: undefined },
     ]);
   });
 

@@ -16,7 +16,7 @@ import {
 import { REMII_AGENT_ID } from "../../shared/remii";
 import { MAX_INLINED_BYTES_PER_RUN } from "../src/channels/attachment-parts";
 import { loadConfig } from "../src/config";
-import type { LoadAttachment } from "../src/copilot";
+import type { HandoffForRun, LoadAttachment } from "../src/copilot";
 import {
   buildAgents,
   builtInAgentConfiguration,
@@ -350,7 +350,7 @@ describe("registered Copilot agents", () => {
     );
 
     /*
-     * The deferred-tools wrapper, not `BuiltInAgent`.
+     * The deferred-tools wrapper, unwrapped one level, not `BuiltInAgent`.
      *
      * The CopilotKit `BuiltInAgent` that used to stand here was removed when the Remi loop replaced
      * it, and naming a class that is no longer constructed is an assertion about nothing. What is
@@ -358,10 +358,16 @@ describe("registered Copilot agents", () => {
      * the MESSAGE, and both agent kinds take their tools at construction, so the agent has to be
      * built after the message arrives. That is asserted through the configuration the run carries
      * rather than through a constructor, which is what survives the next runtime change.
+     *
+     * AND THE WRAPPER IS NOW UNCONDITIONAL. It used to be built only where a deployment had declared
+     * skills or enabled handoff, and this fixture has neither — so unwrapping it is also the check
+     * that a Bot whose tools are narrowed by app from the message reaches the per-run path at all.
      */
-    const builtIn = agents[REMII_AGENT_ID] as unknown as {
-      configuration: { botId: string; systemPrompt: string };
-    };
+    const builtIn = (
+      agents[REMII_AGENT_ID] as unknown as {
+        whole: { configuration: { botId: string; systemPrompt: string } };
+      }
+    ).whole;
     expect(builtIn.configuration.botId).toBe(REMII_AGENT_ID);
     expect(builtIn.configuration.systemPrompt).toContain("Be helpful.");
     // The remote half is unchanged: a wrapped transport is still how its stream is guarded.
@@ -873,16 +879,25 @@ describe("connected-vendor lookup diagnostics", () => {
       undefined,
       loadVendors,
     );
-    // Not `toBeInstanceOf(BuiltInAgent)`: the CopilotKit wrapper was removed when the Remi loop
-    // replaced it, so that assertion names a class nothing constructs any more. The built-in Bot's
-    // presence is what this helper is checking before it goes on to the remote half, and reading the
-    // configuration answers it in terms that survive the next runtime change.
+    /*
+     * THROUGH THE PER-RUN WRAPPER, because every built-in Bot is wrapped in one now.
+     *
+     * `RunBuiltAgent` exists to rebuild a Bot per run once something needs the message to decide what
+     * to offer, and app narrowing needs the message on every run rather than only where a deployment
+     * has written skills. So the wrapper is no longer conditional and the object under it is reached
+     * through it.
+     *
+     * Still not `toBeInstanceOf`: that assertion names a class nothing constructs any more, and
+     * unwrapping through a field is what survives the next runtime change. `whole` is private, so this
+     * reads it the way the runtime does — one level of nesting — and the field name is the one thing
+     * that would have to change alongside it.
+     */
     expect(
       (
         agents[REMII_AGENT_ID] as unknown as {
-          configuration: { botId: string };
+          whole: { configuration: { botId: string } };
         }
-      ).configuration.botId,
+      ).whole.configuration.botId,
     ).toBe(REMII_AGENT_ID);
     const remote = agents.risk;
     if (!remote) throw new Error("Fixture remote agent was not built.");
@@ -1647,23 +1662,25 @@ describe("a chat turn is not sent a conversation the model API refuses", () => {
     );
     try {
       /*
-       * STARTED AND SUBSCRIBED HERE, then waited on. Two things changed together and both had to.
+       * STARTED AND SUBSCRIBED HERE, then waited on until the loop is reached.
        *
        * `RemiLoopAgent.run` returns a cold Observable: nothing runs until somebody subscribes, so a
        * caller that only called `run` was starting no run at all. That worked against the old
        * `BuiltInAgent`, whose work happened at the call.
        *
-       * And the input is prepared inside a promise — attachment inlining and recall are both async —
-       * so `runLoop` is reached on a later tick than the subscription. Draining the microtask queue
-       * turns the spy from "was it called yet" into "was it called". A real timer turn would do, but
-       * these are all promise chains and nothing here waits on I/O.
+       * And the input is prepared inside promises — attachment inlining and recall are both async, and
+       * narrowing a run's tools by app is a third — so `runLoop` is reached several ticks after the
+       * subscription. Draining the queue UNTIL THE SPY HAS FIRED turns it from "was it called yet"
+       * into "was it called", which is the question, rather than pinning a tick count that silently
+       * became wrong when another async layer was added underneath. The cap is a backstop against
+       * hanging on a chain that never arrives, not an expectation about how long it takes.
        */
       const subscription = (
         run() as { subscribe: (fn?: unknown) => unknown }
       ).subscribe(() => {});
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      for (let tick = 0; tick < 200 && seen.length === 0; tick += 1) {
+        await Promise.resolve();
+      }
       (subscription as { unsubscribe?: () => void })?.unsubscribe?.();
     } finally {
       spy.mockRestore();
@@ -2661,5 +2678,171 @@ describe("where an attachment reaches the model, and where it deliberately does 
       (messages[4] as { content?: { source?: unknown }[] }).content?.[0]
         ?.source,
     ).toMatchObject({ type: "data" });
+  });
+});
+
+/**
+ * A routine's turn builds the same Bot a chat turn does, from the same collaborators.
+ *
+ * A routine is its owner's work done while they are asleep — `docs/routines.md`, "Who a routine
+ * runs as" — and that promise was only half kept in the code. `buildAgentFor` passed `handoff` as
+ * `undefined`, so a routine's Bot held no `message_bot`, no `delegate_bot`, no `ask_person`, no
+ * `connect_app`, and none of the Remi tools: a Bot that can do a job when a person types at it and
+ * cannot do the same job at three in the morning. Nothing about that was visible from the outside —
+ * the routine still ran, and still posted, it just quietly could not do what it was woken to do.
+ *
+ * These assert the collaboration rather than the wiring, because the wiring is a positional
+ * argument list: an `undefined` in the right slot is invisible to any test that does not count
+ * positions, which is how this survived review in the first place.
+ */
+describe("what a Bot is given a handoff closure for", () => {
+  const assistant = {
+    id: REMII_AGENT_ID,
+    name: "Remii",
+    type: "built_in" as const,
+    systemPrompt: "Be helpful.",
+  };
+  const model = { provider: "openai" as const, defaultModel: "gpt-5.6-terra" };
+
+  const handed = (name: string) => ({ name, description: name }) as never;
+
+  function input(messages: unknown[]): RunAgentInput {
+    return {
+      threadId: "thread_1",
+      runId: "run_1",
+      messages: messages as RunAgentInput["messages"],
+      tools: [],
+      context: [],
+      forwardedProps: {},
+      state: {},
+    };
+  }
+
+  /*
+   * `buildAgents` takes `handoff` as its eleventh argument, after the seven optional collaborators
+   * before it. Named here rather than written as a run of `undefined`s, because a reader cannot tell
+   * which slot a given `undefined` lands in — which is precisely how the routine path came to pass
+   * one where a closure belonged.
+   */
+  async function buildWithHandoff(handoff: HandoffForRun) {
+    return await buildAgents(
+      [assistant],
+      model,
+      "openai-secret",
+      undefined, // stallGuard
+      undefined, // loadTools
+      undefined, // signRun
+      undefined, // computerGuidance
+      undefined, // loadVendors
+      undefined, // selection
+      undefined, // agentFetch
+      handoff,
+    );
+  }
+
+  /**
+   * The tools a run's model was actually given, by name.
+   *
+   * Read off the loop's own `configuration` rather than off `input.tools`: `input.tools` is the
+   * BROWSER's tools, filtered into the loop and kept separate from the server's own. The tools a
+   * handoff closure contributes are server tools, and they reach the model through the agent
+   * configuration rebuilt per run (`withTools` inside `RunBuiltAgent`).
+   */
+  async function toolsOffered(handoff?: HandoffForRun): Promise<string[]> {
+    const agents = await buildAgents(
+      [assistant],
+      model,
+      "openai-secret",
+      undefined, // stallGuard
+      undefined, // loadTools
+      undefined, // signRun
+      undefined, // computerGuidance
+      undefined, // loadVendors
+      undefined, // selection
+      undefined, // agentFetch
+      handoff,
+    );
+    const agent = agents[REMII_AGENT_ID];
+    if (!agent) throw new Error("Expected the built-in agent");
+
+    let offered: string[] = [];
+    const spy = spyOn(RemiLoopAgent.prototype, "runLoop").mockImplementation(
+      function (this: unknown, _received: RunAgentInput) {
+        const configuration = (
+          this as { configuration?: { tools?: { name: string }[] } }
+        ).configuration;
+        offered = (configuration?.tools ?? []).map((tool) => tool.name);
+        return EMPTY;
+      },
+    );
+    try {
+      await new Promise<void>((resolve) => {
+        agent
+          .run(input([{ id: "u1", role: "user", content: "Summarise." }]))
+          .subscribe({ complete: resolve, error: () => resolve() });
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    return offered;
+  }
+
+  /*
+   * The before-picture, and the state the routine path was in: it passed `undefined` here.
+   *
+   * The assertion is on the absence of THIS closure's tools rather than on an empty list, because
+   * the deployment-tools seam adds a search and a batch of its own to every Bot regardless of
+   * handoff. A test asserting `[]` would fail for the wrong reason and pass for no reason.
+   */
+  test("a Bot given no handoff is offered none of its tools", async () => {
+    const offered = await toolsOffered(undefined);
+    expect(offered).not.toContain("message_bot");
+    expect(offered).not.toContain("ask_person");
+  });
+
+  /*
+   * The regression. A handoff closure that returns one tool has that tool reach the run, which is
+   * the same path the request path's real closure feeds — so a routine wired to a closure now holds
+   * what a chat turn holds.
+   */
+  test("a Bot given a handoff is offered the tools that closure returned", async () => {
+    const offered = await toolsOffered(async () => [
+      handed("message_bot"),
+      handed("ask_person"),
+    ]);
+    expect(offered).toContain("message_bot");
+    expect(offered).toContain("ask_person");
+  });
+
+  test("the closure is asked per run, for the Bot being built", async () => {
+    const asked: { botId: string; runId: string }[] = [];
+    const agents = await buildWithHandoff(async (botId, runInput) => {
+      asked.push({ botId, runId: runInput.runId });
+      return [handed("message_bot")];
+    });
+
+    const agent = agents[REMII_AGENT_ID];
+    if (!agent) throw new Error("Expected the built-in agent");
+    const spy = spyOn(RemiLoopAgent.prototype, "runLoop").mockImplementation(
+      () => EMPTY,
+    );
+    try {
+      await new Promise<void>((resolve) => {
+        agent
+          .run(input([{ id: "u1", role: "user", content: "Summarise." }]))
+          .subscribe({
+            complete: resolve,
+            error: () => resolve(),
+          });
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    // Bound to the Bot and to the run, so the depth and caps the handoff desk applies are about
+    // THIS run rather than about whatever ran last.
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked[0]?.botId).toBe(REMII_AGENT_ID);
+    expect(asked[0]?.runId).toBe("run_1");
   });
 });

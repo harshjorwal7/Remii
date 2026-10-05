@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   bumpRun,
   bumpTurn,
+  clearStopping,
+  forceIdleLiveRun,
   forgetLiveRun,
   liveRun,
+  markStopping,
   patchLiveRun,
 } from "@/lib/copilot/live-runs";
 
@@ -33,6 +36,7 @@ describe("the live-run store", () => {
     expect(liveRun("a")).toEqual({
       turns: 0,
       runs: 0,
+      stopping: false,
       queued: [],
       messages: [],
     });
@@ -70,6 +74,37 @@ describe("the live-run store", () => {
     bumpTurn("a", 1);
     bumpTurn("a", -1);
     expect(liveRun("a").turns).toBe(0);
+    // And a late decrement after the watchdog already zeroed it is the same floor, not -1.
+    bumpTurn("a", -1);
+    bumpRun("a", -1);
+    expect(liveRun("a").turns).toBe(0);
+    expect(liveRun("a").runs).toBe(0);
+  });
+
+  /*
+   * THE OPTIMISTIC HALF OF STOP. It has to be readable by the composer the instant Stop is pressed,
+   * and clearable by the run ending, a poll reporting idle, the next turn, or the watchdog. Every one
+   * of those routes ends in one of these three calls, so this holds them to their exact effect.
+   */
+  test("a stop is marked, cleared, and can be forced idle", () => {
+    bumpTurn("a", 1);
+    bumpRun("a", 1);
+    markStopping("a");
+    expect(liveRun("a").stopping).toBe(true);
+
+    clearStopping("a");
+    expect(liveRun("a").stopping).toBe(false);
+    // The counters are untouched by clearing: a run can still be going after the optimistic flag.
+    expect(liveRun("a").turns).toBe(1);
+    expect(liveRun("a").runs).toBe(1);
+
+    // The watchdog takes both the flag and the counters down, so nothing can stick.
+    markStopping("a");
+    forceIdleLiveRun("a");
+    expect(liveRun("a").turns).toBe(0);
+    expect(liveRun("a").runs).toBe(0);
+    // Forcing idle deliberately leaves `stopping` alone; the caller clears it in the same breath.
+    expect(liveRun("a").stopping).toBe(true);
   });
 
   /*

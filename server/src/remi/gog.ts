@@ -94,6 +94,13 @@ export function gogToolsFor(options: { binary: string | null }): GrantedTool[] {
     description,
     parameters,
     ref: `local/${name}`,
+    /*
+     * A mailbox and a Drive listing, which is the app class of answer rather than a screen one. The
+     * bounds this selects live in `../plugins/result-budget`; what matters here is that `gog_gmail_search`
+     * is capped by `max` and `gog_gmail_read` is not capped at all, so the result is whatever the
+     * thread held, and a screen bound on it is what turned a 91-message thread into two entries.
+     */
+    resultBudget: "app",
     execute: async (args: unknown) =>
       execute((args ?? {}) as Record<string, never>),
   });

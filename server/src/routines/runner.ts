@@ -24,7 +24,7 @@
 import type { AgentActor } from "../agents/profile-types";
 import { MAX_ROUTINE_DAILY_CREDITS } from "../billing/metering";
 import type { ChannelStore } from "../channels/routes";
-import type { RoutineStore } from "./store";
+import { FATIGUE_THRESHOLD, type RoutineStore } from "./store";
 
 /** Everything a headless turn needs, injectable so tests never dial a model. */
 export type TurnRunner = (input: {
@@ -47,14 +47,22 @@ export type RoutineRunner = { run(routineRunId: string): Promise<void> };
  */
 const MAX_NOTIFIED_REASON = 160;
 
-/** Consecutive failed firings after which a routine stops being fired at all. */
-const FATIGUE_LIMIT = 10;
+/**
+ * Consecutive failed firings after which a routine stops being fired at all.
+ *
+ * Read from the store so the threshold that acts, the threshold the page reports progress toward,
+ * and the wording below cannot drift apart. The sentence says "ten" because that is what
+ * `FATIGUE_THRESHOLD` is; changing the constant without that word is a lie somebody reads at four
+ * in the morning.
+ */
+const FATIGUE_LIMIT = FATIGUE_THRESHOLD;
 
-const SWITCHED_OFF =
-  "This routine has failed ten times in a row, so I have switched it off. Ask me to turn it back on when whatever it needs is working.";
+const SWITCHED_OFF = `This routine has failed ${FATIGUE_LIMIT} times in a row, so I have switched it off. Ask me to turn it back on when whatever it needs is working.`;
 
-const CIRCUIT_BREAKER_OFF =
-  "This routine consumed more than 30 credits today, so I have switched it off to prevent runaway usage. Ask me to turn it back on when whatever it needs is working.";
+/** The threshold the page reports progress against, re-exported so the two cannot drift. */
+export { FATIGUE_LIMIT };
+
+const CIRCUIT_BREAKER_OFF = `This routine consumed more than ${MAX_ROUTINE_DAILY_CREDITS} credits today, so I have switched it off to prevent runaway usage. Ask me to turn it back on when whatever it needs is working.`;
 
 /** Measured in code points, like every other cap in this area, so nothing is cut mid-pair. */
 function shorten(reason: string): string {
@@ -71,8 +79,18 @@ export function createRoutineRunner(options: {
   routineStore: RoutineStore;
   channelStore: ChannelStore;
   runTurn: TurnRunner;
+  /**
+   * Whether the Bot that would carry this out is paused, and why.
+   *
+   * Injected rather than read from a store, so this file keeps depending on nothing but the
+   * routine and channel stores, and so a deployment with no profile store simply does not check.
+   * A read that throws answers "not paused": refusing every routine on a transient database error
+   * would silently stop the whole feature, which is a far worse failure than one paused coworker
+   * slipping a single firing.
+   */
+  pausedMessage?: (agentId: string) => Promise<string | null>;
 }): RoutineRunner {
-  const { routineStore, channelStore, runTurn } = options;
+  const { routineStore, channelStore, runTurn, pausedMessage } = options;
 
   async function runOnce(routineRunId: string): Promise<void> {
     const context = await routineStore.runContext(routineRunId);
@@ -129,6 +147,49 @@ export function createRoutineRunner(options: {
         "the channel is gone",
       );
       return;
+    }
+
+    /*
+     * A PAUSED COWORKER IS NOT A FAILURE, and this is where that is decided.
+     *
+     * The pause is enforced in three other places — the handoff desk, bot administration, and the
+     * chat turn's own pre-run gate — and none of them covers a routine: a routine neither hops nor
+     * is typed at, so a Bot somebody deliberately stopped kept being woken at three in the morning
+     * and billed for the privilege.
+     *
+     * SKIPPED, NOT FAILED, and that distinction is the whole point. A skip is neither a failure nor
+     * a reset (see `consecutiveFailures`), so a routine paused for a fortnight does not walk into
+     * the fatigue rule and switch itself off on the tenth missed night — the pause is the owner's
+     * decision and it is temporary, whereas the fatigue rule exists for a Notion token that expired
+     * in March and will still be broken next month. Failing here would also post "This routine
+     * failed" into the channel on the first paused night, which invents a problem that does not
+     * exist.
+     *
+     * Nothing is said in the channel either. Whoever paused the Bot already knows, and a routine
+     * announcing its own unavailability every night is noise on a conversation nobody is reading.
+     */
+    if (pausedMessage) {
+      let pause: string | null = null;
+      try {
+        pause = await pausedMessage(agentId);
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            type: "routine-pause-check-failed",
+            routineId,
+            routineRunId,
+            reason: reasonOf(error),
+          }),
+        );
+      }
+      if (pause !== null) {
+        await routineStore.finishRun(
+          routineRunId,
+          "skipped",
+          pause ? `the coworker is paused: ${pause}` : "the coworker is paused",
+        );
+        return;
+      }
     }
 
     /*

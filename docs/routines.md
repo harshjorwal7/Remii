@@ -39,6 +39,10 @@ A routine that fails posts exactly one message about it — the first failure af
 every failure. Ten consecutive failures switch the routine off and post a second, final message
 saying so; nothing further fires until a person turns it back on.
 
+The Routines page shows that count before it arrives at ten, because the channel message is the
+announcement that it already has. A routine carrying a streak is a person who still has time to fix
+it.
+
 This is deliberately not a retry policy. A retry policy answers "did this one attempt make it through
 a dispatch that failed for a moment" — a busy queue, a server that hiccuped — and that question is
 already answered by the shared work queue's own attempt count, quietly, before a routine's turn ever
@@ -51,9 +55,11 @@ one night's attempt will fix that — only switching it off, and saying so, does
 A routine's next run is a stamp, not a queue. If nothing was watching the clock — a worker that was
 never started, or one that was down for a month — a routine's stamp falls behind, and the deployment
 does not owe it every occurrence it missed: catching up is a silent drain, not a burst. A deployment
-whose worker comes back after a quiet month drains that backlog by advancing the stamp forward without
-firing anything for it, occurrence by occurrence, until it is current again — not by firing thirty
-stale summaries of thirty different mornings.
+whose worker comes back after a quiet month drains that backlog in one pass, by computing the next
+occurrence from the moment the sweep actually runs rather than from the stamp it found, until it is
+current again — not by firing thirty stale summaries of thirty different mornings, and not by walking
+the backlog one occurrence per sweep, which kept a fifteen-minute routine silent for a further
+fortnight.
 
 A firing that is still recent enough to be worth having does still happen. A server pod that restarts
 loses at most the one occurrence that was in flight when it stopped; the next one fires on schedule,
@@ -99,10 +105,35 @@ in sync.
 A routine runs as the person who created it, not as the Bot and not as the deployment. Its turn is
 built with that person's own grants, so it can do in the middle of the night exactly what they could
 do by typing the same instruction in chat themselves, and nothing more — a routine cannot reach a
-connector its creator never connected, or post into a channel they are not in. Its reply is posted
-into the channel as an ordinary message from that Bot: it lights the recipients' unread dot the same
-way any other Bot message does, and it appears in the conversation transcript rather than anywhere
-separate, because as far as the channel is concerned, that is exactly what it is.
+connector its creator never connected, or post into a channel they are not in.
+
+"Exactly what they could do by typing it themselves" is carried by the collaborators the turn is
+built with, not only by the grants: a routine's Bot holds the same `message_bot`, `delegate_bot`,
+`ask_person` and `connect_app` a chat turn offers, built from the same closure, so a Bot that can
+hand work sideways when somebody is watching can also do it at three in the morning. Its reply is
+posted into the channel as an ordinary message from that Bot: it lights the recipients' unread dot
+the same way any other Bot message does, and it appears in the conversation transcript rather than
+anywhere separate, because as far as the channel is concerned, that is exactly what it is.
+
+A coworker that is **paused** is the one thing a routine will not wake. The pause is enforced for
+chat turns and for handoffs, but a routine is neither typed at nor handed to, so the pause is read
+where the decision is made. The firing is recorded as `skipped` rather than failed, and nothing is
+posted in the channel: a pause is the owner's decision and it is temporary, so counting it as a
+failure would walk the fatigue rule and switch the routine off after ten paused nights.
+
+### What a routine's turn does not get
+
+The turn enforcement wrapper — `EnforcedAgent`, which meters a person's own chat turn and bills it —
+is deliberately **not** given to a routine, and the reason is worth knowing before anyone "fixes"
+that. The wrapper answers `runAgent` by forwarding to the agent it wraps, which leaves its own
+`messages` array as the caller seeded it; a routine recovers its reply by diffing exactly that array,
+so a wrapped routine reads back as having said nothing and every firing is recorded as "the turn
+finished without saying anything". It would also charge the turn twice, once through the wrapper's
+settlement and once through the routine's own.
+
+So a routine's metering, its loop breaker and its credit charge are its own, in
+`server/src/routines/run-turn.ts`, which is the only place that can stop a headless turn on a
+deadline anyway.
 
 ## Scope
 

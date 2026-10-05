@@ -33,6 +33,7 @@ import {
   setRoutineEnabledMutationOptions,
 } from "@/lib/routines/mutations";
 import {
+  FATIGUE_THRESHOLD,
   nothingIsFiring,
   type RoutineRecord,
   routinesQueryOptions,
@@ -262,6 +263,23 @@ export function RoutinesList({
                           Next {relativeTime(routine.nextRunAt)}
                         </Chip>
                       )}
+                      {/*
+                       * The failure streak, once there is one. Without it the only warning a person
+                       * gets is a channel message arriving after the tenth failure has already
+                       * switched the routine off — which is the moment it stops being a problem
+                       * they can still do anything about.
+                       *
+                       * Enabled only, because the fatigue rule switches a routine off at the
+                       * threshold and a streak on a routine that is already off would report a
+                       * climb that has stopped.
+                       */}
+                      {routine.enabled && routine.consecutiveFailures > 0 ? (
+                        <Chip className="border-destructive/40 text-destructive">
+                          {routine.consecutiveFailures === FATIGUE_THRESHOLD
+                            ? `Failed ${FATIGUE_THRESHOLD} times — switching off`
+                            : `Failed ${routine.consecutiveFailures}× running`}
+                        </Chip>
+                      ) : null}
                     </div>
                   </ItemFooter>
                 </ItemContent>

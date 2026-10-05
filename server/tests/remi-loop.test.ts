@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { RESULT_BUDGETS } from "../src/plugins/result-budget";
+import {
+  buildModelChain,
+  classifyProviderError,
+  ProviderRequestError,
+} from "../src/remi/model-router";
 import {
   demoteStaleToolImages,
   historyToOpenAI,
@@ -7,11 +13,6 @@ import {
   toolResultContent,
   truncateToolResultForContext,
 } from "../src/remi/loop-agent";
-import {
-  buildModelChain,
-  classifyProviderError,
-  ProviderRequestError,
-} from "../src/remi/model-router";
 
 /**
  * The Remi loop's pure parts: history conversion, context pruning, result truncation, and
@@ -136,10 +137,31 @@ describe("truncateToolResultForContext", () => {
     );
   });
 
-  test("long strings truncate with head and tail", () => {
+  test("a long plain answer is cut to the bound and says how much was dropped", () => {
     const result = truncateToolResultForContext("y".repeat(10_000), "x");
     expect(result.length).toBeLessThan(10_000);
-    expect(result).toContain("Truncated");
+    /*
+     * The note names what was left out, in characters out of characters, plus the remedy. The old
+     * marker said only "Truncated", which told a model that something had been cut and nothing about
+     * what — so a cut from 10,000 characters and a cut from 4,001 were the same text, and neither was
+     * distinguishable from a short answer. The numbers are what the model acts on.
+     */
+    expect(result).toContain("This is not everything the action returned");
+    expect(result).toContain("of 10000 characters are shown");
+    expect(result).toContain("fetch the next page");
+  });
+
+  test("a cut never exceeds the bound it was cut to", () => {
+    /*
+     * THE BUG THIS PINS. The cut reserved a fixed 200 characters for a note that is longer than 200
+     * characters whenever the remainder is large, so the answer came out OVER the ceiling it was cut
+     * to — the bound promised a number and the result did not honour it, which is the one thing a
+     * bound is for.
+     */
+    for (const length of [4_001, 60_000, 200_000]) {
+      const result = truncateToolResultForContext("y".repeat(length), "x");
+      expect(`${length}: ${result.length <= 4_000}`).toBe(`${length}: true`);
+    }
   });
 
   test("artifact reads are exempt", () => {
@@ -147,6 +169,108 @@ describe("truncateToolResultForContext", () => {
     expect(truncateToolResultForContext(content, "artifact_read")).toBe(
       content,
     );
+  });
+
+  test("a screen tool keeps the bound it was always held to", () => {
+    expect(RESULT_BUDGETS.screen.total).toBe(4_000);
+    expect(
+      truncateToolResultForContext("y".repeat(10_000), "computer_read").length,
+    ).toBeLessThanOrEqual(4_000);
+  });
+
+  test("an app tool keeps what a screen bound would have cut", () => {
+    /*
+     * THE GMAIL CASE, as a unit test rather than as a bug report. A list of messages is JSON, so it
+     * took the structured branch, where 1,500 characters per string and 15 items per array sat
+     * behind a 4,000-character total. Sixty messages were four entries, and the model was told only
+     * that the result was truncated — so it could not tell a trimmed mailbox from a short one and
+     * answered from what it had.
+     *
+     * THE SHAPE IS GMAIL'S, not a caricature: a short snippet, and headers of the length Gmail sends.
+     * A fixture of 2,800-character snippets would prove the budget still truncates, which it does and
+     * must — twenty thousand characters is twenty thousand characters. What it must not do is cut a
+     * page the vendor was asked for in half, and that is what a realistic page plus a sane default
+     * page size buys.
+     */
+    const page = Array.from({ length: 25 }, (_, index) => ({
+      id: `m${index}`,
+      threadId: `t${index}`,
+      snippet: `Invoice ${index} is attached, please review before Friday.`,
+      internalDate: `1${index}7000000000`,
+      payload: {
+        mimeType: "multipart/alternative",
+        headers: [
+          { name: "Subject", value: `Invoice ${index}` },
+          { name: "From", value: "billing@example.com" },
+          { name: "Date", value: "Mon, 5 Oct 2026 09:00:00 +0000" },
+          { name: "Message-Id", value: `<${index}.abc@example.com>` },
+        ],
+      },
+    }));
+    const result = JSON.stringify({ messages: page });
+
+    const asApp = truncateToolResultForContext(result, {
+      name: "mcp__composio-gmail__GMAIL_FETCH_EMAILS",
+      resultBudget: "app",
+    });
+    const asScreen = truncateToolResultForContext(result, "computer_read");
+
+    expect(asApp.length).toBeLessThanOrEqual(RESULT_BUDGETS.app.total);
+    expect(asScreen.length).toBeLessThanOrEqual(RESULT_BUDGETS.screen.total);
+    // The screen bound stops at the fifteenth item; the app bound reaches the whole page.
+    expect(asScreen).not.toContain('"id":"m20"');
+    expect(asApp).toContain('"id":"m24"');
+    // And whatever the shortfall is, it is stated with a remedy rather than as "truncated", which is
+    // the marker that made a trimmed mailbox indistinguishable from a short one.
+    expect(asScreen).toContain("This is not everything the action returned");
+    expect(asScreen).toContain("10 array items were omitted from it");
+    expect(asScreen).toContain("fetch the next page");
+  });
+
+  test("a declared class beats the name it arrived with", () => {
+    /*
+     * The declaration is the authority and the name is the fallback, which is the other way round
+     * from what a name-based rule would do. A granted tool is named `mcp__…` and declared `app`; a
+     * local one is named `gog_gmail_search` and declared `app`; a desktop one is named `computer_…`
+     * and declared nothing. Reading the declaration first means renaming a tool cannot silently
+     * change how much of its answer a model is shown.
+     */
+    const long = "y".repeat(10_000);
+    expect(
+      truncateToolResultForContext(long, {
+        name: "computer_read",
+        resultBudget: "app",
+      }).length,
+    ).toBeLessThanOrEqual(RESULT_BUDGETS.app.total);
+    expect(
+      truncateToolResultForContext(long, "gog_gmail_read").length,
+    ).toBeLessThanOrEqual(RESULT_BUDGETS.app.total);
+    expect(
+      truncateToolResultForContext(long, "computer_read").length,
+    ).toBeLessThanOrEqual(RESULT_BUDGETS.screen.total);
+  });
+
+  test("shaping is idempotent, which is what lets two paths both do it", () => {
+    /*
+     * The transport shapes a Composio result and the loop shapes it again on its way into the
+     * context. If the second pass could change anything, the answer a model receives would depend on
+     * which of the two topologies the deployment runs — which is precisely the disagreement that
+     * made this a shared module rather than a rule in one of them.
+     */
+    const messages = Array.from({ length: 40 }, (_, index) => ({
+      id: `m${index}`,
+      body: { mimeType: "text/plain", data: "QUJDREVGRw".repeat(900) },
+      snippet: `Message ${index}: ${"detail ".repeat(300)}`,
+    }));
+    const once = truncateToolResultForContext(
+      JSON.stringify({ messages }),
+      "mcp__composio-gmail__GMAIL_FETCH_EMAILS",
+    );
+    const twice = truncateToolResultForContext(
+      once,
+      "mcp__composio-gmail__GMAIL_FETCH_EMAILS",
+    );
+    expect(twice).toBe(once);
   });
 });
 

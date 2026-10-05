@@ -7,6 +7,7 @@ import {
   segmentsToPlainText,
   text,
 } from "prompt-area/helpers";
+import { typedCommandIds } from "@/lib/commands/typed-commands";
 
 /**
  * Pure boundary between prompt-area segments and Remii's message draft model.
@@ -34,14 +35,29 @@ export type ComposerDraft = {
 export function toDraft(
   segments: Segment[],
   attachments: Attachment[] = [],
+  commands: readonly CommandOption[] = [],
 ): ComposerDraft {
   const agentChips = getChipsByTrigger(segments, AGENT_TRIGGER);
   const commandChips = getChipsByTrigger(segments, COMMAND_TRIGGER);
+  const text = segmentsToPlainText(segments).trim();
+  /*
+   * Commands typed by hand (never picked from the dropdown) become chips nowhere: prompt-area only
+   * materialises a chip on selection. Resolve those leading `/typed` tokens against the same command
+   * table the dropdown filters, and carry them beside the chip commands so the send path attaches
+   * their instructions exactly as it would for a picked one.
+   */
+  const chipIds = commandChips.map((chip) => chip.value);
+  const commandIds = [...chipIds];
+  for (const id of typedCommandIds(text, commands)) {
+    if (!commandIds.includes(id)) {
+      commandIds.push(id);
+    }
+  }
 
   return {
-    text: segmentsToPlainText(segments).trim(),
+    text,
     agentId: agentChips.at(-1)?.value ?? null,
-    commandIds: commandChips.map((chip) => chip.value),
+    commandIds,
     isEmpty: isSegmentsEmpty(segments),
     attachments,
   };

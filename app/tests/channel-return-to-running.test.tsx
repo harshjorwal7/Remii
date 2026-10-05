@@ -75,10 +75,10 @@ let runningInChannel: {
 let activityReads = 0;
 /** Stop requests, addressed by thread — the thing that makes Stop work from a fresh mount. */
 let stopRequests: string[] = [];
-let core: ReturnType<typeof useCopilotKit>["copilotkit"] | undefined;
+let _core: ReturnType<typeof useCopilotKit>["copilotkit"] | undefined;
 
 function CoreProbe() {
-  core = useCopilotKit().copilotkit;
+  _core = useCopilotKit().copilotkit;
   return null;
 }
 
@@ -185,7 +185,7 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   queryClient.clear();
-  core = undefined;
+  _core = undefined;
 });
 afterAll(() => {
   globalThis.fetch = originalFetch;
@@ -274,7 +274,7 @@ describe("a conversation with a run still going on the server", () => {
     expect(activityReads).toBeGreaterThan(0);
   });
 
-  test("presses Stop through the core, for a run this mount did not start", async () => {
+  test("presses Stop and the screen halts at once, for a run this mount did not start", async () => {
     reset("live");
     const { container } = mount();
 
@@ -285,24 +285,34 @@ describe("a conversation with a run still going on the server", () => {
     });
 
     /*
-     * WHAT IS ASSERTED, AND WHY IT IS NOT THE STOP REQUEST ITSELF.
+     * WHAT IS ASSERTED, AND WHY IT CHANGED.
      *
-     * Stop is addressed by thread and carries no run id — `POST /agent/:id/stop/:threadId` — which is the
-     * whole reason a mount that never started the run can still end it.
+     * Stop is addressed by thread and carries no run id — `POST /agent/:id/stop/:threadId` — which is
+     * the whole reason a mount that never started the run can still end it.
      *
-     * The request is not asserted here because it cannot be: the SDK builds its URL with
-     * `new URL(runtimeUrl, window.location.origin)`, and happy-dom's `URL` rejects that, so `abortRun`
-     * throws before anything leaves. Reimplementing the request to make a test pass would be testing a
-     * second implementation. What IS worth pinning is that the button is offered at all on a mount with
-     * no local run — the button not existing is the whole regression, and it is the first assertion in
-     * this file. What the press then does is the SDK's, unchanged.
+     * It used to be impossible to assert the request: the SDK built its URL with
+     * `new URL(runtimeUrl, window.location.origin)`, which happy-dom's `URL` rejects, so `abortRun`
+     * threw before anything left. The screen now sends the stop itself, as a same-origin request whose
+     * failure is reportable, so both halves of the gesture are observable: the request leaves, and the
+     * button yields to Send in the same press rather than waiting on the server.
      */
-    expect(button).not.toBeNull();
     expect(button?.getAttribute("aria-label")).toBe("Stop the Bot");
 
-    // Pressing it must not throw into the tree, which is what a Stop that reaches no run looks like.
     await act(async () => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    await waitFor(() => {
+      expect(stopRequests).toContain(channel.threadId);
+    });
+
+    /*
+     * THE OPTIMISTIC HALT, as the person sees it: the Stop button is gone the instant it is pressed,
+     * without waiting for the server to confirm. That is the fix for "I press Stop and nothing
+     * happens" — previously the button stayed and the stream kept painting until the server unwound.
+     */
+    await waitFor(() => {
+      expect(stopButton(container)).toBeNull();
     });
   });
 

@@ -89,8 +89,18 @@ function answered(
  */
 const RESULT_CAP = 20_000;
 const WHOLE_LISTING = 1000;
-const TRUNCATION_MARKER = "\n\n[truncated]";
-const CAPPED_LENGTH = RESULT_CAP + TRUNCATION_MARKER.length;
+/**
+ * The marker a capped answer ends with, and the length a capped answer comes to.
+ *
+ * NOT A CONSTANT ANY MORE, and that is the point. It used to be `"\n\n[truncated]"`, a fixed fourteen
+ * characters that told a model something had been cut without telling it how much — so a result cut
+ * from 15 MB and a result cut from 20,001 characters were the same text, and neither could be told
+ * from a short answer. The marker now states the original length, which is the number a model can
+ * act on: it decides whether to narrow the query or trust what it has.
+ */
+const truncationMarker = (length: number) =>
+  `\n\n[the action returned ${length} characters; this is the first ${RESULT_CAP}. Narrow the query, lower its page size, or fetch the next page.]`;
+const CAPPED_LENGTH = RESULT_CAP + truncationMarker(RESULT_CAP + 1).length;
 
 /** The nesting `vendorSentence` reaches through, with whatever the vendor left at the bottom of it. */
 function nested(message: unknown): unknown {
@@ -2348,7 +2358,7 @@ describe("calling one action", () => {
       expect(`${length}: ${result.text.length}`).toBe(
         `${length}: ${cut ? CAPPED_LENGTH : RESULT_CAP}`,
       );
-      expect(result.text.endsWith(TRUNCATION_MARKER)).toBe(cut);
+      expect(result.text.endsWith(truncationMarker(length))).toBe(cut);
     }
   });
 
@@ -2365,35 +2375,64 @@ describe("calling one action", () => {
       { __version: "20260903_00" },
     );
 
-    // VISIBLY is the marker and RATHER THAN SILENTLY is the flag, and this test asserted only the
-    // flag. `truncated: true` beside text that just stops is exactly the silent cut the name
-    // promises against: the model reads a JSON document that ends mid-token and completes it from
-    // memory, because nothing in what it was handed says the ending is ours.
+    /*
+     * VISIBLY is the notice and RATHER THAN SILENTLY is the flag, and this test asserted only the
+     * flag for a long time. `truncated: true` beside text that just stops is exactly the silent cut
+     * the name promises against: the model reads a JSON document that ends mid-token and completes it
+     * from memory, because nothing in what it was handed says the ending is ours.
+     *
+     * THE CUT IS NOW THE SHAPE CUT, not the transport cap, and both halves of that are asserted.
+     * A 60,000-character body arrives as one field, so the app budget's per-string limit reaches it
+     * before the whole-result ceiling does — which is the improvement: the cut lands on the field
+     * that needed it and the model is told what was omitted and how to see it. The old path reached
+     * for byte 20,000 of a document that was 60,000 characters long.
+     */
     expect(result.isError).toBe(false);
     expect(result.truncated).toBe(true);
-    expect(result.text.slice(-TRUNCATION_MARKER.length)).toBe(
-      TRUNCATION_MARKER,
+    expect(result.text.length).toBeLessThanOrEqual(RESULT_CAP);
+    expect(result.text).toContain("This is not everything the action returned");
+    expect(result.text).toContain(
+      "1 strings (56000 characters) were omitted from it",
     );
-    expect(result.text.length).toBe(CAPPED_LENGTH);
+    expect(result.text).toContain("fetch the next page");
   });
 
   test("a result or a failure over the cap is cut between characters, not through an emoji", async () => {
     /*
-     * `slice` counts UTF-16 code units and an emoji is two of them. When the cap lands between the
+     * `slice` counts UTF-16 code units and an emoji is two of them. When a cut lands between the
      * halves, the last unit a model reads is a lone high surrogate: JSON carries it as a bare
-     * `\ud83d` and UTF-8 as U+FFFD, a broken character that was never in what Composio sent. A
-     * result and a failure go through the same cap, so both are driven to the same boundary.
+     * `\ud83d` and UTF-8 as U+FFFD, a broken character that was never in what Composio sent.
+     *
+     * THREE PATHS, because there are now three places a cut can happen to a result, and only the
+     * first two used to be tested. The refusal is the transport cap; a result whose body is longer
+     * than the app budget's per-string limit is cut by the shape walk; and a result made of many
+     * fields rather than one long one is cut by the whole-result ceiling, which is the only one of
+     * the three whose boundary depends on where the bytes fall in a document.
      */
     const straddling = (lead: number) =>
       `${"x".repeat(lead)}😀${"x".repeat(100)}`;
-    // `JSON.stringify(data, null, 2)` writes `{\n  "body": "` before the string, so this puts the
-    // emoji's high surrogate on the cap's last unit.
-    const opening = '{\n  "body": "'.length;
+    // Compact JSON writes `{"body":"` before the string, so this puts the emoji's high surrogate on
+    // the shape walk's per-string limit for the third case.
+    const opening = '{"body":"'.length;
+    const many = (lead: number) => {
+      // Half the value is a field called `a` and half a field called `b`, so the whole-result cut
+      // lands in the middle of the last field rather than at the end of a document.
+      const half = Math.floor(lead / 2);
+      return { a: straddling(half), b: straddling(lead - half) };
+    };
     const answers = [
       {
+        /*
+         * The shape walk's per-string limit, which is 4,000 for an app. Three thousand nine hundred
+         * and ninety-nine leading characters puts the emoji's high surrogate on that limit's last
+         * unit — the same boundary the transport cap used to be tested at, one rule down.
+         */
         name: "result",
-        execute: async () =>
-          answered({ body: straddling(RESULT_CAP - opening - 1) }),
+        execute: async () => answered({ a: straddling(3_999) }),
+      },
+      {
+        name: "many-fields",
+        execute: async () => answered(many(RESULT_CAP - opening - 1)),
       },
       {
         name: "failure",
@@ -2413,20 +2452,25 @@ describe("calling one action", () => {
         { __version: "20260903_00" },
       );
 
-      const kept = result.text.endsWith(TRUNCATION_MARKER)
-        ? result.text.slice(0, -TRUNCATION_MARKER.length)
-        : result.text;
+      // Whatever the marker is, the answer to the question is the LAST CHARACTER BEFORE it.
+      const markerAt = Math.max(
+        result.text.lastIndexOf("\n\n[the action returned"),
+        result.text.lastIndexOf("\n\n["),
+      );
+      const kept =
+        markerAt === -1 ? result.text : result.text.slice(0, markerAt);
       const last = kept.charCodeAt(kept.length - 1);
       const lone = last >= 0xd800 && last <= 0xdbff;
       seen.push(
-        `${name}: truncated ${result.truncated}, marked ${kept !== result.text}, kept ${kept.length}, ends on a lone surrogate ${lone}`,
+        `${name}: truncated ${result.truncated}, marked ${markerAt !== -1}, within cap ${result.text.length <= RESULT_CAP + CAPPED_LENGTH}, ends on a lone surrogate ${lone}`,
       );
     }
 
-    // The orphan is dropped rather than completed, so the cap is never exceeded.
+    // The orphan is dropped rather than completed, so no cut ever leaves a broken character.
     expect(seen).toEqual([
-      `result: truncated true, marked true, kept ${RESULT_CAP - 1}, ends on a lone surrogate false`,
-      `failure: truncated true, marked true, kept ${RESULT_CAP - 1}, ends on a lone surrogate false`,
+      "result: truncated true, marked true, within cap true, ends on a lone surrogate false",
+      "many-fields: truncated true, marked true, within cap true, ends on a lone surrogate false",
+      "failure: truncated true, marked true, within cap true, ends on a lone surrogate false",
     ]);
   });
 
@@ -2499,9 +2543,10 @@ describe("calling one action", () => {
     // as the whole string rather than as three absences, because a list of things that must not
     // appear is only ever as long as the fields the envelope had on the day it was written — the
     // vendor's `sessionInfo` is already in the type and named in none of them.
-    expect(result.text).toBe(
-      JSON.stringify({ messages: [{ id: "m1" }] }, null, 2),
-    );
+    // Compact, not pretty-printed. `JSON.stringify(data, null, 2)` spent roughly a third of the
+    // result ceiling on indentation before a single header survived, and a result measured against a
+    // budget in characters should be measured in information.
+    expect(result.text).toBe(JSON.stringify({ messages: [{ id: "m1" }] }));
   });
 
   test("an unsuccessful answer with no sentence still says something actionable", async () => {
@@ -2599,11 +2644,12 @@ describe("calling one action", () => {
     // is the same unbounded spend the success path already refuses to make.
     expect(result.isError).toBe(true);
     expect(result.truncated).toBe(true);
-    // "and says so" is the marker, which nothing here used to check.
-    expect(result.text.slice(-TRUNCATION_MARKER.length)).toBe(
-      TRUNCATION_MARKER,
+    // "and says so" is the marker, which nothing here used to check. It names the length it arrived
+    // at, so a model can tell a sentence cut from 60,000 characters from one cut from 20,001.
+    expect(result.text.endsWith(truncationMarker(60_000))).toBe(true);
+    expect(result.text.length).toBe(
+      RESULT_CAP + truncationMarker(60_000).length,
     );
-    expect(result.text.length).toBe(CAPPED_LENGTH);
   });
 
   test("an enormous thrown message is capped in a refusal too", async () => {
@@ -2623,10 +2669,10 @@ describe("calling one action", () => {
 
     expect(result.isError).toBe(true);
     expect(result.truncated).toBe(true);
-    expect(result.text.slice(-TRUNCATION_MARKER.length)).toBe(
-      TRUNCATION_MARKER,
+    expect(result.text.endsWith(truncationMarker(60_000))).toBe(true);
+    expect(result.text.length).toBe(
+      RESULT_CAP + truncationMarker(60_000).length,
     );
-    expect(result.text.length).toBe(CAPPED_LENGTH);
   });
 
   test("our own serialization failure is not reported as the action having failed", async () => {
@@ -2766,7 +2812,7 @@ describe("calling one action", () => {
 
       const named = JSON.stringify(error);
       expect(`${named}: ${result.isError}`).toBe(`${named}: false`);
-      expect(result.text).toBe(JSON.stringify({ messages: [] }, null, 2));
+      expect(result.text).toBe(JSON.stringify({ messages: [] }));
     }
   });
 

@@ -77,6 +77,7 @@ import {
 } from "./composio";
 import { inspectToolArguments } from "./content-governance";
 import { type ListedTool, McpServerError } from "./mcp";
+import { withDefaultPageSize } from "./page-size";
 import { registerDynamicClient } from "./oauth";
 import type { RepoIndex, RepoSpec } from "./repo-index";
 import { transportFor } from "./transport";
@@ -6324,6 +6325,23 @@ export function createPluginStore(options: PluginStoreOptions) {
             toolkit: input.toolkit,
           })
         : [];
+      /*
+       * THE `||` IS NOT REDUNDANT, and this reads like an obvious saving that is not one.
+       *
+       * Two vendor round trips on every settings render looks like waste, and it is exactly two
+       * DIFFERENT questions. `listAccounts` drops a row it cannot name — an ACTIVE account
+       * Composio described with no readable id — while `isConnected` counts rows and reads nothing
+       * off them, which is its own documented correction: reading ids on its behalf once turned a
+       * connected person into a refusal and cost them their connection row.
+       *
+       * So the person who IS connected, through an account the vendor described namelessly, is
+       * reached by the second call alone: the first returns an empty list and only then is the count
+       * asked. Collapsing them to `accounts.length > 0` reads a nameless account as nobody, deletes
+       * this person's row, and tells them to connect again while Composio is holding their access.
+       * They are also not the same LISTING — `isConnected` stops at the first page holding a row and
+       * `listAccounts` reads to the end — so a cache may not serve one for the other either; see
+       * `accountsFor` in the adapter, whose key now carries the question for that reason.
+       */
       const connected =
         accounts.length > 0 ||
         (await broker.isConnected({
@@ -8081,9 +8099,29 @@ export function createPluginStore(options: PluginStoreOptions) {
        * other behaviour.
        */
       const { [VERSION_ARG]: _dropped, ...modelArgs } = args;
-      const vendorArgs = advertised[0]?.version
-        ? { ...modelArgs, [VERSION_ARG]: advertised[0].version }
-        : modelArgs;
+      /*
+       * A PAGE SIZE FOR A LIST ACTION THAT WAS GIVEN NONE.
+       *
+       * After validation, so a default can never rescue arguments the vendor would have rejected,
+       * and after the version merge, so the injected key is an ordinary argument rather than
+       * something the reserved-key handling below has to know about. See `./page-size`: the number is
+       * chosen so one page of an ordinary result fits the app budget whole, which is what stops a
+       * Bot from answering about a page of a mailbox it could not see all of.
+       */
+      const vendorArgs = withDefaultPageSize({
+        toolName,
+        args: advertised[0]?.version
+          ? { ...modelArgs, [VERSION_ARG]: advertised[0].version }
+          : modelArgs,
+        schema: advertised[0]?.inputSchema,
+        /*
+         * The deployment's OWN classification rather than the column, which is what decides this
+         * elsewhere on this path and is the only answer that normalizes what the vendor wrote. A raw
+         * `"WRITE"` or an unrecognised label would read as "not a write" here and put a page size into
+         * an action that changes something.
+         */
+        effect,
+      });
 
       /**
        * The same policy the computer actions are judged by, asked about a tool call.

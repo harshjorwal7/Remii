@@ -40,11 +40,15 @@ import { afterMs, joinWithin } from "@/lib/copilot/join-thread";
 import {
   bumpRun,
   bumpTurn,
+  clearStopping,
+  forceIdleLiveRun,
   liveRun,
+  markStopping,
   patchLiveRun,
   useLiveRun,
 } from "@/lib/copilot/live-runs";
 import { repairUnansweredToolCalls } from "@/lib/copilot/repair-history";
+import { stopChannelRun } from "@/lib/copilot/stop-run";
 import {
   finishNeedsExplanation,
   stoppedReason,
@@ -65,6 +69,28 @@ const JOIN_DEADLINE_MS = 1500;
  * Backstop for a message typed before the runtime agent exists; it must not be discarded.
  */
 const SEND_WITHOUT_RUNTIME_AFTER_MS = 1500;
+
+/**
+ * How long after a Stop press the screen keeps drawing Send before it is willing to draw Stop again.
+ *
+ * The optimistic half of Stop has to expire on its own, because the one thing it must never do is
+ * hide the only control for a run that is genuinely still going. Long enough to cover the ordinary
+ * server round trip (a stop that lands takes the run down well inside this), short enough that a
+ * failed stop does not leave the person without the button. What it guarantees beyond that is that
+ * the local counters are zeroed, so a run whose own `finally` never runs cannot leave the Working
+ * line and Stop on screen forever.
+ */
+const STOP_WATCHDOG_MS = 1500;
+
+/**
+ * When a second stop request is sent, to cover the press that arrived before the run registered.
+ *
+ * The runner refuses a stop for a thread it has no live run for (`InMemoryRunner.stop` returns early
+ * when `!store.isRunning`), which is the ordinary state for the beat between the browser opening the
+ * run request and the server registering it. That first refusal is not a failure the person should
+ * see — the run is about to exist — so one retry is armed to land after the registration would have.
+ */
+const STOP_RETRY_MS = 700;
 
 type ChannelActivitySignature = {
   agentId: string;
@@ -656,6 +682,27 @@ export function ChannelChat({
   const live = useLiveRun(channel.id);
   const turnsInFlight = live.turns;
   const runsInFlight = live.runs;
+  /** A stop was pressed and the conversation has not confirmed the run ended yet. */
+  const stopping = live.stopping;
+
+  /*
+   * The timers a Stop press arms: the retry that covers a run which registered late, and the
+   * watchdog that guarantees the optimistic state expires. Held in refs so a new press, a new turn
+   * or unmount can clear them, and so a second press cannot leave two of either running.
+   */
+  const stopRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stopWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearStopTimers = useCallback(() => {
+    if (stopRetryRef.current !== null) {
+      clearTimeout(stopRetryRef.current);
+      stopRetryRef.current = null;
+    }
+    if (stopWatchdogRef.current !== null) {
+      clearTimeout(stopWatchdogRef.current);
+      stopWatchdogRef.current = null;
+    }
+  }, []);
+  useEffect(() => () => clearStopTimers(), [clearStopTimers]);
 
   /*
    * WHETHER THIS SCREEN IS STILL THERE.
@@ -732,6 +779,19 @@ export function ChannelChat({
    */
   const serverRunningRef = useRef(serverRunning);
   serverRunningRef.current = serverRunning;
+
+  /*
+   * A CONVERSATION THE SERVER CALLS IDLE HAS NOTHING LEFT TO STOP.
+   *
+   * This is the poll confirming the thing a Stop press was optimistic about, and it is what lets
+   * the optimistic `stopping` clear on the ordinary path: the stop lands, the run goes down, and the
+   * next read (the press invalidates it, so this is immediate, not four seconds later) reports no
+   * run. Clearing here also covers the stop that belonged to a run another mount started, where no
+   * local run event will ever arrive to say it ended.
+   */
+  useEffect(() => {
+    if (!serverRunning) clearStopping(channel.id);
+  }, [serverRunning, channel.id]);
 
   /**
    * Tell the roster what was just said. Failures here must not block the conversation.
@@ -880,6 +940,15 @@ export function ChannelChat({
     // enabled and inert.
     if (!trimmed && attachments.length === 0) return;
 
+    /*
+     * A NEW TURN IS A NEW FACT ABOUT THIS CONVERSATION, so whatever a previous Stop left pending is
+     * over: the optimistic state comes down and the timers that would clear it are cancelled rather
+     * than firing into this turn. Without this, a Stop pressed and immediately followed by a send
+     * would have the watchdog zero the fresh turn's counters out from under it.
+     */
+    clearStopTimers();
+    clearStopping(channel.id);
+
     bumpTurn(channel.id, 1);
     if (liveRun(channel.id).turns === 1) {
       void setChannelBusy({ channelId: channel.id, busy: true });
@@ -911,6 +980,12 @@ export function ChannelChat({
 
   useEffect(() => {
     const fail = (message: string) => {
+      /*
+       * The run is over however this arrived, so an optimistic Stop has nothing left to confirm:
+       * clearing here is what takes the working line down before the watchdog would. Done before the
+       * `awaitingReply` guard below, because a failure this mount did not start still ends a run.
+       */
+      clearStopping(channel.id);
       if (!awaitingReply.current) return;
       awaitingReply.current = false;
       // Both halves of one fact: the sentence the transcript shows, and the reason `deliver` throws
@@ -924,6 +999,9 @@ export function ChannelChat({
       onRunErrorEvent: ({ event }) => fail(stoppedReason(event?.message)),
       onRunFailed: ({ error }) => fail(stoppedReason(error)),
       onRunFinishedEvent: ({ event }) => {
+        // A finish ends the run whether or not this mount asked for it, so the optimistic Stop comes
+        // down here too — before the `wasOurs` guard, which is about the draft, not the run.
+        clearStopping(channel.id);
         const wasOurs = awaitingReply.current;
         awaitingReply.current = false;
         if (!wasOurs) return;
@@ -985,7 +1063,7 @@ export function ChannelChat({
       },
     });
     return () => subscription?.unsubscribe();
-  }, [agent, runtimeAgentId]);
+  }, [agent, channel.id, runtimeAgentId]);
 
   /** Stable reference for effects and component callbacks. */
   const sayRef = useRef(say);
@@ -1044,7 +1122,14 @@ export function ChannelChat({
            * "Thinking" line exists for. Same value as `pending`, deliberately.
            */
           activity={activity ?? serverActivity ?? null}
-          busy={agent.isRunning || turnsInFlight > 0 || serverRunning}
+          /*
+           * The Working line comes down the instant Stop is pressed, like the button itself. A stop
+           * that turns out to have failed clears `stopping` (or the watchdog expires it) and the line
+           * returns — so the screen never keeps claiming work the person just ended.
+           */
+          busy={
+            !stopping && (agent.isRunning || turnsInFlight > 0 || serverRunning)
+          }
           // Skills granted to this Bot, its components, and its repositories.
           commands={commands}
           // Lets the `/components` and `/repo` pickers drop a chip into the draft.
@@ -1103,50 +1188,64 @@ export function ChannelChat({
             await say(draft.text, instructions, draft.attachments);
           }}
           /**
-           * Stop through the core so the abort signal reaches frontend tools; `say` repairs any
-           * unanswered tool call before the next turn.
+           * Stop, in the order that makes the press do something at once.
+           *
+           * LOCAL FIRST. THE REASON THIS IS A REWRITE, AND NOT A TIDY-UP.
+           *
+           * `copilotkit.stopAgent` was the whole handler, and it does not stop the stream this
+           * screen is painting from. In this deployment the agent is a `ProxiedCopilotRuntimeAgent`,
+           * whose `abortRun` OVERRIDES the HTTP agent's and only fires a detached `fetch` at the
+           * runtime's thread-scoped stop endpoint; it never touches the SSE POST. So the browser
+           * kept applying `TEXT_MESSAGE_CONTENT` for as long as the server took to unwind — seconds
+           * during a long tool call — and if the runner had no live run to stop (a press that
+           * arrived before the run registered, a thread it had already forgotten) the request was
+           * refused and the answer streamed to completion as if Stop had not been pressed. That is
+           * the "I press Stop and nothing happens" this handler exists to end.
+           *
+           * The three local lines below are the fix and none of them awaits: the reply is no longer
+           * awaited, the composer flips from Stop to Send, and `detachActiveRun` completes the run's
+           * detach subject — which the SDK's own apply pipeline uses as `takeUntil` — so no further
+           * event is painted. It reaches a reattached `connect` run as well as a `runAgent` one,
+           * because both build that subject.
+           *
+           * THEN THE SERVER, awaited and retried, because the local halt is the screen's half and
+           * the Bot must actually stop working. The SDK's stop stays (it is what aborts the core
+           * controller the frontend tools see, so a pending decision card rejects rather than
+           * hanging the turn), and our own call beside it is the one whose failure can be reported
+           * and whose refusal before registration can be retried.
+           *
+           * AND A WATCHDOG, because the optimistic state must never become a stuck screen: if the
+           * run's promise does not settle, the counters are zeroed by hand and the conversation is
+           * left honest for the next poll.
            */
           onStop={() => {
             awaitingReply.current = false;
+            markStopping(channel.id);
+
             /*
-             * INVALIDATE FIRST, THEN STOP.
-             *
-             * The order is load-bearing and it was the other way round. `stopAgent` reaches the SDK's
-             * `abortRun`, which builds its URL and can THROW synchronously — with no runtime URL
-             * configured, or under a DOM whose `URL` rejects the base. Everything after it in this handler
-             * is then skipped, so putting the invalidation second meant that on exactly the failure this
-             * handler exists to recover from — stopping a run — the screen was never re-read, and the
-             * Stop button stayed on screen for a run that had just been asked to end.
-             *
-             * Asking first is also more correct on the merits. The invalidation does not depend on the
-             * stop having been delivered: it re-reads what the server says, and the server is the only
-             * thing that knows whether the run is still going. Whether the request then succeeds is
-             * expressed by what the re-read returns, not by skipping it.
-             *
-             * Invalidated rather than set to null, and for the same reason: overwriting the answer would
-             * assert that the run stopped the instant the request left. It may not have, and a
-             * conversation that believes it is idle while the Bot works is the bug this all exists to fix.
-             * Re-reading asks.
+             * The agent that is running NOW, not the one this render closed over. `say` runs on
+             * `agentRef.current` for the same reason (see its note): `useAgent` swaps the
+             * provisional instance for the registered proxy, and a stop aimed at the stale object
+             * reaches no run.
              */
-            void queryClient.invalidateQueries({
-              queryKey: channelKeys.running(channel.id),
-            });
+            const target = agentRef.current;
+
             /*
-             * AND THE STOP ITSELF MUST NOT BE ABLE TO BREAK THIS SCREEN.
-             *
-             * `stopAgent` is the SDK's, and it can throw synchronously before it sends anything —
-             * `abortRun` builds a URL from the runtime base, which is not configured in every context and
-             * is rejected outright by some DOMs. An exception here does not just fail the stop: it
-             * propagates out of a React event handler, so the person pressing Stop gets an error boundary
-             * over the conversation they were trying to interrupt.
-             *
-             * Reported, not swallowed. A stop that did not happen is a real failure the person should be
-             * able to see, and `runError` is where the transcript already says what ended a turn — so the
-             * screen says the press did not reach the Bot and keeps working, rather than either pretending
-             * it stopped or falling over.
+             * THE LOCAL HALT. Detaching settles the run's own stream; the `catch` is because a
+             * detach with nothing attached is not a problem, and an unhandled rejection from one is
+             * a failure attributed to whatever happened to be running.
+             */
+            void target.detachActiveRun().catch(() => undefined);
+
+            /*
+             * The core's stop, for the controller that only frontend tools are handed. It can throw
+             * synchronously — `abortRun` builds a URL from the runtime base, absent in some contexts
+             * and rejected by some DOMs — and this handler must not let that reach the error
+             * boundary. Reported, because a stop that did not happen is real, but only after the
+             * local halt above has already happened.
              */
             try {
-              copilotkit.stopAgent({ agent });
+              copilotkit.stopAgent({ agent: target });
             } catch (error) {
               setRunError(
                 error instanceof Error
@@ -1154,6 +1253,57 @@ export function ChannelChat({
                   : "The stop could not be sent.",
               );
             }
+
+            /*
+             * Re-read what the server says, which is the only thing that knows whether the run is
+             * still going. Invalidated rather than set to null: overwriting the answer would assert
+             * the run stopped the instant the request left, and the idle effect above is what takes
+             * the optimistic state down when the re-read confirms it.
+             */
+            void queryClient.invalidateQueries({
+              queryKey: channelKeys.running(channel.id),
+            });
+
+            /*
+             * THE SERVER STOP, AWAITED SO ITS FAILURE IS VISIBLE, AND RETRIED ONCE.
+             *
+             * The retry covers the press that beat the run's registration: the runner refuses a
+             * stop for a thread with no live run (it answers 200 `{ stopped: false }`), which is the
+             * ordinary state for the beat between opening the run and the server registering it,
+             * and a stop refused there is not a failure worth showing — the run is about to exist.
+             * A genuine failure (the runtime restarted, the agent is gone, the auth guard refused)
+             * is reported once and clears the optimistic state early so the button comes back.
+             */
+            clearStopTimers();
+            let reported = false;
+            const sendStop = () => {
+              void stopChannelRun({
+                agentId: runtimeAgentId,
+                threadId: channel.threadId,
+              }).catch((error: unknown) => {
+                if (reported) return;
+                reported = true;
+                setRunError(
+                  error instanceof Error
+                    ? `The stop could not be sent: ${error.message}`
+                    : "The stop could not be sent.",
+                );
+                // Let the button return rather than hold the optimistic state for a request that
+                // has already failed and will not be re-armed.
+                clearStopping(channel.id);
+              });
+            };
+            sendStop();
+            stopRetryRef.current = setTimeout(() => {
+              stopRetryRef.current = null;
+              sendStop();
+            }, STOP_RETRY_MS);
+
+            stopWatchdogRef.current = setTimeout(() => {
+              stopWatchdogRef.current = null;
+              clearStopping(channel.id);
+              forceIdleLiveRun(channel.id);
+            }, STOP_WATCHDOG_MS);
           }}
           /*
            * The turn, not the run. A browser action ends one run and starts another, and telling the
@@ -1188,8 +1338,15 @@ export function ChannelChat({
            * swallowed. Stop is addressed by THREAD (`/agent/:id/stop/:threadId`) and takes no run id, so
            * a mount that never started the run can still end it: `agent` is registered by the time this
            * button can be pressed, and it carries this channel's thread id.
+           *
+           * AND NOT WHILE A STOP IS PENDING. `stopping` is the optimistic half of the press: the moment
+           * it is set the button yields to Send, because nothing left on screen is a run this press has
+           * not already asked to end. It expires on its own — the run ending, a poll reporting idle, or
+           * the watchdog — so a stop that truly failed cannot leave the person without the button.
            */
-          stoppable={agent.isRunning || runsInFlight > 0 || serverRunning}
+          stoppable={
+            !stopping && (agent.isRunning || runsInFlight > 0 || serverRunning)
+          }
           /*
            * At the END OF THE TRANSCRIPT rather than above the composer, which is where this used to
            * be. A turn that ends without an answer leaves a gap exactly where the reply was going to

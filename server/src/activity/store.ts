@@ -163,6 +163,23 @@ export type RunActivityStore = {
   /** One run, or null. */
   get(runId: string): Promise<RunActivity | null>;
   /**
+   * Say a run is still going, and say whether it still was.
+   *
+   * THE COUNTERPART TO A HEARTBEAT'S ABSENCE, and the reason a chat run can be swept at all. A hop
+   * proves liveness by renewing a `thread_locks` row; a person's own turn takes no lock, so before
+   * this there was nothing for it to renew and nothing `sweepAbandonedRuns` could read. A run that
+   * stopped mid-turn therefore held its channel's working pulse for ever.
+   *
+   * GUARDED ON `ended_at IS NULL` for the same reason `finish` is. A run that has already ended is
+   * not alive however loudly it says otherwise, and a heartbeat that could revive it would resurrect
+   * a settled row — reporting `thinking` for work that finished, which is the same class of lie as
+   * the ghost it exists to clear, and worse because it would keep reappearing.
+   *
+   * Returns whether the row was still open, so a caller can stop beating a run that has been settled
+   * out from under it rather than writing once a beat for ever to a row nobody will read.
+   */
+  heartbeat(runId: string): Promise<boolean>;
+  /**
    * A delegation chain, newest first: the run a person started, then what it handed to, then that.
    *
    * Collected in the database rather than by asking for each run's children in turn, because a chain
@@ -299,6 +316,16 @@ export function createRunActivityStore(database: Database): RunActivityStore {
           threadId: input.threadId,
           parentRunId: input.parentRunId ?? null,
           state: "thinking",
+          /*
+           * The run's FIRST beat, written with the row rather than left for the first interval.
+           *
+           * A run that begins and is never heard from again — a process killed between here and the
+           * first beat, or a turn that never streams — has to be a candidate the sweeper can see, and
+           * a null beat would exclude it from a sweep that only reads lapsed beats. Stamping it now
+           * makes "this run has not been heard from in over a minute" the same question whichever side
+           * of the first interval the run died on.
+           */
+          lastHeartbeatAt: new Date(),
         })
         .onConflictDoUpdate({
           target: runActivity.runId,
@@ -364,6 +391,8 @@ export function createRunActivityStore(database: Database): RunActivityStore {
           // asker's row for work happening somewhere the asker cannot see.
           channelId: input.channelId ?? null,
           state: "thinking",
+          // As in `begin`: the first beat travels with the row. See the note there.
+          lastHeartbeatAt: new Date(),
         })
         .onConflictDoUpdate({
           target: runActivity.runId,
@@ -475,6 +504,20 @@ export function createRunActivityStore(database: Database): RunActivityStore {
         .where(eq(runActivity.runId, runId))
         .limit(1);
       return row ?? null;
+    },
+
+    async heartbeat(runId) {
+      // No `announce` here, and that is deliberate rather than an omission. A heartbeat changes
+      // nothing a person can see: the state, the label and the detail are all untouched, so every
+      // replica's roster already draws this run correctly and there is nothing to redraw. Publishing
+      // would turn a per-beat write into a per-beat `pg_notify` fanned out to every connected tab,
+      // to say something no tab displays differently.
+      const beat = await database
+        .update(runActivity)
+        .set({ lastHeartbeatAt: new Date() })
+        .where(and(eq(runActivity.runId, runId), isNull(runActivity.endedAt)))
+        .returning({ runId: runActivity.runId });
+      return beat.length > 0;
     },
 
     async chain(actorUserId, limit = 50) {

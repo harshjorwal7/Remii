@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { componentCommands } from "@/lib/commands/component-commands";
-import { commandSlug } from "@/lib/commands/slug";
+import {
+  commandAlias,
+  commandSlug,
+  normalizeCommandName,
+} from "@/lib/commands/slug";
 import type { GrantedComponent } from "@/lib/components/queries";
 
 /**
@@ -38,20 +42,47 @@ describe("commandSlug", () => {
   });
 });
 
+describe("commandAlias", () => {
+  test("drops the verb, which is the part nobody types twice", () => {
+    expect(commandAlias("showBarChart")).toBe("bar-chart");
+    expect(commandAlias("showTable")).toBe("table");
+    expect(commandAlias("askApproval")).toBe("approval");
+    expect(commandAlias("askMultiSelect")).toBe("multi-select");
+  });
+
+  test("leaves a name that has no leading verb alone", () => {
+    // Sandboxed components are named by their author, not by a gallery convention.
+    expect(commandAlias("customerTrend")).toBe("customer-trend");
+  });
+});
+
+describe("normalizeCommandName", () => {
+  test("folds the spellings a person might type onto one name", () => {
+    // Both the send path and the transcript badge compare this way, so the two cannot disagree
+    // about whether a message invoked a command.
+    expect(normalizeCommandName("bar-chart")).toBe(
+      normalizeCommandName("barchart"),
+    );
+    expect(normalizeCommandName("BarChart")).toBe("barchart");
+  });
+});
+
 describe("componentCommands", () => {
   test("registers a held component as a chip carrying the tool name", () => {
     const commands = componentCommands([granted("showBarChart")]);
+    const slug = commands.find((command) => command.id === "show-bar-chart");
 
-    expect(commands).toHaveLength(1);
-    expect(commands[0].id).toBe("show-bar-chart");
-    expect(commands[0].name).toBe("show-bar-chart");
-    expect(commands[0].kind).toBe("chip");
+    expect(slug?.kind).toBe("chip");
+    expect(commands.map((command) => command.name)).toContain("show-bar-chart");
   });
 
-  test("keeps the chip out of the dropdown but in the resolution table", () => {
-    // Hidden because the menu offers one `/components` entry rather than thirty-five of these.
-    // Not absent, because a chip already in the draft still has to resolve on send.
-    expect(componentCommands([granted("showTable")])[0].hidden).toBe(true);
+  test("offers a visible short alias and keeps the full slug hidden", () => {
+    const commands = componentCommands([granted("showTable")]);
+    const alias = commands.find((command) => command.id === "table");
+    const slug = commands.find((command) => command.id === "show-table");
+
+    expect(alias?.hidden).toBeFalsy();
+    expect(slug?.hidden).toBe(true);
   });
 
   test("tells the model to draw rather than to describe", () => {
@@ -81,7 +112,7 @@ describe("componentCommands", () => {
     // Two commands answering to one chip would send two instructions for one keystroke.
     const commands = componentCommands(
       [granted("showTable")],
-      new Set(["show-table"]),
+      new Set(["show-table", "table"]),
     );
 
     expect(commands).toEqual([]);
@@ -93,7 +124,7 @@ describe("componentCommands", () => {
       granted("show_table"),
     ]);
 
-    expect(commands).toHaveLength(1);
+    expect(commands.map((c) => c.id)).toEqual(["show-table", "table"]);
   });
 
   test("drops a component nobody could type", () => {
@@ -109,8 +140,11 @@ describe("componentCommands", () => {
 
     expect(commands.map((command) => command.id)).toEqual([
       "show-bar-chart",
+      "bar-chart",
       "ask-approval",
+      "approval",
       "show-activity-report",
+      "activity-report",
     ]);
   });
 });

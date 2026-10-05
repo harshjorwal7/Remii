@@ -23,13 +23,31 @@ export type LiveRun = {
   turns: number;
   /** The run `copilotkit.runAgent` opens, and nothing before it. */
   runs: number;
+  /**
+   * A stop was pressed and the conversation has not confirmed it has ended yet.
+   *
+   * This is the optimistic half of Stop, and it exists because neither local counter proves
+   * anything on the instant of the press: `turns` falls in a `finally` that runs only once the run
+   * unwinds, and `runs` likewise, so a person who pressed Stop watched the Stop button and the
+   * Working line stay up through the whole server round trip — and forever if the run's promise
+   * never settled. While this is true the composer draws Send instead of Stop, and it is cleared by
+   * the run ending, by a poll that says the conversation is idle, by the next turn, or by the
+   * watchdog in channel-chat.
+   */
+  stopping: boolean;
   /** Corrections typed mid-turn, which survive a visit elsewhere because they still have files behind them. */
   queued: readonly QueuedMessage[];
   /** The last live transcript this browser drew for the channel. */
   messages: readonly Message[];
 };
 
-const EMPTY: LiveRun = { turns: 0, runs: 0, queued: [], messages: [] };
+const EMPTY: LiveRun = {
+  turns: 0,
+  runs: 0,
+  stopping: false,
+  queued: [],
+  messages: [],
+};
 
 const byChannel = new Map<string, LiveRun>();
 const listeners = new Set<() => void>();
@@ -47,12 +65,43 @@ export function patchLiveRun(channelId: string, patch: Partial<LiveRun>): void {
 
 export function bumpTurn(channelId: string, delta: 1 | -1): void {
   const current = byChannel.get(channelId) ?? EMPTY;
-  patchLiveRun(channelId, { turns: current.turns + delta });
+  patchLiveRun(channelId, { turns: Math.max(0, current.turns + delta) });
 }
 
 export function bumpRun(channelId: string, delta: 1 | -1): void {
   const current = byChannel.get(channelId) ?? EMPTY;
-  patchLiveRun(channelId, { runs: current.runs + delta });
+  patchLiveRun(channelId, { runs: Math.max(0, current.runs + delta) });
+}
+
+/**
+ * A stop has been asked for, or the conversation has confirmed one ended.
+ *
+ * Set on the press; cleared when the run ends, when a poll reports the thread idle, when the next
+ * turn starts, or by channel-chat's watchdog. See `LiveRun.stopping`.
+ */
+export function markStopping(channelId: string): void {
+  patchLiveRun(channelId, { stopping: true });
+}
+
+export function clearStopping(channelId: string): void {
+  if (!(byChannel.get(channelId)?.stopping ?? false)) return;
+  patchLiveRun(channelId, { stopping: false });
+}
+
+/**
+ * Take the local counters to zero without waiting for the run's own `finally`.
+ *
+ * THE WATCHDOG'S ONLY JOB. `deliver` and `say` decrement in a `finally` that is guaranteed to run
+ * when `copilotkit.runAgent` settles — and not otherwise. A run whose promise never settles (a
+ * frontend tool that ignores the abort signal, an SDK that swallowed the cancel) left `turns` and
+ * `runs` high forever, drawing a Stop button that had nothing left to reach. Zeroing here closes
+ * that hole; the eventual `finally` decrements into the `Math.max(0, …)` floor in
+ * `bumpTurn`/`bumpRun`, so a late decrement cannot make the count negative.
+ */
+export function forceIdleLiveRun(channelId: string): void {
+  const current = byChannel.get(channelId) ?? EMPTY;
+  if (current.turns === 0 && current.runs === 0) return;
+  patchLiveRun(channelId, { turns: 0, runs: 0 });
 }
 
 export function useLiveRun(channelId: string): LiveRun {

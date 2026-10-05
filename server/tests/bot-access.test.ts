@@ -419,3 +419,57 @@ describe("components, which a Bot answers with", () => {
     expect(touched).toEqual([]);
   });
 });
+
+/**
+ * The `/` menu's skill list is the caller's own, not a Bot's, so it is scoped by ownership rather
+ * than by `canUseBot`. What must not happen is it being answerable about somebody else's private
+ * skill: the store filters on `owner_user_id IS NULL OR = actor.id`, so the actor has to reach it.
+ */
+describe("the caller's own skill list", () => {
+  function app(actorId: string) {
+    const asked: (string | undefined)[] = [];
+    const store = {
+      callTool: async () => ({ ok: true }),
+      listForAgent: async () => ({ mcp: [], skills: [] }),
+      listServers: async () => [],
+      listSkills: async (actor?: { id: string }) => {
+        asked.push(actor?.id);
+        return [{ slug: "find-a-document", grantedTo: [] }];
+      },
+    } as never;
+
+    return {
+      asked,
+      hono: new Hono().route(
+        "/api/plugins",
+        createPluginRoutes(
+          store,
+          signedIn(actorId),
+          ownedBy("owner"),
+          ownedBy("owner"),
+        ),
+      ),
+    };
+  }
+
+  test("answers with the caller's own skills, without naming a Bot", async () => {
+    const { hono, asked } = app("owner");
+    const response = await hono.request("http://t/api/plugins/skills");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      skills: [{ slug: "find-a-document", grantedTo: [] }],
+    });
+    expect(asked).toEqual(["owner"]);
+  });
+
+  test("scopes to whoever asked, so a stranger never reaches another person's skills", async () => {
+    // No `canUseBot` here on purpose: there is no Bot in the URL. The ownership filter is the store's,
+    // and this is the assertion that the route passes the asker into it rather than an empty actor.
+    const { hono, asked } = app("stranger");
+    const response = await hono.request("http://t/api/plugins/skills");
+
+    expect(response.status).toBe(200);
+    expect(asked).toEqual(["stranger"]);
+  });
+});

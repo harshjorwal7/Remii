@@ -258,7 +258,6 @@ function ServerToolsDetails({
  */
 export function ConnectionSection({
   agentId,
-  profile,
 }: {
   agentId: string;
   profile: AgentProfile;
@@ -478,10 +477,8 @@ export function ConnectionSection({
           </div>
 
           {/* Category filter pills */}
-          <div
-            aria-label="Filter by category"
-            className="flex flex-wrap items-center gap-1"
-          >
+          <fieldset className="flex flex-wrap items-center gap-1">
+            <legend className="sr-only">Filter by category</legend>
             {CONNECTED_ACCOUNT_CATEGORIES.map((cat) => {
               const isSelected = selectedCategory === cat.id;
               return (
@@ -505,7 +502,7 @@ export function ConnectionSection({
                 </Button>
               );
             })}
-          </div>
+          </fieldset>
         </div>
       ) : null}
 
@@ -581,7 +578,7 @@ export function ConnectionSection({
                     <AppMark
                       serverId={server.id}
                       logo={logo}
-                      className="text-muted-foreground"
+                      className="size-4 text-muted-foreground"
                     />
                   </ItemMedia>
                   <ItemContent>

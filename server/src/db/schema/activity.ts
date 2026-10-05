@@ -102,6 +102,30 @@ export const runActivity = pgTable(
      * guard against a Bot stuck in a loop reading as a healthy long run.
      */
     transitions: integer("transitions").notNull().default(0),
+    /**
+     * The last moment this run said it was still going, or null if it never has.
+     *
+     * THIS IS THE HEARTBEAT, AND IT IS WHY THE GHOST CAN BE ENDED AT ALL.
+     *
+     * A run is alive exactly as long as something keeps saying so. A hop proves it by renewing a
+     * `thread_locks` row, which is why `sweepAbandonedRuns` could be written against that table
+     * alone — and a person's own chat run takes no lock, so it had nothing to renew and nothing the
+     * sweeper could see. A run whose stream died mid-turn therefore stayed `thinking` with a null
+     * `ended_at` for ever, and because `thinking` outranks every terminal state in
+     * `ACTIVITY_SEVERITY`, that stale row kept winning the roster reduction: a channel pinned open by
+     * a run that ended days ago, which no amount of waiting could clear.
+     *
+     * So the liveness signal is carried here as well, and on every run rather than only on hops.
+     *
+     * NULLABLE, and that is the honest default rather than an oversight. `defaultNow()` would stamp a
+     * heartbeat on every row the migration touched, claiming a liveness nobody observed. Null means
+     * exactly what it says — this row has never been seen alive — and the sweeper acts on that
+     * difference rather than papering over it: it ends a run whose beat is PRESENT AND LAPSED, and
+     * leaves a null beat alone, because absence of a heartbeat is not evidence of death and a
+     * sweeper that reads it as death kills live turns. A null-beat row is ended by the finish that
+     * reaches a dropped teardown instead. See `activity/abandoned.ts`.
+     */
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
   },
   (table) => [
     /*
@@ -119,5 +143,24 @@ export const runActivity = pgTable(
     index("run_activity_parent_idx").on(table.parentRunId),
     /** Retention's sweep, which is a range scan on age and nothing else. */
     index("run_activity_started_idx").on(table.startedAt),
+    /*
+     * THE SWEEPER'S QUERY, and the second reason this column earns its place.
+     *
+     * Partial on `ended_at is null` for the same reason the roster's is: open runs are the small
+     * fraction the sweeper can act on, and holding every finished run in an index to find ghosts
+     * would be a permanent cost to clear the occasional one.
+     *
+     * `last_heartbeat_at` leads because the sweep is a range scan on how stale the beat is, and
+     * because open rows are a small fraction of the table — most runs finish — so the partial
+     * predicate keeps the index to the only rows the sweeper can act on.
+     *
+     * Not a `coalesce` to `started_at`. That expression reads better and is worse: the planner cannot
+     * turn it into a bounded range, so the sweep degrades to a scan of every open row on every tick
+     * instead of an index range over the lapsed ones. The null beats are simply not candidates —
+     * see the column's note — and leaving them to the front of the index costs nothing.
+     */
+    index("run_activity_open_heartbeat_idx")
+      .on(table.lastHeartbeatAt)
+      .where(sql`${table.endedAt} is null`),
   ],
 );

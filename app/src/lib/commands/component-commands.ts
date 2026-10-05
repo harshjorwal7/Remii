@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import type { CommandOption } from "@/components/channels/composer";
-import { commandSlug } from "@/lib/commands/slug";
+import { commandAlias, commandSlug } from "@/lib/commands/slug";
 import {
   agentComponentsQueryOptions,
   type GrantedComponent,
@@ -10,10 +10,10 @@ import {
 /**
  * The components this Bot holds, as `/` commands a picker can insert.
  *
- * These are `hidden`: the dropdown shows one `/components` entry and the components behind it,
- * because a flat menu of every granted component is a list nobody scrolls. A chip is still inserted
- * as `/show-bar-chart`, which is what makes it resolve on send and draw a badge in the transcript
- * exactly as a skill does.
+ * The dropdown lists every held component under its short alias (`/bar-chart`, `/table`); the
+ * full slug (`/show-bar-chart`) stays as a hidden command so chips inserted before aliases
+ * existed, or parked in a queued draft, still resolve on send. The two share one prompt, so
+ * either way the model is told to draw rather than describe.
  *
  * THE PAYLOAD IS INSTRUCTION, NOT SCHEMA. The model is already handed this component's name and
  * parameters as a tool definition, so repeating them here would spend context restating a tool the
@@ -44,14 +44,33 @@ export function componentCommands(
     if (!slug || taken.has(slug)) continue;
     taken.add(slug);
 
+    const prompt = `The person asked for this on screen. Draw it with the \`${component.name}\` component rather than answering in prose.`;
+
+    /*
+     * The full slug stays resolvable — chips already sitting in a queued draft, or inserted by the
+     * picker, carry it — but the dropdown only lists the short alias, so nobody types
+     * `showBarChart` by hand again.
+     */
     commands.push({
       id: slug,
       name: slug,
       description: component.description,
       kind: "chip" as const,
       hidden: true,
-      prompt: `The person asked for this on screen. Draw it with the \`${component.name}\` component rather than answering in prose.`,
+      prompt,
     });
+
+    const alias = commandAlias(component.name);
+    if (alias && alias !== slug && !taken.has(alias)) {
+      taken.add(alias);
+      commands.push({
+        id: alias,
+        name: alias,
+        description: component.description,
+        kind: "chip" as const,
+        prompt,
+      });
+    }
   }
 
   return commands;

@@ -52,6 +52,38 @@ describe("toDraft", () => {
     expect(draft.commandIds).toEqual(["search", "summarize"]);
   });
 
+  test("resolves hand-typed leading /commands against the command table", () => {
+    const commands: CommandOption[] = [
+      { id: "bar-chart", name: "bar-chart", kind: "chip" },
+      { id: "table", name: "table", kind: "chip" },
+    ];
+    const draft = toDraft([text("/barchart /table please")], [], commands);
+
+    expect(draft.commandIds).toEqual(["bar-chart", "table"]);
+  });
+
+  test("does not treat an unknown leading /word as a command", () => {
+    const commands: CommandOption[] = [
+      { id: "bar-chart", name: "bar-chart", kind: "chip" },
+    ];
+    const draft = toDraft([text("/shrug something")], [], commands);
+
+    expect(draft.commandIds).toEqual([]);
+  });
+
+  test("merges a hand-typed command with a picked chip without duplicating", () => {
+    const commands: CommandOption[] = [
+      { id: "bar-chart", name: "bar-chart", kind: "chip" },
+    ];
+    const draft = toDraft(
+      [command("bar-chart", "bar-chart"), text(" "), text("/bar-chart again")],
+      [],
+      commands,
+    );
+
+    expect(draft.commandIds).toEqual(["bar-chart"]);
+  });
+
   test("treats whitespace-only content as empty", () => {
     expect(toDraft([text("   ")]).isEmpty).toBe(true);
     expect(toDraft([]).isEmpty).toBe(true);

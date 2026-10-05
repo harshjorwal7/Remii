@@ -1039,7 +1039,10 @@ export function Composer({
     () => buildTriggers({ agents, commands }),
     [agents, commands],
   );
-  const draft = useMemo(() => toDraft(value, staged), [staged, value]);
+  const draft = useMemo(
+    () => toDraft(value, staged, commands),
+    [commands, staged, value],
+  );
 
   /**
    * MORE FILES ON THIS STRIP THAN ONE MESSAGE MAY CARRY — a state the screening is supposed to make
@@ -1095,7 +1098,7 @@ export function Composer({
       // `overCap` is asked here as well as at the button, and not only there: Enter reaches this
       // function through prompt-area's own `onSubmit`, which has never looked at `canSend`. A gate
       // drawn on the button alone would refuse the press and accept the keystroke.
-      const submitted = toDraft(segments, staged);
+      const submitted = toDraft(segments, staged, commands);
       if (!canSendDraft(submitted) || overCap(submitted) || disabled) {
         return;
       }
@@ -1223,6 +1226,7 @@ export function Composer({
       }
     },
     [
+      commands,
       disabled,
       dismissRejections,
       isBusy,

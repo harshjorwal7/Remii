@@ -119,6 +119,7 @@ import { computerToolsFor } from "./computer/tools";
 import { createUserComputerStore } from "./computer/user-computers";
 import { loadConfig } from "./config";
 import {
+  type HandoffForRun,
   type IdentifyActor,
   type IdentifyUser,
   mountCopilotRuntime,
@@ -321,7 +322,7 @@ await initializeDevActorUser(database, config.singleUser);
  * read on a run.
  */
 const credentialStore = createCredentialStore(database);
-const agentVault = {
+const _agentVault = {
   store: credentialStore,
   reader: credentialStore,
   encryptionKey: config.keyEncryptionKey,
@@ -2114,7 +2115,10 @@ const buildAgentFor = async ({
     loadVendors,
     selectionForActor(actor.id),
     agentFetch,
-    undefined,
+    // The same handoff closure the request path and a hop get, bound to the owner the routine runs
+    // as. Its grants resolve against this person's roster, so it cannot address a Bot they cannot
+    // see — the same visibility rule a hop is held to, for the same reason.
+    handoffForActor(actor.id),
     // Only the Bot this routine names. Same reason as the hop delivery: the roster is still read in
     // full so a Bot this owner cannot see is still absent, but the other Bots are neither built nor
     // asked what they hold.
@@ -2130,8 +2134,29 @@ const buildAgentFor = async ({
     // And the same recorder, so the files on a routine's own message stop counting as staged the
     // moment it sends them, exactly as a person's do.
     markAttachmentsSentForActor(actor.id),
+    /*
+     * No `enforceTurn` here, and that is a real limit rather than an oversight.
+     *
+     * The wrapper is why. `PostgresAgentRunner` drives `agent.runAgent(...)`, and `EnforcedAgent`
+     * answers that path by forwarding to the agent it wraps and then metering around the call —
+     * which leaves the WRAPPER's own `messages` array exactly as the caller seeded it. A routine
+     * recovers its reply by diffing `agent.messages` against the before-picture
+     * (`routines/run-turn.ts`), so a wrapped agent reads back as having said nothing at all and
+     * every firing would be recorded as "the turn finished without saying anything".
+     *
+     * It would also charge the turn twice: `onTurnSettled` settles the ledger, and the runner
+     * settles `chargeUsage` below. The routine's metering, its loop breaker and its credit charge
+     * are therefore its own, in `routines/run-turn.ts`, which is also the only place that can stop
+     * a headless turn on a deadline.
+     */
     undefined,
-    undefined,
+    /*
+     * Memory extraction after the turn, same as a chat turn gets. Unlike `enforceTurn` this is a
+     * plain config field handed to the loop rather than a wrapper around the agent, so it costs the
+     * reply nothing: a routine that taught the workspace something overnight should be remembered
+     * exactly as the same work typed by hand would be.
+     */
+    memoryExtractForActor(actor.id),
     memoryForActor(actor.id),
     // How a run ended, recorded where a person can see it. Shared with the chat and hop paths — see
     // `onRunEndedFor`, which is where the reason this used to be wired for routines alone is written
@@ -2212,6 +2237,13 @@ const routineRunner = createRoutineRunner({
       return settled.creditsDeducted;
     },
   }),
+  /*
+   * A paused coworker does not take work, and a routine is nobody typing at it — so neither the
+   * chat turn's pre-run gate nor the handoff desk ever sees this firing. Read here, where the
+   * decision is actually made, rather than by filtering the shared roster: that would also remove
+   * the Bot from the person's own roster and cost the chat path the readable refusal it gives.
+   */
+  pausedMessage: (agentId) => agentProfileStore.pausedMessage(agentId),
 });
 
 /*
@@ -2246,30 +2278,23 @@ const cronTurnRunner = createTurnRunner({
  * invisible: it runs, and quietly holds different tools or a different role from the one the person
  * is talking to.
  */
-const copilotRuntime = mountCopilotRuntime(
-  config,
-  runtimeModel,
-  loadAgentsForActor,
-  resolveRuntimeModelApiKey,
-  identifyUser,
-  identifyActor,
-  stallGuard,
-  loadToolsForActor,
-  signRunForActor,
-  undefined,
-  loadVendors,
-  selectionForActor,
-  agentFetch,
-  /*
-   * What a Bot may reach past itself for: another Bot, and a person. Made per run and per person.
-   *
-   * Per person because which Bots may be reached is decided against the roster that person can
-   * see: a Bot must never be able to address one they cannot, or this becomes a way around agent
-   * visibility. Per run because the caps need to know how deep the chain already is and where an
-   * answer belongs, and both of those are the deployment's own statement about the run rather than
-   * anything the model can edit.
-   */
-  (actorId) => async (botId, input) => {
+/*
+ * What a Bot may reach past itself for: another Bot, and a person. Made per run and per person.
+ *
+ * Named at module scope and given to the request path, a hop and a routine alike, rather than
+ * written inline at each of them. A routine is its owner's own work done while they are asleep, so
+ * a routine that cannot hand off, cannot ask, and cannot reach a connector cannot do what the
+ * same person could do by typing the same instruction themselves — the rule in `docs/routines.md`
+ * under "Who a routine runs as". Two copies of this closure would drift on the first change to
+ * either, and the drift is invisible: a Bot holding fewer tools still runs, it just quietly cannot
+ * do the job it was woken to do.
+ *
+ * `HandoffForRun` and not a wider type, so the signature stays the one `resolveRuntimeAgents`
+ * declares and a change to either is a type error rather than a quiet divergence.
+ */
+const handoffForActor =
+  (actorId: string): HandoffForRun =>
+  async (botId, input) => {
     const from = readRunAssertion(
       (input.forwardedProps as { remiiRun?: unknown } | undefined)?.remiiRun,
       config.keyEncryptionKey,
@@ -2486,7 +2511,23 @@ const copilotRuntime = mountCopilotRuntime(
           ...mind,
         ]
       : [asking, connecting, waiting, ...governing, ...local, ...mind];
-  },
+  };
+
+const copilotRuntime = mountCopilotRuntime(
+  config,
+  runtimeModel,
+  loadAgentsForActor,
+  resolveRuntimeModelApiKey,
+  identifyUser,
+  identifyActor,
+  stallGuard,
+  loadToolsForActor,
+  signRunForActor,
+  undefined,
+  loadVendors,
+  selectionForActor,
+  agentFetch,
+  handoffForActor,
   /*
    * A run started or ended on a thread. Two things, from one call, because they are the same moment
    * and two calls could disagree about it: the channel's working dot, and the durable record of
@@ -2672,6 +2713,29 @@ const copilotRuntime = mountCopilotRuntime(
       maxToolCalls: MAX_TURN_TOOL_CALLS,
       getContainerSeconds: () =>
         computerGateway?.consumeElapsedContainerSeconds?.(actorId) ?? 0,
+      /*
+       * SAYING THE TURN IS STILL GOING, which is what makes a chat run sweepable.
+       *
+       * A hop renews a `thread_locks` row, so `sweepAbandonedRuns` could always see one. A person's
+       * own turn takes no lock — it runs through the runtime — so for the runs a person actually
+       * watches there was no liveness signal at all, and a turn whose stream died left its row
+       * `thinking` with no `ended_at` that nothing would ever move. Because `thinking` outranks every
+       * terminal state in `ACTIVITY_SEVERITY`, that stale row then kept winning the roster reduction:
+       * a channel pinned open by a run that ended days ago, unclearable by waiting.
+       *
+       * This is the other half of that fix, and it is the half that survives a process being killed
+       * rather than a stream being dropped. Repairing the dropped teardown in `EnforcedAgent` stops
+       * the row being orphaned in the first place; this stops the ones already orphaned — and the
+       * ones a kill -9 makes, which no amount of care in the teardown can reach — from lasting the
+       * full retention window.
+       *
+       * Not announced, and not awaited. Nothing a person can see changes: the state, the label and
+       * the detail are untouched, so every roster already draws this run correctly. Publishing per
+       * beat would turn one write into a `pg_notify` fanned out to every connected tab, to say
+       * something no tab would draw differently.
+       */
+      heartbeat: ({ runId }) =>
+        runActivityStore.heartbeat(runId).catch(() => true),
       onTurnSettled: async (usage) => {
         /*
          * The run's record closes FIRST, before the billing that follows.

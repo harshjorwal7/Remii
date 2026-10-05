@@ -494,7 +494,49 @@ export type EnforcedAgentOptions = {
   getContainerSeconds?: () => number;
   onTurnSettled?: (params: TurnSettlement) => Promise<void> | void;
   beforeRun?: (input: RunAgentInput) => Promise<void>;
+  /**
+   * Called on a timer while a turn is running, and told whether the run is still going.
+   *
+   * A turn's liveness has to be asserted WHILE it runs, because the only moment its existence is
+   * known is the moment it is happening. The run's row is written before the turn starts and closed
+   * when it settles, and between those two moments nothing else distinguishes a run that is working
+   * from a run whose process was killed — which is what left a chat run showing "Working" for ever:
+   * the row was written, the cleanup that would have closed it was dropped, and the abandoned-run
+   * sweeper had no signal to read because a chat run takes no thread lock.
+   *
+   * The boolean is the beat's own answer — false means the run is no longer open, so the caller can
+   * stop writing and, if it owns one, abort. It is what lets this be a plain interval rather than
+   * something that has to be cancelled from the outside, so a run that ends by any route at all stops
+   * beating.
+   *
+   * NOT AWAITED and never allowed to reject into the turn. A heartbeat that fails to write is a
+   * liveness signal that did not get through; ending somebody's turn over it would trade a cosmetic
+   * stale dot for a lost answer.
+   */
+  heartbeat?: (input: {
+    runId: string;
+    threadId: string;
+  }) => Promise<boolean> | boolean;
+  /**
+   * How often to beat, overriding {@link TURN_HEARTBEAT_MS}.
+   *
+   * Present so a test can drive the timer in milliseconds rather than waiting out a real interval.
+   * It is not a tuning knob and nothing in the product sets it: the constant is a deliberate
+   * fraction of the abandoned-run grace period, and a deployment that shortened it would only make
+   * the sweeper's margin thinner.
+   */
+  heartbeatIntervalMs?: number;
 };
+
+/**
+ * How often a running turn says it is still going.
+ *
+ * A third of the abandoned-run grace period, so a run gets two chances to beat inside the window it
+ * has to beat in. Faster than that is a write per turn per interval for no benefit — the sweeper
+ * cannot act on anything younger than the grace period — and slower risks a live run being swept on
+ * the strength of one missed beat.
+ */
+export const TURN_HEARTBEAT_MS = 20_000;
 
 /**
  * Per-turn metering state shared by both run paths.
@@ -561,6 +603,8 @@ export class EnforcedAgent extends AbstractAgent {
   private readonly getContainerSeconds?: () => number;
   private readonly onTurnSettled?: EnforcedAgentOptions["onTurnSettled"];
   private readonly beforeRun?: EnforcedAgentOptions["beforeRun"];
+  private readonly heartbeat?: EnforcedAgentOptions["heartbeat"];
+  private readonly heartbeatIntervalMs: number;
 
   constructor(inner: AbstractAgent, options?: EnforcedAgentOptions) {
     super({ agentId: inner.agentId, description: inner.description });
@@ -569,6 +613,46 @@ export class EnforcedAgent extends AbstractAgent {
     this.getContainerSeconds = options?.getContainerSeconds;
     this.onTurnSettled = options?.onTurnSettled;
     this.beforeRun = options?.beforeRun;
+    this.heartbeat = options?.heartbeat;
+    this.heartbeatIntervalMs =
+      options?.heartbeatIntervalMs ?? TURN_HEARTBEAT_MS;
+  }
+
+  /**
+   * A timer that says this run is still going, and a way to stop it.
+   *
+   * Returned rather than started in place because the two run paths bracket it differently — `run`
+   * has a teardown that must stop it, `runAgent` has a `finally` — and a timer whose lifetime is set
+   * by two different call sites is a timer one of them will forget.
+   *
+   * A no-op when no heartbeat was supplied or when there is no run to beat for, so a caller does not
+   * have to distinguish "no heartbeat configured" from "nothing to heartbeat about".
+   */
+  private startHeartbeat(input: {
+    runId?: string;
+    threadId?: string;
+  }): () => void {
+    const runId = input.runId;
+    const beat = this.heartbeat;
+    if (!beat || typeof runId !== "string" || runId.length === 0) {
+      return () => {};
+    }
+    const threadId = typeof input.threadId === "string" ? input.threadId : "";
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          // False means the run is no longer open — it settled, or the sweeper ended it. Either way
+          // there is nothing left to prove, and beating on would be claiming a liveness that has
+          // already been withdrawn.
+          if (!(await beat({ runId, threadId }))) clearInterval(timer);
+        } catch {
+          // See the option's note: a beat that did not get through is never somebody's lost turn.
+        }
+      })();
+    }, this.heartbeatIntervalMs);
+    // A pending beat must not be a reason the process stays alive.
+    timer.unref?.();
+    return () => clearInterval(timer);
   }
 
   private meterFor(input: {
@@ -656,9 +740,67 @@ export class EnforcedAgent extends AbstractAgent {
       let cancelled = false;
       let detach: (() => void) | undefined;
 
+      /*
+       * STARTED HERE, BESIDE THE METER, SO IT IS STOPPED BY THE SAME TEARDOWN.
+       *
+       * The beat begins with the turn's own existence rather than with `start`, because the window
+       * this whole fix exists for — `beforeRun` resolved, `start` not yet reached — is precisely a
+       * window in which the run has a row and is not yet emitting anything. A beat that waited for
+       * `start` would not cover it, and that window is where the ghosts were made.
+       */
+      const stopHeartbeat = this.startHeartbeat(input);
+
+      /*
+       * THE METER IS BUILT BEFORE `beforeRun` IS ASKED FOR, not inside `start`, and that ordering is
+       * the fix for a run that was written to the roster and never taken off it.
+       *
+       * `beforeRun` is async and hits the database, and the subscription can be torn down while it is
+       * outstanding — the SSE response aborts on `request.signal` and unsubscribes, which is what a
+       * closed tab, a refresh and a dropped connection all look like from here. The teardown below
+       * could only settle the turn through `detach`, and `detach` used to be assigned inside `start`,
+       * which `beforeRun`'s resolution gates: so an unsubscribe in that window found `detach`
+       * undefined, `settleNow` never ran, `onTurnSettled` never ran, and `finish()` never ran. The
+       * run's own record stayed `thinking` with no `ended_at` and the channel kept a working pulse
+       * for ever — a ghost the roster could not clear, because the abandoned-run sweeper only reads
+       * lock rows and a chat run takes no lock.
+       *
+       * `beforeRun` had already done the only irreversible part by then. It is what calls
+       * `runActivityStore.begin`, so the row was written and announced before the very await that
+       * could discard the cleanup. Moving the teardown after the write but before the settle is the
+       * whole bug.
+       *
+       * Nothing is lost by building it early: `meterFor` reads only `threadId`, `runId` and
+       * `messages`, all of which are on `input` at subscribe time, and it attaches no subscription
+       * of its own.
+       */
+      const { subscriber, settleNow } = this.meterFor(input);
+
+      /*
+       * Whether `beforeRun` got far enough to write this turn's record.
+       *
+       * IT IS NOT THE SAME QUESTION AS `cancelled`, and conflating the two would bill a turn this
+       * deployment refused to serve. `beforeRun` throws before `begin` for an ineligible turn, a
+       * paused coworker and a thread belonging to somebody else, and a refused turn must be neither
+       * recorded nor charged — see the note on `beforeRun` in `metering.ts`'s call site. Settling
+       * merely because the stream was torn down would charge every one of those refusals, at zero
+       * tokens, which is still a deduction and still a usage row.
+       *
+       * So the two are tracked apart: `cancelled` says the subscriber went away, `began` says there
+       * is a row that needs finishing. The teardown settles on `began` alone, and `start` sets `began`
+       * on the way in so a turn cancelled mid-`beforeRun` still settles once `beforeRun` resolves —
+       * the window this whole fix exists for.
+       */
+      let began = false;
+
       const start = () => {
-        if (cancelled) return;
-        const { subscriber, settleNow } = this.meterFor(input);
+        began = true;
+        // Cancelled before it began, so there is nothing to subscribe to and nothing to stream.
+        // `settleNow` has already run by way of the teardown, and `TurnMeter.settle` is idempotent,
+        // so calling it here rather than not at all cannot double-charge.
+        if (cancelled) {
+          settleNow();
+          return;
+        }
         const attached = this.inner.subscribe(subscriber);
         detach = () => {
           settleNow();
@@ -686,6 +828,8 @@ export class EnforcedAgent extends AbstractAgent {
         void this.beforeRun(input)
           .then(start)
           .catch((error) => {
+            // A refusal. `beforeRun` threw before it wrote anything, so there is no row to finish and
+            // nothing to charge: `began` is still false and the teardown will not settle it.
             if (!cancelled) observer.error(error);
           });
       } else {
@@ -694,7 +838,25 @@ export class EnforcedAgent extends AbstractAgent {
 
       return () => {
         cancelled = true;
+        /*
+         * BOTH, AND THE SECOND IS THE ONE THAT MATTERS.
+         *
+         * `detach` unsubscribes the inner agent and is still undefined when the teardown beats
+         * `start`. `settleNow` is unconditional and always defined, because the meter is built above,
+         * so a turn abandoned after its record was written is still settled exactly once.
+         *
+         * ON `began`, WHICH IS WHAT KEEPS A REFUSAL FREE. A turn this deployment declined never wrote
+         * a record, so there is nothing to finish and nothing to bill, and settling it would charge a
+         * person for a turn that was correctly refused. The window this fixes is `beforeRun` resolved
+         * (record written) but `start` not yet reached the subscriber — `began` is true there and
+         * false for a refusal, which is the only distinction that matters here.
+         *
+         * Idempotence is `TurnMeter.settle`'s own `settled` flag, so this cannot double-charge a turn
+         * that did start and did finish.
+         */
         detach?.();
+        if (began) settleNow();
+        stopHeartbeat();
       };
     });
   }
@@ -723,6 +885,13 @@ export class EnforcedAgent extends AbstractAgent {
      *
      * A no-op when there is no `beforeRun`, and it throws before the meter is attached, so a refused
      * turn is neither billed nor recorded.
+     *
+     * NO `began` FLAG HERE, AND THAT IS THE DIFFERENCE BETWEEN THE TWO PATHS RATHER THAN AN
+     * OMISSION. `beforeRun` is AWAITED on this path, so there is no window in which the record has
+     * been written and the cleanup has not been attached: the throw above leaves no meter to settle
+     * and propagates out of the method, and everything after it runs inside the `finally`. Only
+     * `run` hands `beforeRun` to a promise nobody awaits, which is what created the window the flag
+     * exists to cover.
      */
     if (this.beforeRun) {
       await this.beforeRun({
@@ -738,6 +907,15 @@ export class EnforcedAgent extends AbstractAgent {
       messages: this.inner.messages,
     });
     const attached = this.inner.subscribe(metering);
+    /*
+     * Started after `beforeRun` rather than before it, and that asymmetry with `run` is deliberate:
+     * here `beforeRun` is awaited, so there is no window in which the row exists and the beat does
+     * not. A run that never got past the refusal above never began, so there is nothing to beat for.
+     */
+    const stopHeartbeat = this.startHeartbeat({
+      runId: parameters?.runId,
+      threadId: this.inner.threadId,
+    });
     try {
       return await this.inner.runAgent(parameters, subscriber);
     } finally {
@@ -745,6 +923,7 @@ export class EnforcedAgent extends AbstractAgent {
       // settles the turn, so a runner that never emits finalization still
       // gets charged exactly once.
       settleNow();
+      stopHeartbeat();
       attached.unsubscribe();
     }
   }
@@ -769,6 +948,18 @@ export class EnforcedAgent extends AbstractAgent {
        * same fix.
        */
       ...(this.beforeRun ? { beforeRun: this.beforeRun } : {}),
+      /*
+       * And the heartbeat, for the same reason and with the same consequence if it were dropped.
+       *
+       * The request path clones the agent it is about to run, so a clone without this one runs the
+       * turn to completion and never says so while it is happening — which is the same turn that
+       * would then be indistinguishable from one whose process was killed. A cloned run has a row,
+       * because `beforeRun` came along, and a row nothing beats on is exactly the ghost.
+       */
+      ...(this.heartbeat ? { heartbeat: this.heartbeat } : {}),
+      ...(this.heartbeatIntervalMs !== TURN_HEARTBEAT_MS
+        ? { heartbeatIntervalMs: this.heartbeatIntervalMs }
+        : {}),
     });
   }
 
