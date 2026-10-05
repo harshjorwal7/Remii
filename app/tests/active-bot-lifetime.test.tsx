@@ -7,8 +7,8 @@ import {
   test,
 } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { ReactElement } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
+import type { ReactElement } from "react";
 import {
   ActiveBotProvider,
   useActiveBot,
@@ -90,7 +90,30 @@ const read = () => held.holder?.current ?? "unread";
  * holder rather than about how the host happened to schedule React's work.
  */
 async function declares(view: () => string, expected: string) {
-  await waitFor(() => expect(view()).toBe(expected), { timeout: 5000 });
+  try {
+    await waitFor(() => expect(view()).toBe(expected), { timeout: 5000 });
+  } catch (error) {
+    console.error(
+      "DIAG",
+      JSON.stringify({
+        hasDocument: typeof document !== "undefined",
+        hasWindow: typeof window !== "undefined",
+        hasMessageChannel: typeof MessageChannel !== "undefined",
+        hasIS_REACT_ACT_ENVIRONMENT: (globalThis as Record<string, unknown>)
+          .IS_REACT_ACT_ENVIRONMENT,
+        reactVersion: (await import("react")).version,
+        happyDomVersion: (await import(
+          "@happy-dom/global-registrator/package.json",
+          { with: { type: "json" } }
+        ).catch(() => null)) as unknown,
+        holderIsNull: held.holder === null,
+        value: view(),
+        bodyChildren:
+          typeof document !== "undefined" ? document.body.children.length : -1,
+      }),
+    );
+    throw error;
+  }
 }
 
 /**
