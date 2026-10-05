@@ -326,7 +326,7 @@ function render(t: Theme): string {
     weight: 700,
     fill: t.ink,
   });
-  text(svX + 22, svY + 58, "CopilotKit runtime, auth, roles, coworkers", {
+  text(svX + 22, svY + 58, "the local agent loop, auth, policy, audit", {
     size: 13,
     fill: t.muted,
   });
@@ -385,20 +385,20 @@ function render(t: Theme): string {
     });
   });
 
-  // ---- supervisor --------------------------------------------------------
+  // ---- where the computers come from ------------------------------------
   const supX = cX;
   const supY = 656;
   box(supX, supY, cW, 90, t, { stroke: t.ink, dashed: true });
-  text(supX + 18, supY + 30, "supervisor :4500", {
+  text(supX + 18, supY + 30, "E2B", {
     size: 14.5,
     weight: 650,
     fill: t.ink,
   });
-  text(supX + 18, supY + 54, "the only process that", {
+  text(supX + 18, supY + 54, "creates one sandbox per person,", {
     size: 12.5,
     fill: t.muted,
   });
-  text(supX + 18, supY + 72, "creates a computer", {
+  text(supX + 18, supY + 72, "stopped after a few idle minutes", {
     size: 12.5,
     fill: t.muted,
   });
@@ -434,7 +434,7 @@ function render(t: Theme): string {
 
   const intX = 622;
   box(intX, dbY, 226, 118, t, { stroke: t.ink });
-  text(intX + 18, dbY + 32, "CopilotKit Intelligence", {
+  text(intX + 18, dbY + 32, "PostgreSQL: threads, memory, audit", {
     size: 14.5,
     weight: 650,
     fill: t.ink,
@@ -522,12 +522,12 @@ function render(t: Theme): string {
     tailHead: true,
   });
 
-  // the supervisor builds each computer
+  // E2B builds each sandbox, one per person
   arrow(supX + 150, supY - 8, cX + 150, cY + 2 * 100 + 92, {
     colour: t.ink,
     dashed: true,
   });
-  label(supX + 166, supY - 22, "creates one each", t.muted, "start");
+  label(supX + 166, supY - 22, "one per person", t.muted, "start");
 
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img">`,
@@ -535,9 +535,9 @@ function render(t: Theme): string {
     `<desc>A turn goes from the app to the server, which sends it to a Bot over AG-UI. Every tool call ` +
       `the Bot makes returns through the gateway, which resolves the target, decides it against the ` +
       `configured policy, records an audit row, and only then acts, or refuses and names the rule. ` +
-      `Allowed actions reach that Bot's own computer, one container each holding its own Chromium, ` +
-      `logins and workspace, created by the supervisor. Every decision lands in PostgreSQL; threads ` +
-      `and memory live in CopilotKit Intelligence.</desc>`,
+      `Allowed actions reach that person's own computer, one E2B sandbox each holding its own ` +
+      `desktop, Chromium, logins and workspace. Every decision lands in PostgreSQL, and so do ` +
+      `threads and memory.</desc>`,
     ...out,
     `</svg>`,
   ].join("\n");

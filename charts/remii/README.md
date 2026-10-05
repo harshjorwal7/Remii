@@ -7,7 +7,7 @@ only difference between them is values.
 
 Four things this chart assumes and does not create.
 
-**An image the cluster can pull.** A release publishes `ghcr.io/copilotkit/remii:vX.Y.Z`
+**An image the cluster can pull.** A release publishes `ghcr.io/harshjorwal7/remii:vX.Y.Z`
 publicly, and that tag is what `image.tag` wants. It is built for **`linux/amd64` only**, so an
 arm64 node group (Graviton on EKS, Tau T2A on GKE, Ampere on AKS) cannot run it: the pods sit in
 `ImagePullBackOff`, which is the same thing a wrong tag or a missing pull secret looks like, so the
@@ -15,21 +15,22 @@ node pool being the wrong shape is the last thing anybody checks. Either run amd
 architecture you have and push it somewhere the cluster can reach. Check before assuming:
 
 ```sh
-docker manifest inspect ghcr.io/copilotkit/remii:v0.0.9 | grep architecture
+docker manifest inspect ghcr.io/harshjorwal7/remii:v0.0.13 | grep architecture
 ```
 
-**Intelligence credentials.** Remii requires CopilotKit Intelligence and the chart refuses to
-install without `secrets.intelligenceApiKey`. It comes from the CLI, on any machine with a browser:
+**Intelligence credentials, if you want them.** The server runs its agent loop locally and reads no
+Intelligence setting — `runtimeCapabilities` in `server/src/config.ts` returns a local runtime and
+tolerates the `INTELLIGENCE_*` variables an older `.env` still carries. So the chart installs with
+nothing configured here, and forwards these when you do set them:
 
 ```sh
-npx --yes copilotkit@latest login           # browser sign-in
-npx --yes copilotkit@latest project select  # prints the cpk-... runtime key
+# config.intelligence.apiUrl and config.intelligence.gatewayWsUrl, together.
+# secrets.intelligenceApiKey, through secrets or externalSecrets.
 ```
 
-That key is the only Intelligence credential a managed install needs; the free plan is enough.
-`secrets.licenseToken` is optional and exists for a self-hosted Intelligence that issues its own
-licence. `npx --yes copilotkit@latest license --print` prints one without writing it to a local
-`.env`, which is what you want for something you are about to paste into a Secret.
+Setting one URL without the other is refused at install rather than left to fail at runtime.
+`secrets.licenseToken` stays optional and is passed to the server as `COPILOTKIT_LICENSE_TOKEN` for
+a self-hosted Intelligence that issues its own licence.
 
 **A default StorageClass**, or a named one. Both a Bot's computer and the bundled database ask for
 a volume, and a fresh cluster often has no class marked default. See

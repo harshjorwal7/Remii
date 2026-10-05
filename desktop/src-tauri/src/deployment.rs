@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Written beside the deployment so the app can tell what it already put there.
-const STAMP: &str = ".openbot-deployment";
+const STAMP: &str = ".remii-deployment";
 
 /// The release asset that says which images this version runs.
 ///
@@ -37,12 +37,12 @@ pub struct Installed {
 /// A release asset rather than a branch, and https rather than git, so nothing needs a git client
 /// or credentials to get a deployment.
 pub fn tarball_url(version: &str) -> String {
-    format!("https://github.com/CopilotKit/OpenBot/archive/refs/tags/{version}.tar.gz")
+    format!("https://github.com/harshjorwal7/Remii/archive/refs/tags/{version}.tar.gz")
 }
 
 /// Where the release publishes its image manifest.
 pub fn images_url(version: &str) -> String {
-    format!("https://github.com/CopilotKit/OpenBot/releases/download/{version}/{IMAGES}")
+    format!("https://github.com/harshjorwal7/Remii/releases/download/{version}/{IMAGES}")
 }
 
 pub fn images_path(root: &Path) -> PathBuf {
@@ -104,7 +104,7 @@ pub fn reference(root: &Path, published: &str) -> Result<String, String> {
         .images
         .get(published)
         .map(|image| image.reference.clone())
-        .ok_or_else(|| format!("OpenBot {} does not include {published}.", manifest.version))
+        .ok_or_else(|| format!("Remii {} does not include {published}.", manifest.version))
 }
 
 /// Every image the stack runs, or a failure that names the one that is missing.
@@ -306,7 +306,7 @@ fn fetch_images(root: &Path, version: &str) -> Result<(), String> {
 /// digests. One client, one user agent, one set of TLS defaults.
 pub fn get(url: &str) -> Result<Vec<u8>, String> {
     let response = reqwest::blocking::Client::builder()
-        .user_agent("openbot-desktop")
+        .user_agent("remii-desktop")
         .build()
         .map_err(|error| format!("could not prepare the download: {error}"))?
         .get(url)
@@ -334,7 +334,7 @@ mod tests {
                     (
                         (*name).to_string(),
                         Image {
-                            reference: format!("ghcr.io/copilotkit/openbot-{name}@sha256:abc"),
+                            reference: format!("ghcr.io/harshjorwal7/remii-{name}@sha256:abc"),
                         },
                     )
                 })

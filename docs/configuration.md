@@ -258,10 +258,9 @@ filter and a model triage. Redelivered events file nothing twice.
 | `ELEVENLABS_API_KEY`     | Spoken Telegram replies (voice notes earn voice answers). Unset, everything stays text.                                  |
 | `ELEVENLABS_VOICE_ID`    | Which voice answers. Unset, the default voice.                                                                           |
 | `GOG_BINARY`             | Path to the `gog` CLI for Google Workspace tools. Unset, resolved off PATH; missing means the tools stay home.          |
-| `GOG_BINARY`               | Path to the `gog` CLI for Google Workspace tools. Unset, resolved off PATH; missing means the tools stay home.          |
 
-`Settings → Voice & Google` reports both live: voice configuration plus a test line, and
-the gog binary with its auth state. Google auth itself happens once on the machine
+`Settings → Computer` is where the app reports what is connected on this machine: the screen
+and voice configuration, plus the gog binary with its auth state. Google auth itself happens once on the machine
 (`gog auth add …`), never in the product.
 
 ## Browser computer
@@ -420,8 +419,9 @@ it. Nothing above needs running on the host to do this.
 
 When optional SPIRE services are used:
 
-- the `agent-bot` service reads `SPIRE_SOCKET`, `SPIRE_AGENT_ID`, `SPIRE_TRUST_DOMAIN`, and `SPIRE_AGENT_SOCKET_VOLUME`;
-- Compose also uses `SPIRE_JOIN_TOKEN` and `COMPOSE_PROJECT_NAME`.
+- Compose uses `SPIRE_JOIN_TOKEN` for `spire-agent`'s `-joinToken`, defaulting to `remii-dev-token`;
+- everything else the agent needs is in `spire/agent.conf` and `spire/server.conf` (`trust_domain`
+  `remii.local`), not in the environment.
 
 A computer used to be listed here too, reading `SPIFFE_ENDPOINT_SOCKET` from inside a container. It is
 an E2B sandbox now, which is outside this deployment and outside its network — nothing here attests
@@ -434,9 +434,9 @@ stack without a toolchain.
 
 | Service           | Setting             | Published image                            |
 | ----------------- | ------------------- | ------------------------------------------ |
-| `agent-bot`       | `BOT_IMAGE`         | `ghcr.io/copilotkit/remii-agent-bot`      |
-| `agent-langgraph` | `LANGGRAPH_IMAGE`   | `ghcr.io/copilotkit/remii-agent-langgraph`|
-| `migrate`         | `SERVER_IMAGE`      | `ghcr.io/copilotkit/remii-server`         |
+| `agent-bot`       | `BOT_IMAGE`         | `ghcr.io/harshjorwal7/remii-agent-bot`      |
+| `agent-langgraph` | `LANGGRAPH_IMAGE`   | `ghcr.io/harshjorwal7/remii-agent-langgraph`|
+| `migrate`         | `SERVER_IMAGE`      | `ghcr.io/harshjorwal7/remii-server`         |
 
 Unset, each names a local tag and Compose builds it, which is what a checkout of this repository
 does. Set to a published reference, pinned by digest, together with `IMAGE_PULL_POLICY=missing`,

@@ -2,22 +2,18 @@
 
 # Remii
 
-**The AI assistant your company can actually own.** Same shape as ChatGPT, Claude or Grok, with one difference that matters: it runs on your infrastructure and you can change anything about it. Any agent stack, through AG-UI.
+**An AI assistant your company can actually own.** Same shape as ChatGPT, Claude or Grok, with one difference that matters: it runs on your infrastructure and you can change anything about it. Any agent stack, through AG-UI.
 
 Each coworker gets a computer of its own: a real browser with its own logins, its own files, and only the tools you grant. Every action decided before it happens and recorded after.
 
-[**Talk to an engineer**](https://copilotkit.ai/talk-to-an-engineer?ref=openbot_readme) · [**Have us build it with you**](https://copilotkit.ai/talk-to-an-engineer?ref=openbot_readme) · [**copilotkit.ai/openbot**](https://copilotkit.ai/openbot) · [**Quick start**](#quick-start) · [**Docs**](docs/README.md)
+[**Quick start**](#quick-start) · [**Docs**](docs/README.md) · [**Configuration**](docs/configuration.md) · [**Architecture**](docs/architecture.md)
 
-[![CI](https://github.com/CopilotKit/openbot/actions/workflows/ci.yml/badge.svg)](https://github.com/CopilotKit/openbot/actions/workflows/ci.yml)
-[![security](https://github.com/CopilotKit/openbot/actions/workflows/security_zizmor.yml/badge.svg)](https://github.com/CopilotKit/openbot/actions/workflows/security_zizmor.yml)
+[![CI](https://github.com/harshjorwal7/Remii/actions/workflows/ci.yml/badge.svg)](https://github.com/harshjorwal7/Remii/actions/workflows/ci.yml)
+[![security](https://github.com/harshjorwal7/Remii/actions/workflows/security_zizmor.yml/badge.svg)](https://github.com/harshjorwal7/Remii/actions/workflows/security_zizmor.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-![Alpha](https://img.shields.io/badge/status-alpha-orange.svg)
-
-[![Trendshift: #3 Repository Of The Day](https://trendshift.io/api/badge/trendshift/repositories/175080/daily)](https://trendshift.io/repositories/175080)
+![version](https://img.shields.io/badge/version-0.0.13-blue.svg)
 
 </div>
-
-https://github.com/user-attachments/assets/535ef7ee-1631-4a69-b839-564c56cf90b4
 
 <div align="center">
 
@@ -29,25 +25,19 @@ your own machine.
 
 </div>
 
-> **A template, not a product.** Remii is meant to be cloned and made your own. There is no hosted version to sign up for, and nothing here is published as a package to depend on: every workspace in this repository is private. You take the repository, replace the example tenant package under `examples/` with your own coworkers, channels and skills, and run it. Everything below describes a starting point, not a finished thing somebody operates for you.
+> **Run it yourself.** Remii is meant to be cloned and made your own: you take the repository, replace the example tenant package under `examples/` with your own coworkers, channels and skills, and run it. Nothing in it phones home — the only outbound traffic is to the model provider, your E2B account, and whichever integrations you turn on.
 
-> **Alpha, and under active development.** Remii is early. Expect rough edges and bugs, and expect things to move. Issues and pull requests are welcome.
+> **Under active development.** Remii is pre-1.0 and moves fast. Expect rough edges, and expect them to change without a migration path. Run it on your own machine before you depend on it.
 
 > **Runs on your machine.** Everything below is written for a laptop. `.env.example` carries `REMII_SINGLE_USER=true`, which admits every request as one local user, so a fresh clone reaches the product without registering an OAuth client first. [Sign-in](#sign-in) turns that off, and is required before anybody else can reach the deployment.
-
-> **Do not want to build it yourself?** We will. Our engineers will stand Remii up inside your
-> infrastructure, customize it into something that looks like your own product, and hand it back to you to
-> keep changing. [**Start the conversation**](https://copilotkit.ai/talk-to-an-engineer?ref=openbot_readme).
 
 ## What it is
 
 An agent platform that runs inside your own infrastructure. Docker Compose brings up every part of it, the data sits in your PostgreSQL, and the model is yours to choose: no model ships in the box, and each person supplies their own credentials, which are encrypted at rest and never logged.
 
-Thirteen coworkers ship in the example package, and they are configuration rather than code: **Remii (Chief of Staff)** for everyday work and **Knowledge** for company questions, a **Risk Analyst** reached as an endpoint, and ten in `examples/fintech/agents/` that each do one job — reading an expense claim against the policy as written, turning a meeting note into the follow-ups actually in it, drafting release notes from what shipped, triaging a ticket, answering a new starter from the handbook, writing a brief that names what it could not find, writing up an interview, handing an on-call shift over, assembling what is known before a renewal, and grouping customer feedback into themes it can cite. Add your own by dropping a file in that directory, by editing `agents.yaml`, or from `/agents` in the UI.
+Two example tenant packages ship, and which one loads is set by `TENANT_PACKAGE_DIR` — `../examples/consumer` by default. It declares one coworker and six files in `examples/consumer/agents/`, each one a single job: web research, reading a receipt, pulling the follow-ups actually in a meeting note, data analysis, job applications, and curating social posts. `examples/fintech` is the other one, and it is the larger: `Remii` (Chief of Staff) and `Knowledge` for everyday work and company questions, a `Risk Analyst` reached as an endpoint, and eleven files in `examples/fintech/agents/`. Coworkers are configuration rather than code — add your own by dropping a file in that directory, by editing `agents.yaml`, or from `/agents` in the UI.
 
 Anything a Bot does to a computer, a file, an MCP server or a component goes through one gateway that decides and records it. That is the difference between an agent that can use your tools and an agent you can let near them.
-
-More at [copilotkit.ai/openbot](https://copilotkit.ai/openbot).
 
 ## Built on AG-UI
 
@@ -62,14 +52,17 @@ A Bot is any endpoint speaking [AG-UI](https://github.com/ag-ui-protocol/ag-ui),
 
 - Docker, for PostgreSQL and the shipped Bots.
 - [Bun](https://bun.sh) 1.3+, for the app and API server.
-- A model key. The proof-of-concept Bot uses OpenAI; the LangGraph Bot can use OpenAI, Anthropic, or Google.
+- A model key. The built-in Remii loop runs on `DEEPSEEK_API_KEY` and nothing else — one provider,
+  one model (`deepseek-flash`), no fallback chain. The shipped AG-UI Bots each take their own key and
+  between them cover OpenAI, Anthropic, Google, DeepSeek and local OpenAI-compatible endpoints; see
+  [docs/configuration.md](docs/configuration.md).
 
 ## Quick start
 
 > **Setting up with an AI assistant?** Paste [`prompt.txt`](prompt.txt) into it first. It carries the
-> same steps as below plus the things that are easy to get wrong: which of the ten blank keys in
-> `.env.example` are actually yours to fill (three), which the start script generates for you, and
-> what each start-up refusal means. Every claim in it is checked against this repository.
+> same steps as below plus the things that are easy to get wrong: which of the blank keys in
+> `.env.example` are yours to fill and which the start script generates for you, and what each
+> start-up refusal means. Every claim in it is checked against this repository.
 
 1. Create `.env`:
 
@@ -77,9 +70,10 @@ A Bot is any endpoint speaking [AG-UI](https://github.com/ag-ui-protocol/ag-ui),
    cp .env.example .env
    ```
 
-2. Fill the required values:
+2. Fill in a model key. The built-in Remii loop needs exactly one:
 
-   - `OPENAI_API_KEY`
+   - `DEEPSEEK_API_KEY` — commented out in `.env.example` at line 403; uncomment it
+   - `OPENAI_API_KEY` — instead, if you are running a shipped AG-UI Bot rather than the built-in loop
 
    Threads, messages, runs and locks live in this deployment's own
    PostgreSQL — there is no cloud service to sign up for and no key to fetch.
@@ -110,7 +104,7 @@ One image carries the app, the API, the browser the Bots drive, and optionally P
 # The published image. Nothing to clone and nothing to build.
 docker run -p 3001:3001 --env-file .env \
   -e EMBEDDED_POSTGRES=on -v remii-data:/var/lib/postgresql \
-  ghcr.io/copilotkit/remii:latest
+  ghcr.io/harshjorwal7/remii:latest
 
 # Or the tree you have in front of you.
 docker build -t remii .
@@ -119,7 +113,7 @@ docker run -p 3001:3001 --env-file .env \
 ```
 
 Everything is on 3001 here, the app included, rather than the 3010 the clone uses. `latest` is the
-most recent release and a version tag such as `:v0.0.9` pins one.
+most recent release and a version tag such as `:v0.0.13` pins one.
 
 Leave `EMBEDDED_POSTGRES` off and set `DATABASE_URL` to point at a database you already run.
 [docs/deployment.md](docs/deployment.md) has the minimum sizes, the platform notes, and how it behaves behind more than one replica.
@@ -138,6 +132,7 @@ Leave `EMBEDDED_POSTGRES` off and set `DATABASE_URL` to point at a database you 
 | `/`                            | Start and browse channels.                                         |
 | `/agents`                      | Create, edit, duplicate, hide, delete, and launch coworkers.       |
 | `/channel/:id`                 | Converse with one coworker, watch its screen, and see what it ran. |
+| `/channel/new`                 | Start a channel with a coworker you already have.                  |
 | `/bot`                         | Direct chat with a Bot; `?agent=<id>` selects one.                 |
 | `/skills`                      | Create and enable personal skills, and point them at a repo.      |
 | `/routines`                    | See the routines that are standing, and stop one.                  |
@@ -146,6 +141,12 @@ Leave `EMBEDDED_POSTGRES` off and set `DATABASE_URL` to point at a database you 
 | `/settings/boundaries`         | Your own browser/file/MCP action policy.                           |
 | `/settings/connected-accounts` | Connect your own accounts, and add apps from a broker's directory. |
 | `/settings/components-gallery` | What your Bots can draw in a conversation.                         |
+| `/settings/memory`             | What Remii remembers about you, and what it has forgotten.         |
+| `/settings/schedules`          | The scheduled turns standing jobs report into.                     |
+| `/settings/tasks`              | Filed tasks, and the triage queue behind them.                     |
+| `/settings/files`              | Files Bots have saved for you.                                     |
+| `/settings/computer`           | The sandbox: create it, watch it, stop it.                         |
+| `/settings/telegram`           | Link Telegram, so a Bot can reach you there.                       |
 | `/settings/vault`              | Your own logins, cards and personal details.                       |
 | `/settings/billing`            | Plan, credits and usage — yours alone.                             |
 
@@ -172,6 +173,10 @@ coworkers, computers, connections and history.
 - **Credentials encrypted at rest**: stored through the Vault under Settings, never returned by an API, and redacted from audit events.
 - **A computer is not a port you can reach**: it is an E2B sandbox driven through E2B's own API, holding a browser with real logins. The API key is server-side and never reaches the browser, so nothing reaches a logged-in desktop by guessing an address.
 - **Durable threads**: conversations survive restarts in PostgreSQL, and each deployment stamps the threads it owns.
+- **It remembers, and shows you**: durable facts are extracted from a conversation, stored with both a vector and the full text, and only recalled when a recall gate decides the question actually needs them. `/settings/memory` lists every fact it holds and lets you delete one, and a nightly consolidation merges duplicates and resolves contradictions — so what it remembers is something you have read rather than something it inferred silently.
+- **It reaches you where you are**: a Telegram Bot answers as the same coworker, receiving text, voice notes and photos, and sends its turn back into the thread it belongs to. Linked once under `/settings/telegram`, with the token and username travelling together because one without the other is a link to nowhere.
+- **Scheduled turns and a task queue**: `/settings/schedules` runs a prompt on a cron expression and files the answer where you asked for it, and `/settings/tasks` is where filed work and model-triaged follow-ups land, so nothing a Bot noticed is lost because there was no channel open at the time.
+- **Files Bots keep for you**: anything a Bot writes to `/workspace` or saves through a tool is listed under `/settings/files` with its path and size. Contents are never served from the audit trail, only from the file itself.
 - **Routines**: ask a Bot to do something on a schedule and it does, running as you, in the channel you asked in. A 15-minute floor and a cap of 20 enabled routines keep a sentence from scheduling more than a person meant, and ten failures in a row switch a routine off rather than burn model spend forever. Needs a worker process; see [docs/routines.md](docs/routines.md).
 
 ## Bring your own agent
@@ -229,7 +234,7 @@ Settings worth knowing:
 | `AGENT_COMPUTER_POLICY`              | JSON action policy. Malformed JSON stops server startup.                  |
 | `AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS` | Lets a Bot reach this machine's own services. Local only, and refused under `NODE_ENV=production`. |
 | `AGENT_ENDPOINT_ALLOWED_HOSTS`       | Private addresses an agent may be registered at, comma separated. A host, optionally with a port. |
-| `TENANT_PACKAGE_DIR`                 | Directory containing tenant YAML. Defaults to `../examples/fintech`.      |
+| `TENANT_PACKAGE_DIR`                 | Directory containing tenant YAML. Defaults to `../examples/consumer`.      |
 | `DEPLOYMENT_ID`                      | Names this deployment when two share one database.                                    |
 
 Full reference: [docs/configuration.md](docs/configuration.md).
@@ -239,9 +244,10 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 | Service                  | Port                       | Purpose                                                                                          |
 | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------ |
 | `app`                    | 3010                       | React/Vite UI.                                                                                   |
-| `server`                 | 3001                       | Hono API, CopilotKit runtime, auth, policy, audit, plugins, components, coworkers, and channels. |
+| `server`                 | 3001                       | Hono API: the local agent runtime, auth, policy, audit, plugins, components, coworkers, and channels. |
 | `agent-bot`              | 4200                       | Proof-of-concept AG-UI Bot.                                                                          |
 | `agent-langgraph`        | 4201                       | LangGraph AG-UI Bot.                                                                             |
+| `worker`                 | — (on demand)              | The out-of-band worker: memory consolidation, schedules, and Telegram delivery.                  |
 | PostgreSQL with pgvector | 5432 | Product data, policy, audit, credentials, grants, channels, threads, and component metadata. |
 | A person's computer      | — (over the E2B API)   | One E2B sandbox each: XFCE, Chromium, `/workspace`, reached through E2B's Computer Use and process APIs. |
 
@@ -336,7 +342,6 @@ Use `bash scripts/start.sh` for the whole stack and `bash scripts/stop.sh` to ta
 
 ## Documentation
 
-- [copilotkit.ai/openbot](https://copilotkit.ai/openbot)
 - [docs/README.md](docs/README.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/configuration.md](docs/configuration.md)
@@ -354,4 +359,4 @@ Use `bash scripts/start.sh` for the whole stack and `bash scripts/stop.sh` to ta
 
 ## License
 
-[MIT](./LICENSE) © CopilotKit
+[MIT](./LICENSE) © harshjorwal7

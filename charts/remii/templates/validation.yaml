@@ -78,18 +78,22 @@ This template renders nothing.
   `secrets.licenseToken` is NOT among them. Managed Intelligence issues no licence token, so
   requiring one here would block an install the server would have accepted.
 */}}
-{{- if or (not .Values.config.intelligence.apiUrl) (not .Values.config.intelligence.gatewayWsUrl) }}
-{{- fail "Remii requires CopilotKit Intelligence. Set config.intelligence.apiUrl and config.intelligence.gatewayWsUrl, and the matching secrets.intelligenceApiKey." }}
-{{- end }}
-
 {{- /*
-  A computer nobody can reach, or one anybody can.
+  A HALF-CONFIGURED INTELLIGENCE, NOT A MISSING ONE.
 
-  `agent-computer` refuses every request without `COMPUTER_TOKEN` and permits only `/health`, so a
-  chart that created one without a token would create a process that answers nothing. And a mode of
-  `external` with no address is a deployment whose Bots have no computer at all, which fails at the
-  first browser action rather than at install.
+  One URL without the other is refused: a half-configured Intelligence is a mistake somebody made
+  rather than a deployment that meant to run without one. Neither URL is fine. The server runs a
+  local runtime and reads none of these — `runtimeCapabilities` in server/src/config.ts ignores
+  INTELLIGENCE_* — so a self-hosted deployment has nothing to configure here, and this chart used to
+  refuse to install without a key that changes nothing. The key is forwarded when it is supplied,
+  through `secrets` or through `externalSecrets`, and neither path is required.
 */}}
+{{- if and .Values.config.intelligence.apiUrl (not .Values.config.intelligence.gatewayWsUrl) }}
+{{- fail "config.intelligence.apiUrl is set without config.intelligence.gatewayWsUrl. Set both, or neither." }}
+{{- end }}
+{{- if and .Values.config.intelligence.gatewayWsUrl (not .Values.config.intelligence.apiUrl) }}
+{{- fail "config.intelligence.gatewayWsUrl is set without config.intelligence.apiUrl. Set both, or neither." }}
+{{- end }}
 {{- if and (ne .Values.computers.mode "external") (not .Values.secrets.computerToken) (not .Values.computers.existingTokenSecret) (not .Values.secrets.existingSecret) (not .Values.externalSecrets.enabled) }}
 {{- fail "A computer needs a token, which is the only thing standing between it and anybody who can reach its port. Set secrets.computerToken. Generate one with: openssl rand -hex 32" }}
 {{- end }}

@@ -16,4 +16,6 @@ Start with the root [README](../README.md), then use these references:
 - [Releasing](releasing.md): how a release is proposed, reviewed and published.
 - [Windows desktop signing](windows-signing.md): protected Azure Key Vault signing and verification of the app and NSIS installer.
 
-Do not include credential values, customer data, transcripts, or local-only notes in public docs.
+Do not include credential values, customer data, transcripts, or local-only notes in these
+docs. This repository is private, so a doc that names one of those has leaked it into every clone
+and every fork made from it.

@@ -495,9 +495,9 @@ mod tests {
             .filter_map(|row| row.image)
             .map(|image| {
                 format!(
-                    "\"{image}\": {{ \"repository\": \"ghcr.io/copilotkit/remii-{image}\", \
+                    "\"{image}\": {{ \"repository\": \"ghcr.io/harshjorwal7/remii-{image}\", \
                      \"digest\": \"sha256:abc\", \
-                     \"reference\": \"ghcr.io/copilotkit/remii-{image}@sha256:abc\" }}"
+                     \"reference\": \"ghcr.io/harshjorwal7/remii-{image}@sha256:abc\" }}"
                 )
             })
             .collect();
@@ -523,7 +523,7 @@ mod tests {
             crate::deployment::images_path(root),
             "{ \"version\": \"v9.9.9\", \"images\": { \
              \"agent-crewai\": { \
-             \"reference\": \"ghcr.io/copilotkit/remii-agent-crewai@sha256:abc\" } } }",
+             \"reference\": \"ghcr.io/harshjorwal7/remii-agent-crewai@sha256:abc\" } } }",
         )
         .expect("manifest is written");
     }
@@ -555,7 +555,7 @@ mod tests {
         let crate::env::PickedHarness::Installed { image, .. } = picked else {
             panic!("crewai should install a harness image");
         };
-        assert_eq!(image, "ghcr.io/copilotkit/remii-agent-crewai@sha256:abc");
+        assert_eq!(image, "ghcr.io/harshjorwal7/remii-agent-crewai@sha256:abc");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -576,7 +576,7 @@ mod tests {
         else {
             panic!("crewai should install a harness image");
         };
-        assert_eq!(image, "ghcr.io/copilotkit/remii-agent-crewai@sha256:abc");
+        assert_eq!(image, "ghcr.io/harshjorwal7/remii-agent-crewai@sha256:abc");
         assert_eq!(port, 4202);
         assert!(!mastra);
         assert!(remote_agent_id.is_empty());

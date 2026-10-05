@@ -818,7 +818,7 @@ mod tests {
             .map(|(published, variable)| {
                 (
                     (*variable).to_string(),
-                    format!("ghcr.io/copilotkit/remii-{published}@sha256:abc"),
+                    format!("ghcr.io/harshjorwal7/remii-{published}@sha256:abc"),
                 )
             })
             .collect()
@@ -1582,7 +1582,7 @@ mod model_tests {
             .map(|(published, variable)| {
                 (
                     (*variable).to_string(),
-                    format!("ghcr.io/copilotkit/remii-{published}@sha256:abc"),
+                    format!("ghcr.io/harshjorwal7/remii-{published}@sha256:abc"),
                 )
             })
             .collect()

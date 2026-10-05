@@ -57,10 +57,10 @@ Then, in order:
 
 - the version in the tree is checked against the branch that is publishing it, and the changelog is
   checked for a section with that number
-- one image is built and pushed to `ghcr.io/copilotkit/remii`, tagged with the version, the commit
+- one image is built and pushed to `ghcr.io/harshjorwal7/remii`, tagged with the version, the commit
   and `latest`
 - the services `docker-compose.yml` can build are published too, one image each, at
-  `ghcr.io/copilotkit/remii-<service>`. Those are `linux/amd64` and `linux/arm64`, built on native
+  `ghcr.io/harshjorwal7/remii-<service>`. Those are `linux/amd64` and `linux/arm64`, built on native
   runners of each architecture and joined into one manifest list, because the machines pulling them
   are laptops as well as servers. `.github/published-images.json` is the list, and CI fails if it
   stops matching the Dockerfiles in the tree
@@ -102,8 +102,8 @@ Before deploying, you can check an image is the one this repository built. Every
 carries its own attestation:
 
 ```sh
-gh attestation verify oci://ghcr.io/copilotkit/remii:v0.1.0 -R CopilotKit/OpenBot
-gh attestation verify oci://ghcr.io/copilotkit/remii-agent-bot:v0.1.0 -R CopilotKit/OpenBot
+gh attestation verify oci://ghcr.io/harshjorwal7/remii:v0.0.13 -R harshjorwal7/Remii
+gh attestation verify oci://ghcr.io/harshjorwal7/remii-agent-bot:v0.0.13 -R harshjorwal7/Remii
 ```
 
 ## What has to be green

@@ -11,7 +11,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  repository: ghcr.io/copilotkit/remii
+  repository: ghcr.io/harshjorwal7/remii
   # Empty means the chart's appVersion prefixed with `v` (the form published tags take), so an
   # upgrade of the chart moves the image with it. A value set here is used verbatim.
   tag: ""
@@ -143,9 +143,9 @@ config:
       issuer: ""
   tenantPackageDir: /app/examples/fintech
 
-  # CopilotKit Intelligence, which Remii requires. All four values are needed together: the server
-  # refuses to start on a partial set, deliberately, because a half-configured Intelligence is a
-  # mistake somebody made rather than a deployment that meant to run without one.
+  # Optional. The server's runtime is local and reads none of these; they are forwarded so a
+  # deployment that wants the hosted path can set them. Both URLs together or neither — one without
+  # the other is refused at install.
   intelligence:
     apiUrl: ""
     gatewayWsUrl: ""
@@ -401,9 +401,9 @@ secrets:
   modelApiKey: ""
   computerToken: ""
   supervisorToken: ""
-  # From the CopilotKit CLI: `npx --yes copilotkit@latest project select` prints the runtime key.
-  # The chart refuses to install without it, because there is no mode where this runs with
-  # Intelligence missing.
+  # Optional, and only forwarded when set. The local runtime ignores it, so a self-hosted install
+  # has nothing to put here; an install that does set the Intelligence URLs above is better off
+  # supplying a real key here or through externalSecrets.
   intelligenceApiKey: ""
   # Optional. Managed Intelligence issues no licence token; set this only for a self-hosted
   # Intelligence that has one, and it is passed to the server as COPILOTKIT_LICENSE_TOKEN.

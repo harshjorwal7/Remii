@@ -29,7 +29,7 @@ Image timing covers an explicit missing-only Compose pull, excluding startup and
 
 Events persist before sending and keep their event IDs across retries. The queue holds at most 256 events, dropping the oldest on overflow. Background delivery, bounded quit flushing, and replay on relaunch use the existing CopilotKit ingest contract. A crash before activation records abandonment on the next launch. Telemetry failures do not block setup.
 
-The ingest must accept the new `oss.desktop.*` namespace: [oss-path-to-production #290](https://github.com/CopilotKit/oss-path-to-production/pull/290). A successful HTTP response alone does not prove downstream acceptance; production ingest acknowledges filtered events too. Merge and deployment of that change are required for production desktop delivery.
+The ingest endpoint must accept the `oss.desktop.*` namespace, and that has to be verified rather than assumed: a successful HTTP response alone does not prove downstream acceptance, because production ingest acknowledges filtered events too. Confirm it by sending one synthetic event of that namespace and reading what the ingest reports back before relying on desktop telemetry in production.
 
 Regression tests live in the native telemetry and pull-metrics modules, frontend telemetry tests, and server metadata tests. For an actual local HTTP and installed-runtime check, build the native probe and run the driver from the repository root:
 

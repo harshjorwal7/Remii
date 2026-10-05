@@ -297,7 +297,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
       "update_routine",
       "delete_routine",
     ]),
-    docsUrl: "https://github.com/CopilotKit/OpenBot/blob/main/docs/routines.md",
+    docsUrl: "https://github.com/harshjorwal7/Remii/blob/main/docs/routines.md",
   },
 ]);
 

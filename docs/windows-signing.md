@@ -31,8 +31,9 @@ source SHA and workflow changes before approving access to the publisher's key.
 A successful signing run extracts `remii-desktop.exe` from the NSIS installer
 with 7-Zip, then verifies **both** that payload and the single `*-setup.exe`
 installer using Windows Authenticode and
-`signtool verify /pa /all /v /tw`. Signatures must be valid, timestamped, and have
-publisher `Tawkit, Inc.`. Any warning or nonzero SignTool exit fails the job.
+`signtool verify /pa /all /v /tw`. Signatures must be valid, timestamped, and carry
+the publisher named in your own code-signing certificate. Any warning or nonzero
+SignTool exit fails the job.
 `signatures.json` records the source SHA, artifact SHA-256 hashes, signer and
 timestamp certificates; the companion text files retain verbose SignTool output.
 The binaries upload only after both pass. The extracted app is retained from
@@ -42,37 +43,50 @@ These checks do not test SmartScreen reputation or exercise the app UI.
 
 ## One-time infrastructure setup
 
-Use the protected GitHub environment `windows-signing` with required reviewers.
-Configure these environment **variables**; they contain public identifiers, not
+None of this exists yet for this repository: it needs your own Azure tenant, your
+own Key Vault holding a code-signing certificate you have bought, and an Entra
+application whose federated credential trusts this repository. Until then the
+workflow runs in its default `none` mode, which exercises every credential-free
+regression and signs nothing.
+
+Use the protected GitHub environment `windows-signing` with required reviewers, and
+set these environment **variables** in it. They are public identifiers, not
 passwords:
 
 | Variable | Value |
 | --- | --- |
-| `AZURE_CLIENT_ID` | `cb923310-e793-4557-929e-b33e49a42297` |
-| `AZURE_TENANT_ID` | `c3050389-57ad-4c62-8dcd-fe5e2af4fbce` |
-| `AZURE_SUBSCRIPTION_ID` | Subscription containing `cpk-signing-kv` |
-| `AZURE_KEY_VAULT_URL` | `https://cpk-signing-kv.vault.azure.net` |
-| `CODE_SIGNING_CERT_NAME` | `code-signing` |
+| `AZURE_CLIENT_ID` | Application (client) id of an app registration you create |
+| `AZURE_TENANT_ID` | Your Microsoft Entra tenant id |
+| `AZURE_SUBSCRIPTION_ID` | Subscription containing your Key Vault |
+| `AZURE_KEY_VAULT_URL` | `https://<your-vault>.vault.azure.net` |
+| `CODE_SIGNING_CERT_NAME` | Name of the certificate in that vault |
 
-An owner of the existing Entra application, or an appropriately authorized
-application administrator, must add the federated credential. From the repo root:
+Create the application and the federated credential with your own ids:
 
 ```sh
+az ad app create --display-name remii-windows-signing \
+  --sign-in-audience https://github.com/your-org
 az ad app federated-credential create \
-  --id cb923310-e793-4557-929e-b33e49a42297 \
+  --id <your-client-id> \
   --parameters desktop/signing/azure-federation.json
 ```
 
-Check existing credentials first; do not duplicate or replace another repository's
-credential. The subject in the checked-in JSON is Remii's verified immutable
-subject, including owner and repository IDs, scoped to this environment. An
+`desktop/signing/azure-federation.json` is a **template**. Its `subject` names this
+repository and the `windows-signing` environment, and the environment id in it is a
+placeholder to replace with the id your Azure environment reports — GitHub only
+issues a token whose subject matches that credential exactly, so an unreplaced
+placeholder means the workflow can never authenticate. Put the client id and tenant
+id you created above into the environment variables, never into that file.
+
+An owner of that application, or an appropriately authorized application
+administrator, must add the federated credential. Check existing credentials
+first; do not duplicate or replace another repository's credential. An
 `Insufficient privileges` response requires an authorized app owner/administrator
 to run the command; GitHub environment approval does not grant Entra permissions.
 
-The existing signing identity needs certificate read and key sign permissions.
-With Key Vault RBAC, **Key Vault Certificate User** plus **Key Vault Crypto User**
-cover these operations; Crypto User alone does not grant certificate read access.
-Reuse the existing certificate and permissions where already provisioned. No
+The signing identity needs certificate read and key sign permissions. With Key
+Vault RBAC, **Key Vault Certificate User** plus **Key Vault Crypto User** cover
+these operations; Crypto User alone does not grant certificate read access. No
 client secret, exported private key, PFX, or Tauri updater signing key is needed.
 
 The workflow pins Azure Login and AzureSignTool 7.0.1, checks the downloaded
