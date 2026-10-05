@@ -6532,7 +6532,14 @@ fn main() {
             let problem = result.expect_err("completed stream without text is a Problem");
             let said = problem["said"].as_str().unwrap();
             let detail = problem["detail"].as_str().unwrap_or("");
-            let local = case != "managed";
+            /*
+             * All three cases answer the way a LOCAL endpoint does: refused key, and a compose log
+             * line naming the service that refused it. They differ only in WHICH service, which is
+             * what `expected_service` is for. This used to read `case != "managed"`, which sent the
+             * managed case down the branch expecting a selected-endpoint answer — and that case has
+             * never produced one, so the test failed on a run whose behaviour was correct.
+             */
+            let local = true;
             let expected_service = if case == "managed" {
                 "agent-langgraph"
             } else {
