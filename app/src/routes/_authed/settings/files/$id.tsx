@@ -122,6 +122,27 @@ function RouteComponent() {
     );
   }
 
+  /*
+   * THE PLAYERS, WITH NO CAPTION TRACK ON EITHER, WHICH IS THE POINT RATHER THAN AN OMISSION.
+   *
+   * This is a person playing back a file they stored, not published media: there is no caption file
+   * beside it to point a `<track>` at, so one would be a source that 404s and a control that lies
+   * about there being words. Transcripts, where a file has one, are offered separately on this page.
+   */
+  const audioPlayer = (
+    // biome-ignore lint/a11y/useMediaCaption: an upload has no caption track to point at.
+    <audio className="mt-3 w-full" controls preload="metadata" src={bytesUrl} />
+  );
+  const videoPlayer = (
+    // biome-ignore lint/a11y/useMediaCaption: as the audio above — an upload carries no caption track.
+    <video
+      className="mt-3 max-h-[70vh] w-full rounded-lg border border-border bg-black"
+      controls
+      preload="metadata"
+      src={bytesUrl}
+    />
+  );
+
   return (
     <PageShell
       backButton={back}
@@ -214,12 +235,7 @@ function RouteComponent() {
             </div>
           </object>
         ) : viewer === "audio" ? (
-          <audio
-            className="mt-3 w-full"
-            controls
-            preload="metadata"
-            src={bytesUrl}
-          />
+          audioPlayer
         ) : viewer === "video" ? (
           /*
            * A VIDEO ELEMENT, WHICH IS WHAT MAKES THE SERVER'S RANGE SUPPORT WORTH HAVING.
@@ -228,12 +244,7 @@ function RouteComponent() {
            * 500 MB file is a file nobody waits for. `preload="metadata"` asks for the length rather
            * than the bytes, so opening the page does not pull the whole file.
            */
-          <video
-            className="mt-3 max-h-[70vh] w-full rounded-lg border border-border bg-black"
-            controls
-            preload="metadata"
-            src={bytesUrl}
-          />
+          videoPlayer
         ) : viewer === "text" || hasText ? (
           /*
            * `bg-card` and a plain `border`, the same surface the credential panel
