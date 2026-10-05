@@ -14,6 +14,10 @@ writes over stdin, since PowerShell reading the console to the end has no buffer
 
 use std::collections::BTreeMap;
 use std::io::Write;
+// Only the test helper reads through the trait; the import is unused in a plain library build, and
+// clippy runs with `-D warnings`, so it is scoped rather than removed.
+#[cfg(test)]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::problem::Problem;
