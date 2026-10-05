@@ -256,7 +256,12 @@ function ServerToolsDetails({
  * Manage which apps and services this coworker can access through Composio and connected tools.
  * Users can allow or dismiss access for the bot.
  */
-export function ConnectionSection({ agentId }: { agentId: string; profile: AgentProfile }) {
+export function ConnectionSection({
+  agentId,
+}: {
+  agentId: string;
+  profile: AgentProfile;
+}) {
   const queryClient = useQueryClient();
   const plugins = useQuery(pluginsSlimQueryOptions());
   const agentPlugins = useQuery(agentPluginsQueryOptions(agentId));

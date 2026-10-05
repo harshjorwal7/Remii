@@ -3044,7 +3044,9 @@ export function buildComposioClient(
       const detail: VendorToolkit | null = await askVendor<unknown>(
         { outcome: `what ${slug} asks for could not be read`, app: slug },
         () => vendor.toolkits.retrieve(slug) as Promise<unknown>,
-      ).then((row) => (typeof row === "object" && row !== null ? (row as VendorToolkit) : null));
+      ).then((row) =>
+        typeof row === "object" && row !== null ? (row as VendorToolkit) : null,
+      );
       if (detail && typeof detail === "object") {
         const conn = connectionOf(detail);
         const name = textOf(detail.name) ?? slug;
