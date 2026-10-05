@@ -321,7 +321,7 @@ await initializeDevActorUser(database, config.singleUser);
  * read on a run.
  */
 const credentialStore = createCredentialStore(database);
-const agentVault = {
+const _agentVault = {
   store: credentialStore,
   reader: credentialStore,
   encryptionKey: config.keyEncryptionKey,

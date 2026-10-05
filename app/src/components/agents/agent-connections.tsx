@@ -256,13 +256,7 @@ function ServerToolsDetails({
  * Manage which apps and services this coworker can access through Composio and connected tools.
  * Users can allow or dismiss access for the bot.
  */
-export function ConnectionSection({
-  agentId,
-  profile,
-}: {
-  agentId: string;
-  profile: AgentProfile;
-}) {
+export function ConnectionSection({ agentId }: { agentId: string; profile: AgentProfile }) {
   const queryClient = useQueryClient();
   const plugins = useQuery(pluginsSlimQueryOptions());
   const agentPlugins = useQuery(agentPluginsQueryOptions(agentId));
@@ -478,10 +472,8 @@ export function ConnectionSection({
           </div>
 
           {/* Category filter pills */}
-          <div
-            aria-label="Filter by category"
-            className="flex flex-wrap items-center gap-1"
-          >
+          <fieldset className="flex flex-wrap items-center gap-1">
+            <legend className="sr-only">Filter by category</legend>
             {CONNECTED_ACCOUNT_CATEGORIES.map((cat) => {
               const isSelected = selectedCategory === cat.id;
               return (
@@ -505,7 +497,7 @@ export function ConnectionSection({
                 </Button>
               );
             })}
-          </div>
+          </fieldset>
         </div>
       ) : null}
 

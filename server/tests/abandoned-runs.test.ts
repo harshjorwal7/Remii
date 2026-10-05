@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { createDatabase } from "../src/db/client";
 import { runActivity } from "../src/db/schema";
 import { users } from "../src/db/schema";
 import { threadLocks, threads } from "../src/db/schema/threads";
 import { createRunActivityStore } from "../src/activity/store";
 import { createThreadLock, createThreadStore } from "../src/threads/local";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase, } from "./support/database";
 
 /**
  * A RUN NOBODY IS RUNNING MUST NOT KEEP SAYING IT IS.

@@ -75,10 +75,10 @@ let runningInChannel: {
 let activityReads = 0;
 /** Stop requests, addressed by thread — the thing that makes Stop work from a fresh mount. */
 let stopRequests: string[] = [];
-let core: ReturnType<typeof useCopilotKit>["copilotkit"] | undefined;
+let _core: ReturnType<typeof useCopilotKit>["copilotkit"] | undefined;
 
 function CoreProbe() {
-  core = useCopilotKit().copilotkit;
+  _core = useCopilotKit().copilotkit;
   return null;
 }
 
@@ -185,7 +185,7 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   queryClient.clear();
-  core = undefined;
+  _core = undefined;
 });
 afterAll(() => {
   globalThis.fetch = originalFetch;
