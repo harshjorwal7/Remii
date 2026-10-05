@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import { grantCredits } from "../src/billing/metering";
 import { creditLedger, users } from "../src/db/schema";
-import { testDatabase, } from "./support/database";
+import { testDatabase } from "./support/database";
 
 const database = testDatabase();
 const userIds: string[] = [];

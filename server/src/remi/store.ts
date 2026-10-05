@@ -23,7 +23,9 @@ function anyOf(...conditions: (SQL | undefined)[]): SQL {
 
 function requireAll(name: string, conditions: (SQL | undefined)[]): SQL[] {
   if (conditions.length === 0) {
-    throw new Error(`${name}() was called with no conditions, which is not a query`);
+    throw new Error(
+      `${name}() was called with no conditions, which is not a query`,
+    );
   }
   const missing = conditions.indexOf(undefined);
   if (missing !== -1) {
@@ -914,13 +916,19 @@ export function createRemiStore(options: RemiStoreOptions) {
       const limit = Math.min(input.limit ?? 10, 25);
       const scopeCondition = input.taskId
         ? anyOf(
-            allOf(eq(memories.scope, "task"), eq(memories.taskId, input.taskId)),
+            allOf(
+              eq(memories.scope, "task"),
+              eq(memories.taskId, input.taskId),
+            ),
             eq(memories.scope, "global"),
             eq(memories.scope, "persona"),
           )
         : input.botId
           ? anyOf(
-              allOf(eq(memories.scope, "chat"), eq(memories.botId, input.botId)),
+              allOf(
+                eq(memories.scope, "chat"),
+                eq(memories.botId, input.botId),
+              ),
               eq(memories.scope, "global"),
               eq(memories.scope, "persona"),
             )

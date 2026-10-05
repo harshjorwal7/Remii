@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import {
-  searchAndBatchToolsFor,
-} from "../src/remi/composio-tools";
+import { searchAndBatchToolsFor } from "../src/remi/composio-tools";
 import { connectAppTool } from "../src/agents/connect-app";
 import type { GrantedTool } from "../src/plugins/tools";
 import { grantedTools } from "../src/plugins/tools";

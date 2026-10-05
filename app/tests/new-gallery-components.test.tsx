@@ -7,7 +7,7 @@ import {
   test,
 } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { cleanup, render, } from "@testing-library/react";
+import { cleanup, render } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   GALLERY as BUSINESS_GALLERY,

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import { activityKey, createRunActivityStore } from "../src/activity/store";
 import { runActivity, users } from "../src/db/schema";
-import { testDatabase, } from "./support/database";
+import { testDatabase } from "./support/database";
 
 /**
  * One row per run, and what that forces.

@@ -7,7 +7,7 @@ import {
   recallForTurn,
 } from "../src/remi/memory-router";
 import { createRemiStore } from "../src/remi/store";
-import { testDatabase, } from "./support/database";
+import { testDatabase } from "./support/database";
 import { REMII_AGENT_ID } from "../../shared/remii";
 
 /**

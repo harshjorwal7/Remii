@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { users } from "../src/db/schema";
 import { createAgentProfileStore } from "../src/agents/profile-store";
 import { registeredAgentFromRow } from "../src/copilot";
-import { testDatabase, } from "./support/database";
+import { testDatabase } from "./support/database";
 
 /**
  * `bot_add` COULD NOT CREATE ANYTHING ON A DEPLOYMENT WITH NO MANAGED AGENT.

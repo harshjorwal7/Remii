@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { users } from "../src/db/schema";
 import { threads } from "../src/db/schema/threads";
 import { createThreadStore } from "../src/threads/local";
-import { testDatabase, } from "./support/database";
+import { testDatabase } from "./support/database";
 
 /**
  * A THREAD WITH NO OWNER IS A CONVERSATION NOBODY CAN READ.

@@ -6,7 +6,7 @@ import { lastValueFrom, toArray } from "rxjs";
 import { eq } from "drizzle-orm";
 import { threadMessages } from "../src/db/schema";
 import { PostgresAgentRunner, createThreadStore } from "../src/threads/local";
-import { testDatabase, } from "./support/database";
+import { testDatabase } from "./support/database";
 
 /**
  * A RUN'S EVENTS MUST NAME THE RUN'S THREAD.

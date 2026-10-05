@@ -9,7 +9,7 @@ import {
 import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import { testEnvironment } from "./support/environment";
-import { testDatabase, } from "./support/database";
+import { testDatabase } from "./support/database";
 
 /**
  * THE RUNTIME IS NOT A PUBLIC ENDPOINT.

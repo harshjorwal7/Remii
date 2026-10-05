@@ -8,7 +8,7 @@ import { threadMessages, threads } from "../src/db/schema/threads";
 import { createApp } from "../src/app";
 import { createThreadStore } from "../src/threads/local";
 import { testEnvironment } from "./support/environment";
-import { testDatabase, } from "./support/database";
+import { testDatabase } from "./support/database";
 import type { AppVariables } from "../src/auth/guards";
 
 /**

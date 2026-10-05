@@ -280,10 +280,7 @@ export function FaqCard(props: Partial<z.infer<typeof FaqProps>>) {
     <GalleryFrame caption={caption} title={title}>
       <div className="divide-y divide-border/60">
         {items.map((item) => (
-          <div
-            className="py-2.5 first:pt-0 last:pb-0"
-            key={item.question}
-          >
+          <div className="py-2.5 first:pt-0 last:pb-0" key={item.question}>
             <div className="flex items-baseline justify-between gap-2">
               <h5 className="font-semibold text-sm text-foreground">
                 {item.question}
