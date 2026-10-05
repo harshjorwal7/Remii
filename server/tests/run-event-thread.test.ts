@@ -4,10 +4,9 @@ import { EventType } from "@ag-ui/client";
 import type { AbstractAgent, BaseEvent, Message } from "@ag-ui/client";
 import { lastValueFrom, toArray } from "rxjs";
 import { eq } from "drizzle-orm";
-import { createDatabase } from "../src/db/client";
 import { threadMessages } from "../src/db/schema";
 import { PostgresAgentRunner, createThreadStore } from "../src/threads/local";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase, } from "./support/database";
 
 /**
  * A RUN'S EVENTS MUST NAME THE RUN'S THREAD.

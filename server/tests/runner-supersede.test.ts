@@ -93,7 +93,7 @@ function runRequest(threadId: string, agent: AbstractAgent, runId: string) {
 }
 
 /** Subscribe and collect, so a refusal that never delivers an event is observable as such. */
-function collect(stream: Observable<BaseEvent>): Promise<BaseEvent[]> {
+function _collect(stream: Observable<BaseEvent>): Promise<BaseEvent[]> {
   return new Promise((resolve, reject) => {
     const events: BaseEvent[] = [];
     stream.subscribe({
@@ -106,7 +106,7 @@ function collect(stream: Observable<BaseEvent>): Promise<BaseEvent[]> {
   });
 }
 
-function firstEvent(stream: Observable<BaseEvent>): Promise<BaseEvent> {
+function _firstEvent(stream: Observable<BaseEvent>): Promise<BaseEvent> {
   return new Promise((resolve, reject) => {
     const subscription = stream.subscribe({
       next: (event) => {

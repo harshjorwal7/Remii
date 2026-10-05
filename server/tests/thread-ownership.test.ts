@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { createDatabase } from "../src/db/client";
 import { users } from "../src/db/schema";
 import { threads } from "../src/db/schema/threads";
 import { createThreadStore } from "../src/threads/local";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase, } from "./support/database";
 
 /**
  * A THREAD WITH NO OWNER IS A CONVERSATION NOBODY CAN READ.

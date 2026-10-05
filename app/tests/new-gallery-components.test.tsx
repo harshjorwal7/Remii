@@ -7,7 +7,7 @@ import {
   test,
 } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   GALLERY as BUSINESS_GALLERY,
@@ -64,11 +64,6 @@ import {
   ScatterPlotProps,
   GALLERY as VISUALS_GALLERY,
 } from "@/components/gallery/visuals";
-import {
-  GALLERY_COMPONENTS,
-  galleryComponent,
-  galleryManifest,
-} from "@/lib/copilot/gallery-registry";
 import { settleReactWork } from "./settle-react-work";
 
 beforeAll(() => GlobalRegistrator.register({ url: "http://localhost/" }));

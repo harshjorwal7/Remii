@@ -309,7 +309,9 @@ export async function triageTriggerEvent(input: {
   if (keyed.length === 0) return failClosed("triage:no_api_key");
 
   try {
-    const link = keyed[0]!;
+    // Non-empty by construction: the guard above is `keyed.length === 0`.
+    const link = keyed[0];
+    if (!link) throw new Error("a key was matched and no link was built for it");
     const completion = await link.client.chat.completions.create(
       {
         model: link.model,
@@ -587,7 +589,9 @@ export async function handleTriggerEvent(
       .match(userId, normalized.sourceApp)
       .catch(() => []);
     if (matched.length > 0) {
-      const automation = matched[0]!;
+      // Non-empty by construction: the guard above is `matched.length > 0`.
+      const automation = matched[0];
+      if (!automation) throw new Error("match() reported an automation and returned none");
       const actor: AgentActor = { id: userId, role: "user" };
       try {
         const channel = await deps.channelStore.direct(

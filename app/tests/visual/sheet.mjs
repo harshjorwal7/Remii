@@ -15,7 +15,15 @@
  * mascot.
  */
 import { existsSync } from "node:fs";
-import { chromium } from "/home/harsh/.bun/install/global/node_modules/playwright-core/index.mjs";
+/*
+ * `playwright-core` by name, from this repository's own dependencies.
+ *
+ * This imported an absolute path into one person's home directory, which resolved on the machine that
+ * wrote it and threw ERR_MODULE_NOT_FOUND everywhere else. On CI it surfaced as "the mascot sheet no
+ * longer matches its committed picture" — a golden-image failure with nothing wrong with the mascot,
+ * because the comparison never ran. It is a devDependency of the root workspace now, so a fresh clone
+ * and a CI runner get the same one.
+ */
 
 const HERE = new URL(".", import.meta.url).pathname;
 const SHEET = `${HERE}sheet.html`;
@@ -26,6 +34,26 @@ const CHROME = "/usr/bin/google-chrome";
 if (!existsSync(CHROME)) {
   console.error(
     `chrome not found at ${CHROME}; cannot photograph the mascot sheet`,
+  );
+  process.exit(2);
+}
+
+/*
+ * A missing renderer is a skip, not a mismatch.
+ *
+ * `chromium` is imported at module scope, so a machine without `playwright-core` installed used to
+ * die on the import with ERR_MODULE_NOT_FOUND and exit 1 — which reads, from the test, as "the mascot
+ * changed". Exit 2 is the code this file already uses for "I cannot take the picture", and the caller
+ * skips on it.
+ */
+let chromium;
+try {
+  ({ chromium } = await import("playwright-core"));
+} catch (error) {
+  console.error(
+    "playwright-core is not installed, so the mascot cannot be photographed: " +
+      `${error instanceof Error ? error.message : String(error)}. ` +
+      "Install it with `bun install` at the repository root.",
   );
   process.exit(2);
 }

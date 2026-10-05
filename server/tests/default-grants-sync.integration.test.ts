@@ -23,6 +23,7 @@ import {
   users,
 } from "../src/db/schema";
 import { createPluginStore } from "../src/plugins/store";
+import type { ActionPolicy } from "../src/computer/policy";
 import { createAgentProfileStore } from "../src/agents/profile-store";
 
 import { createAuditStore } from "../src/audit";
@@ -67,14 +68,16 @@ describe("default grants and explicit revocations sync", () => {
   const fakeCredentials = {
     revoke: async () => {},
     held: async () => null,
-  } as any;
+  } as unknown as Parameters<typeof createPluginStore>[0]["credentials"];
 
   const store = createPluginStore({
     database: db,
     auditStore,
     credentials: fakeCredentials,
     encryptionKey: "test-encryption-key-that-is-long-enough-32-chars!",
-    policy: () => ({}) as any,
+    // An empty policy, which permits nothing: these assertions are about grants, not about what the
+    // gateway would allow.
+    policy: () => ({ mode: "enforce", deny: [], allow: [] }) as ActionPolicy,
   });
 
   it("syncDefaultGrants only synchronises built-in Bot handoffs", async () => {

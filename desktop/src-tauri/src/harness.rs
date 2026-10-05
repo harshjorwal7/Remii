@@ -552,9 +552,9 @@ mod tests {
 
         let picked = picked.expect("selected harness should resolve after the deployment is ready");
         let picked = picked.expect("crewai is installable");
-        let crate::env::PickedHarness::Installed { image, .. } = picked else {
-            panic!("crewai should install a harness image");
-        };
+        // Irrefutable now that `PickedHarness` has one variant, so there is nothing left to
+        // refuse: the pattern is the assertion.
+        let crate::env::PickedHarness::Installed { image, .. } = picked;
         assert_eq!(image, "ghcr.io/harshjorwal7/remii-agent-crewai@sha256:abc");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -572,10 +572,7 @@ mod tests {
             mastra,
             remote_agent_id,
             ..
-        } = crewai
-        else {
-            panic!("crewai should install a harness image");
-        };
+        } = crewai;
         assert_eq!(image, "ghcr.io/harshjorwal7/remii-agent-crewai@sha256:abc");
         assert_eq!(port, 4202);
         assert!(!mastra);
@@ -595,10 +592,7 @@ mod tests {
             mastra,
             remote_agent_id,
             ..
-        } = mastra
-        else {
-            panic!("mastra should install a harness image");
-        };
+        } = mastra;
         assert!(mastra);
         assert_eq!(remote_agent_id, "remii");
         let _ = std::fs::remove_dir_all(&root);
@@ -622,10 +616,7 @@ mod tests {
             let crate::env::PickedHarness::Installed {
                 run_path: picked_run_path,
                 ..
-            } = picked
-            else {
-                panic!("{id} should install a harness image");
-            };
+            } = picked;
             assert_eq!(picked_run_path, run_path);
         }
         let _ = std::fs::remove_dir_all(&root);
@@ -674,9 +665,7 @@ mod tests {
             let resolved = picked(Some(&choice(&row.id)), &root)
                 .expect("refused")
                 .expect("nothing");
-            let crate::env::PickedHarness::Installed { image, .. } = resolved else {
-                panic!("{} should install a harness image", row.id);
-            };
+            let crate::env::PickedHarness::Installed { image, .. } = resolved;
             let host = image
                 .split('/')
                 .next()

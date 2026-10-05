@@ -14,12 +14,17 @@
  * twice is a no-op: `close` finds no open session and returns null.
  */
 
-import { eq } from "drizzle-orm";
 import { createComputerMeter } from "../server/src/billing/computer-meter";
 import { createDatabase } from "../server/src/db/client";
-import { userComputers } from "../server/src/db/schema/computer";
 
-const database = createDatabase(process.env.DATABASE_URL!);
+// Said here rather than with an assertion: a script run without DATABASE_URL should print the one
+// line that names what is missing, not fail inside Drizzle with a connection string of `undefined`.
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  console.error("DATABASE_URL is not set; there is no database to repair.");
+  process.exit(1);
+}
+const database = createDatabase(databaseUrl);
 const meter = createComputerMeter(database);
 
 const open = await database.execute(

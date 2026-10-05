@@ -60,7 +60,7 @@ import {
 import type { HostAccessBroker } from "./host-access/broker";
 import { createHostAccessRoutes } from "./host-access/routes";
 import type { OnboardingStore } from "./people/onboarding";
-import { type SkillDrafts } from "./plugins/skill-drafter";
+import type { SkillDrafts } from "./plugins/skill-drafter";
 import type { ComposioBroker } from "./plugins/broker";
 import { createPluginRoutes } from "./plugins/routes";
 import {

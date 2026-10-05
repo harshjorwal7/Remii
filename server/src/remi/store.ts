@@ -1,6 +1,39 @@
 import { createHash, randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, type SQL, sql } from "drizzle-orm";
+
+/**
+ * `and`/`or` over conditions that are all present, checked rather than asserted.
+ *
+ * Drizzle DROPS an `undefined` argument instead of refusing it, so the `!` these call sites used to
+ * carry was hiding a real shape: `and(a, undefined)` is `a`, which quietly narrows nothing and, on a
+ * memory read, quietly returns rows the caller meant to exclude. Every condition below is built from
+ * a value the caller already checked, so the check should never fire — and if one ever does, it says
+ * which condition was missing instead of returning a wider answer than the question asked for.
+ */
+function allOf(...conditions: (SQL | undefined)[]): SQL {
+  const present = requireAll("allOf", conditions);
+  return and(...present) as SQL;
+}
+
+function anyOf(...conditions: (SQL | undefined)[]): SQL {
+  const present = requireAll("anyOf", conditions);
+  return or(...present) as SQL;
+}
+
+function requireAll(name: string, conditions: (SQL | undefined)[]): SQL[] {
+  if (conditions.length === 0) {
+    throw new Error(`${name}() was called with no conditions, which is not a query`);
+  }
+  const missing = conditions.indexOf(undefined);
+  if (missing !== -1) {
+    throw new Error(
+      `${name}() condition ${missing} of ${conditions.length} was undefined; ` +
+        "Drizzle would have dropped it and answered a wider question than the one asked",
+    );
+  }
+  return conditions as SQL[];
+}
 import type { Database } from "../db/client";
 import {
   artifacts,
@@ -480,20 +513,20 @@ export function createRemiStore(options: RemiStoreOptions) {
       ];
       if (input.scope && input.taskId && input.scope === "task")
         conditions.push(
-          and(eq(memories.scope, "task"), eq(memories.taskId, input.taskId))!,
+          allOf(eq(memories.scope, "task"), eq(memories.taskId, input.taskId)),
         );
       else if (input.scope) conditions.push(eq(memories.scope, input.scope));
       else if (input.taskId)
         conditions.push(
-          or(
+          anyOf(
             eq(memories.taskId, input.taskId),
-            and(eq(memories.scope, "global"), isNull(memories.taskId)),
-            and(eq(memories.scope, "persona"), isNull(memories.taskId)),
-          )!,
+            allOf(eq(memories.scope, "global"), isNull(memories.taskId)),
+            allOf(eq(memories.scope, "persona"), isNull(memories.taskId)),
+          ),
         );
       else if (input.botId)
         conditions.push(
-          or(eq(memories.botId, input.botId), isNull(memories.botId))!,
+          anyOf(eq(memories.botId, input.botId), isNull(memories.botId)),
         );
       const rows = await database
         .select({
@@ -614,27 +647,27 @@ export function createRemiStore(options: RemiStoreOptions) {
         const fallbackScope = input.scope
           ? eq(memories.scope, input.scope)
           : input.taskId
-            ? or(
-                and(
+            ? anyOf(
+                allOf(
                   eq(memories.scope, "task"),
                   eq(memories.taskId, input.taskId),
                 ),
                 eq(memories.scope, "global"),
                 eq(memories.scope, "persona"),
-              )!
+              )
             : input.botId
-              ? or(
-                  and(
+              ? anyOf(
+                  allOf(
                     eq(memories.scope, "chat"),
                     eq(memories.botId, input.botId),
                   ),
                   eq(memories.scope, "global"),
                   eq(memories.scope, "persona"),
-                )!
-              : or(
+                )
+              : anyOf(
                   eq(memories.scope, "global"),
                   eq(memories.scope, "persona"),
-                )!;
+                );
         const fallback = await database
           .select({ id: memories.id, content: memories.content })
           .from(memories)
@@ -658,11 +691,11 @@ export function createRemiStore(options: RemiStoreOptions) {
                * should err towards returning too much. The ranking that follows still orders what comes
                * back, and the caller's own `limit` bounds it.
                */
-              or(
+              anyOf(
                 ...keywords
                   .slice(0, 6)
                   .map((word) => sql`${memories.content} ILIKE ${`%${word}%`}`),
-              )!,
+              ),
             ),
           )
           .limit(limit);
@@ -880,18 +913,18 @@ export function createRemiStore(options: RemiStoreOptions) {
     }): Promise<Array<{ id: string; content: string }>> {
       const limit = Math.min(input.limit ?? 10, 25);
       const scopeCondition = input.taskId
-        ? or(
-            and(eq(memories.scope, "task"), eq(memories.taskId, input.taskId)),
+        ? anyOf(
+            allOf(eq(memories.scope, "task"), eq(memories.taskId, input.taskId)),
             eq(memories.scope, "global"),
             eq(memories.scope, "persona"),
-          )!
+          )
         : input.botId
-          ? or(
-              and(eq(memories.scope, "chat"), eq(memories.botId, input.botId)),
+          ? anyOf(
+              allOf(eq(memories.scope, "chat"), eq(memories.botId, input.botId)),
               eq(memories.scope, "global"),
               eq(memories.scope, "persona"),
-            )!
-          : or(eq(memories.scope, "global"), eq(memories.scope, "persona"))!;
+            )
+          : anyOf(eq(memories.scope, "global"), eq(memories.scope, "persona"));
       const rows = await database
         .select({ id: memories.id, content: memories.content })
         .from(memoryEntityLinks)
@@ -1088,7 +1121,7 @@ export function createRemiStore(options: RemiStoreOptions) {
           .where(
             and(
               eq(artifacts.userId, userId),
-              or(eq(artifacts.id, idOrName), eq(artifacts.name, idOrName))!,
+              anyOf(eq(artifacts.id, idOrName), eq(artifacts.name, idOrName)),
             ),
           )
           .limit(1);

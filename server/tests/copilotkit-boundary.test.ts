@@ -6,11 +6,10 @@ import {
   CopilotRuntime,
   InMemoryAgentRunner,
 } from "@copilotkit/runtime/v2";
-import { createDatabase } from "../src/db/client";
 import { createApp } from "../src/app";
 import { loadConfig } from "../src/config";
 import { testEnvironment } from "./support/environment";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase, } from "./support/database";
 
 /**
  * THE RUNTIME IS NOT A PUBLIC ENDPOINT.

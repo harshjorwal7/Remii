@@ -3,13 +3,12 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { loadConfig } from "../src/config";
-import { createDatabase } from "../src/db/client";
 import { users } from "../src/db/schema";
 import { threadMessages, threads } from "../src/db/schema/threads";
 import { createApp } from "../src/app";
 import { createThreadStore } from "../src/threads/local";
 import { testEnvironment } from "./support/environment";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase, } from "./support/database";
 import type { AppVariables } from "../src/auth/guards";
 
 /**
@@ -41,7 +40,7 @@ const threadStore = createThreadStore(database);
 const OWNER = "deleg-read-owner";
 const STRANGER = "deleg-read-stranger";
 const createdThreadIds: string[] = [];
-const createdChannelIds: string[] = [];
+const _createdChannelIds: string[] = [];
 
 const config = loadConfig(
   testEnvironment({ AGENT_TOOL_TOKEN: "deleg-read-token" }),

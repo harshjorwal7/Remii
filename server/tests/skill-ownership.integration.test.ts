@@ -199,7 +199,7 @@ function routesAs(actor: {
      * than a failing one. `sharedBot` is deliberately NOT Alice's, so this is the assertion that
      * actually distinguishes the two questions.
      */
-    async (actor, botId) => botId !== sharedBot && botId === aliceBot,
+    async (_actor, botId) => botId !== sharedBot && botId === aliceBot,
   );
 }
 

@@ -76,7 +76,7 @@ function appFor(userId: string) {
     "/",
     createRemiRoutes({
       database,
-      requireUser: async (context, next) => next(),
+      requireUser: async (_context, next) => next(),
       blobs: createLocalBlobStore(root),
     }),
   );

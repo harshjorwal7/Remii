@@ -28,7 +28,6 @@ import {
   parseChannelInput,
 } from "../src/channels/routes";
 import { createThreadIdentity } from "../src/channels/thread-identity";
-import { loadConfig } from "../src/config";
 import { createDatabase } from "../src/db/client";
 import {
   agentProfiles,
@@ -41,7 +40,6 @@ import {
   users,
 } from "../src/db/schema";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
-import { testEnvironment } from "./support/environment";
 import { createTestApp } from "./support/app";
 
 const actor = {

@@ -1,4 +1,4 @@
-import { eq, isNull, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createDatabase } from "../src/db/client";
 import { runActivity, threads } from "../src/db/schema";
 

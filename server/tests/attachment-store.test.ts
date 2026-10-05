@@ -10,7 +10,6 @@ import {
   createAttachmentRoutes,
   createChannelAttachmentRoutes,
 } from "../src/channels/attachments";
-import { loadConfig } from "../src/config";
 import { createDatabase } from "../src/db/client";
 import {
   attachments,
@@ -20,7 +19,6 @@ import {
 } from "../src/db/schema";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
 import { createTestApp } from "./support/app";
-import { testEnvironment } from "./support/environment";
 
 const databaseUrl = testDatabaseUrl();
 const database = createDatabase(databaseUrl, TEST_POOL);

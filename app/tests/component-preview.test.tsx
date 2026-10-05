@@ -80,11 +80,12 @@ test("admin previews asynchronously loaded published source with saved samples i
   // Held so the teardown below can unmount it, which is the whole fix for the removeChild failure.
   let mounted: ReturnType<typeof render> | undefined;
   try {
-    const view = (mounted = render(
+    mounted = render(
       <QueryClientProvider client={queryClient}>
         <PublishedComponentPreview kind="sandboxed" name={PUBLISHED.name} />
       </QueryClientProvider>,
-    ));
+    );
+    const view = mounted;
     expect(view.queryByTestId("sandbox-renderer")).toBeNull();
     const sandbox = await view.findByTestId("sandbox-renderer");
     expect(fetcher.mock.calls[0]?.[0]).toBe("/api/sandboxed");

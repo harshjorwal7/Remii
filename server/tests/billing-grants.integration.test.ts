@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import { grantCredits } from "../src/billing/metering";
-import { createDatabase } from "../src/db/client";
 import { creditLedger, users } from "../src/db/schema";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase, } from "./support/database";
 
 const database = testDatabase();
 const userIds: string[] = [];

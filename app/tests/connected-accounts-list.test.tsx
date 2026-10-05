@@ -3,7 +3,6 @@ import type { PluginServer } from "@/lib/plugins/queries";
 import {
   appMatchesCategory,
   brokeredAccountsListedOn,
-  CONNECTED_ACCOUNT_CATEGORIES,
   sortConnectedFirst,
 } from "@/routes/_authed/settings/connected-accounts/index";
 

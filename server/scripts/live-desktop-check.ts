@@ -318,9 +318,13 @@ try {
   // 5. Persistence.
   console.log("\npausing and resuming…");
   await provisioner.stopIdle(scope, "idle");
+  // Read the row once. `!` here would have said "the row is there", which is a second claim about
+  // the same thing this check is making, and a failure inside it would be a TypeError rather than
+  // the sentence below it.
+  const paused = store.read();
   ok(
     "the desktop was paused, not deleted",
-    (store.read()!.status as string) === "STOPPED",
+    paused !== null && (paused.status as string) === "STOPPED",
   );
 
   const resumed = await provisioner.ensure(scope);

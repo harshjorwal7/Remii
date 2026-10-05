@@ -8,14 +8,13 @@ import {
 } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { createDatabase } from "../src/db/client";
 import { runActivity, users } from "../src/db/schema";
 import { threadLocks } from "../src/db/schema/threads";
 import { workItems } from "../src/db/schema/work";
 import { createThreadLock, ThreadLockDenied } from "../src/threads/local";
 import { createWorkQueue } from "../src/work/queue";
 import { sweepAbandonedRuns } from "../src/activity/abandoned";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase, } from "./support/database";
 
 /**
  * A LOCK IS A LEASE, AND A LEASE HAS TWO ENDS.

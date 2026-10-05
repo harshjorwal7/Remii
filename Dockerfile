@@ -203,15 +203,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends sudo \
 ENV WORKSPACE_DIR=/workspace
 ENV PROFILES_DIR=/profiles
 
-# The browser is on loopback inside this container and reachable from nowhere else.
+# NO SHARED COMPUTER IS NAMED HERE, and naming one is now a refusal rather than a default.
 #
-# No private-host allowance is set for it, and none is needed. Reaching the sibling process goes
-# through `checkComputerAddress`, which decides on the protocol and the metadata floor and never
-# consults `AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS`. That switch governs where a *Bot* may browse and
-# which endpoint one may be registered against, so setting it here bought nothing for this address
-# and let a Bot reach whatever this container's network reaches, which on a default bridge is the
-# host's LAN.
-ENV AGENT_COMPUTER_URL=http://127.0.0.1:4100
+# `AGENT_COMPUTER_URL` used to point at a browser service on loopback inside this image. That
+# service is gone with `agent-computer/` — one computer per person is an E2B sandbox or a
+# supervisor container now — and the variable now names the one configuration strict per-user
+# sandboxing forbids: one /workspace, one shell and one browser shared by everybody. Setting it
+# here made every deployment built from this image refuse to start, and it pointed at a port
+# nothing was listening on besides. A computer is configured by `E2B_API_KEY`,
+# `COMPUTER_SUPERVISOR_URL` or `COMPUTER_SANDBOX_NAMESPACE`; with none of them there is no
+# computer, which is a state the server serves rather than a failure.
 
 # NOTHING THAT MATTERS RUNS AS ROOT.
 #

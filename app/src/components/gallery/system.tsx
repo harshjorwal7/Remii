@@ -159,8 +159,11 @@ export function TimelineCard(props: Partial<z.infer<typeof TimelineProps>>) {
   return (
     <GalleryFrame caption={caption} title={title ?? "Event timeline"}>
       <ol className="relative ml-2 space-y-4 border-l border-border pl-4">
-        {events.map((evt, idx) => (
-          <li className="relative" key={`${evt.time}-${idx}`}>
+        {events.map((evt) => (
+          // A time and a title are what an entry is; two entries at the same minute with the same
+          // heading are the same entry as far as this list can tell, and were before the index was
+          // dropped out of the key to keep a reorder from remounting every row.
+          <li className="relative" key={`${evt.time}:${evt.title}`}>
             <span
               aria-hidden="true"
               className={`absolute -left-[21px] top-1.5 size-2.5 rounded-full border-2 border-card ${
@@ -339,7 +342,7 @@ export function CodeDiffCard(props: Partial<z.infer<typeof CodeDiffProps>>) {
       <div className="overflow-x-auto rounded-md border border-border bg-muted/40 font-mono text-xs">
         <table className="w-full border-collapse">
           <tbody>
-            {lines.map((l, idx) => {
+            {lines.map((l) => {
               const isAdd = l.type === "add";
               const isRemove = l.type === "remove";
               return (
@@ -351,7 +354,7 @@ export function CodeDiffCard(props: Partial<z.infer<typeof CodeDiffProps>>) {
                         ? "bg-red-500/10 text-red-900 dark:text-red-200"
                         : "text-foreground/80"
                   }`}
-                  key={idx}
+                  key={`${l.type}:${l.oldLineNumber ?? ""}:${l.newLineNumber ?? ""}:${l.content}`}
                 >
                   <td className="w-8 select-none border-r border-border/50 px-2 py-0.5 text-right text-[11px] text-muted-foreground/60 tabular-nums">
                     {l.oldLineNumber ?? ""}
@@ -418,10 +421,10 @@ export function LogStreamCard(props: Partial<z.infer<typeof LogStreamProps>>) {
         {lines.length === 0 ? (
           <p className="text-neutral-500">No logs captured.</p>
         ) : (
-          lines.map((entry, idx) => (
+          lines.map((entry) => (
             <div
               className="flex items-start gap-2 py-0.5 leading-relaxed"
-              key={idx}
+              key={`${entry.timestamp ?? ""}:${entry.level}:${entry.message}`}
             >
               {entry.timestamp ? (
                 <span className="shrink-0 text-neutral-500 tabular-nums select-none">

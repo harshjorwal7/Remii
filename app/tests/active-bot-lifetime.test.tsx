@@ -7,7 +7,7 @@ import {
   test,
 } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { cleanup, render } from "@testing-library/react";
+import { act, cleanup, render } from "@testing-library/react";
 import {
   ActiveBotProvider,
   useActiveBot,
@@ -55,6 +55,22 @@ afterEach(cleanup);
 const held: { holder: { current: string } | null } = { holder: null };
 const read = () => held.holder?.current ?? "unread";
 
+/**
+ * Effects have run, before anything is read.
+ *
+ * `useActiveBot` declares the Bot from inside `useEffect`, and `render` normally flushes passive
+ * effects before it returns. It is not guaranteed to: React 19 hands that work to its scheduler, and
+ * under some environments (CI among them) the callback has not run by the time `render` returns, so
+ * the holder still reads `"default"` and this file failed with
+ * `Expected: "bot-1" / Received: "default"` — on a machine where the code is correct. Draining the
+ * scheduler inside `act` makes the order the test means to assert the order it gets.
+ */
+async function settled() {
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
 function Probe() {
   held.holder = useActiveBotHolder();
   return null;
@@ -66,24 +82,26 @@ function Surface({ botId }: { botId: string | undefined }) {
 }
 
 describe("a Bot declared by a surface that has gone away", () => {
-  test("is still what a pending tool call is addressed to", () => {
+  test("is still what a pending tool call is addressed to", async () => {
     const view = render(
       <ActiveBotProvider>
         <Surface botId="bot-1" />
         <Probe />
       </ActiveBotProvider>,
     );
+    await settled();
     expect(read()).toBe("bot-1");
 
     // The person walks to another page in the app. The run is still going.
     view.unmount();
+    await settled();
 
     // Not the placeholder. That value has no agent behind it, so a call sent
     // there cannot be carried out and the turn dies where it stood.
     expect(read()).toBe("bot-1");
   });
 
-  test("a second surface still takes the value for itself", () => {
+  test("a second surface still takes the value for itself", async () => {
     // The restore exists so one channel cannot leave its Bot addressed to
     // whatever mounts next, and that has to keep working.
     const first = render(
@@ -92,8 +110,10 @@ describe("a Bot declared by a surface that has gone away", () => {
         <Probe />
       </ActiveBotProvider>,
     );
+    await settled();
     expect(read()).toBe("bot-1");
     first.unmount();
+    await settled();
 
     render(
       <ActiveBotProvider>
@@ -101,10 +121,11 @@ describe("a Bot declared by a surface that has gone away", () => {
         <Probe />
       </ActiveBotProvider>,
     );
+    await settled();
     expect(read()).toBe("bot-2");
   });
 
-  test("a surface that declares nothing takes the placeholder", () => {
+  test("a surface that declares nothing takes the placeholder", async () => {
     // Before anything has declared a Bot there is nothing to stand on, and the
     // placeholder is the honest answer: the tool refuses it with its own
     // sentence rather than addressing a Bot that does not exist.
@@ -114,6 +135,7 @@ describe("a Bot declared by a surface that has gone away", () => {
         <Probe />
       </ActiveBotProvider>,
     );
+    await settled();
     expect(read()).toBe("default");
   });
 });

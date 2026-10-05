@@ -17,7 +17,7 @@ function composeFile() {
   );
 }
 
-function rootDockerfile() {
+function _rootDockerfile() {
   return readFileSync(join(import.meta.dir, "..", "Dockerfile"), "utf8");
 }
 

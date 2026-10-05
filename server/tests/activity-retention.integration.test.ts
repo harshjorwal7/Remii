@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import { sweepRunActivity } from "../src/activity-retention";
-import { createDatabase } from "../src/db/client";
 import { runActivity, users } from "../src/db/schema";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase, testDatabaseUrl } from "./support/database";
 
 /**
  * `run_activity` has to be able to stop growing.

@@ -181,11 +181,14 @@ function RouteComponent() {
         <form className="flex flex-col gap-3.5" onSubmit={handleSubmit}>
           {/* Schedule Name */}
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+            <label
+              htmlFor="schedule-name"
+              className="mb-1.5 block text-xs font-medium text-muted-foreground"
+            >
               Schedule name
             </label>
             <Input
-              aria-label="Schedule name"
+              id="schedule-name"
               onChange={(event) => setName(event.target.value)}
               placeholder="e.g. Daily Standup Briefing"
               value={name}
@@ -195,10 +198,14 @@ function RouteComponent() {
           {/* Assigned Agent - Only user's own agents */}
           {agents.length > 0 && (
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              <label
+                htmlFor="schedule-agent"
+                className="mb-1.5 block text-xs font-medium text-muted-foreground"
+              >
                 Assigned coworker
               </label>
               <Select
+                id="schedule-agent"
                 value={selectedBotId || activeAgent?.id || ""}
                 onValueChange={(val) => {
                   if (typeof val === "string") setSelectedBotId(val);
@@ -383,11 +390,14 @@ function RouteComponent() {
 
           {/* Prompt / Instruction */}
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+            <label
+              htmlFor="schedule-prompt"
+              className="mb-1.5 block text-xs font-medium text-muted-foreground"
+            >
               What should the Bot do each time?
             </label>
             <Textarea
-              aria-label="What the Bot should do"
+              id="schedule-prompt"
               onChange={(event) => setPrompt(event.target.value)}
               placeholder="e.g. Summarize top pull requests and pending issues, then post a concise daily brief into our team channel."
               value={prompt}

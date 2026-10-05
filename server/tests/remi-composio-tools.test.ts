@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import {
-  COMPOSIO_TOOL_NAMES,
   searchAndBatchToolsFor,
 } from "../src/remi/composio-tools";
 import { connectAppTool } from "../src/agents/connect-app";
@@ -123,7 +122,7 @@ test("connect_app enables a missing app and returns the connect link", async () 
   const answer = JSON.parse(await tool.execute({ app: "gmail" }));
 
   expect(added).not.toBeNull();
-  expect(added!["slug"]).toBe("gmail");
+  expect(added!.slug).toBe("gmail");
   expect(answer.ok).toBe(true);
   expect(answer.connectUrl).toBe("https://connect.example/gmail");
 });

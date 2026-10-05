@@ -59,6 +59,18 @@ describe("the mascot sheet", () => {
     const code = await compared.exited;
     const report = `${out}${err}`.trim();
 
+    /*
+     * Exit code 2 is the photograph saying it cannot take one — no Chrome, no playwright — which is
+     * a skip, and it is skipped loudly for the same reason the Chrome check above returns early: a
+     * visual test that silently stops running is worse than no visual test, because it looks like
+     * coverage. It is a separate code precisely so a missing renderer is never reported as a
+     * difference in the mascot.
+     */
+    if (code === 2) {
+      console.warn(`skipping the mascot visual test: ${report}`);
+      return;
+    }
+
     // The exit code is the assertion and the report is the message. A bare non-zero code tells nobody
     // what changed, and a string matcher over a multi-line report fails less legibly than printing it.
     if (code !== 0) {

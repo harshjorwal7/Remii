@@ -35,14 +35,14 @@ const json = (body: unknown) =>
   });
 
 let holder: "bot" | "human" = "bot";
-let streamCalls = 0;
+let _streamCalls = 0;
 /** How many times the overlay's own Take control was pressed. */
-let takeCalls = 0;
+let _takeCalls = 0;
 
 function answerEndpoints(input: unknown) {
   const path = String(input);
   if (path.includes("/desktop/stream")) {
-    streamCalls += 1;
+    _streamCalls += 1;
     return json({
       url: "https://6080-sbx-abc.e2b.app/vnc.html",
       authKey: "pw",
@@ -51,7 +51,7 @@ function answerEndpoints(input: unknown) {
     });
   }
   if (path.endsWith("/control/take")) {
-    takeCalls += 1;
+    _takeCalls += 1;
     holder = "human";
     return json({ holder: "human", since: "", requested: false });
   }
@@ -82,8 +82,8 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   holder = "bot";
-  streamCalls = 0;
-  takeCalls = 0;
+  _streamCalls = 0;
+  _takeCalls = 0;
 });
 
 afterAll(() => {

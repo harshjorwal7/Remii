@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentProfile } from "../src/agents/profile-types";
+import type { ActionPolicy } from "../src/computer/policy";
 import {
   BOT_ADMIN_TOOL_NAMES,
   botAdminToolsFor,
@@ -258,7 +259,7 @@ function fakes(
       write: async (_userId: string, text: string) => text,
     },
     policyStore: {
-      set: async (policy: any, _by?: string, _userId?: string) => {
+      set: async (policy: ActionPolicy, _by?: string, _userId?: string) => {
         state.settings.actionPolicy = (policy.deny ?? []).join("\n");
       },
       get: () => ({

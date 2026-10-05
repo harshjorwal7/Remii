@@ -32,7 +32,14 @@ if (!USER || !apiKey) {
   process.exit(2);
 }
 
-const database = createDatabase(process.env.DATABASE_URL!);
+// Said here rather than with an assertion: a script run without DATABASE_URL should print the one
+// line that names what is missing, not fail inside Drizzle with a connection string of `undefined`.
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  console.error("DATABASE_URL is not set; there is no database to repair.");
+  process.exit(1);
+}
+const database = createDatabase(databaseUrl);
 const store = createUserComputerStore(database);
 const connection = { apiKey };
 

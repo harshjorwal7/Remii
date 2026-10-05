@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { createDatabase } from "../src/db/client";
 import { userComputers } from "../src/db/schema/computer";
 import {

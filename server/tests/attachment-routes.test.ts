@@ -20,7 +20,6 @@ import {
   markAttachmentsSent,
   MAX_STAGED_ATTACHMENTS_PER_UPLOADER,
 } from "../src/channels/attachments";
-import { loadConfig } from "../src/config";
 import type { Database } from "../src/db/client";
 import { createDatabase } from "../src/db/client";
 import {
@@ -32,7 +31,6 @@ import {
 } from "../src/db/schema";
 import { createTestApp } from "./support/app";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
-import { testEnvironment } from "./support/environment";
 
 const databaseUrl = testDatabaseUrl();
 const database = createDatabase(databaseUrl, TEST_POOL);

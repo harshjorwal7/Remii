@@ -99,9 +99,8 @@ describe("the computer bridge", () => {
 
   test("the shell takes a command, and is the only tool that runs one", () => {
     const shell = tools.find((t) => t.name === "computer_run_command");
-    const shape = Object.keys(
-      (shell?.parameters as unknown as { shape?: unknown }).shape as object,
-    );
+    const parameters = shell?.parameters as unknown as { shape?: unknown };
+    const shape = Object.keys(parameters?.shape as object);
     expect(shape).toContain("command");
     // Nothing else here executes anything; a tool that quietly grew a `command` would be the same
     // capability under a different name.

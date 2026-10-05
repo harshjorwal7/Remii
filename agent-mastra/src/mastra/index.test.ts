@@ -437,7 +437,7 @@ describe("Remii Mastra provider requests", () => {
              * restoring only what this case names is the only spelling that means "absent", because
              * the AI SDK reads `""` as a present-but-blank key and sends a request with it.
              */
-            "const KEYS = " + JSON.stringify(credentialEnv(choice)) + ";",
+            `const KEYS = ${JSON.stringify(credentialEnv(choice))};`,
             'for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]) {',
             "  if (name in KEYS) process.env[name] = KEYS[name];",
             "  else delete process.env[name];",

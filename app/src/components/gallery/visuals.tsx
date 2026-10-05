@@ -279,13 +279,16 @@ export function HeatmapCard(props: Partial<z.infer<typeof HeatmapProps>>) {
                   {yLabel}
                 </span>
                 <div className="flex flex-1 gap-1">
-                  {xAxis.map((_, xIdx) => {
+                  {xAxis.map((xLabel, xIdx) => {
                     const val = gridMap.get(`${xIdx},${yIdx}`) ?? 0;
                     const intensity = max > 0 ? val / max : 0;
                     return (
                       <div
                         className="flex-1 min-w-[28px] h-7 rounded-[4px] border border-border/40 transition-colors flex items-center justify-center text-[10px] font-mono tabular-nums"
-                        key={`${xIdx}-${yIdx}`}
+                        // The two axis labels, because that is what a cell IS: "Tuesday, 14:00". The
+                        // indices are how the value is looked up and are not an identity — a heatmap
+                        // that got one more column would otherwise remount every cell to its right.
+                        key={`${yLabel}:${xLabel}`}
                         style={{
                           backgroundColor:
                             val === 0

@@ -40,10 +40,10 @@ export function ScheduleCard(props: Partial<z.infer<typeof ScheduleProps>>) {
       title={title}
     >
       <div className="space-y-2.5">
-        {events.map((evt, idx) => (
+        {events.map((evt) => (
           <div
             className="flex items-start gap-3 rounded-lg border border-border/80 bg-card p-2.5 transition-colors"
-            key={`${evt.time}-${idx}`}
+            key={`${evt.time}:${evt.title}`}
           >
             <div className="w-20 shrink-0 text-xs font-semibold tabular-nums text-muted-foreground">
               {evt.time}
@@ -228,10 +228,10 @@ export function KanbanCard(props: Partial<z.infer<typeof KanbanProps>>) {
               </span>
             </div>
             <div className="space-y-2">
-              {col.cards.map((item, idx) => (
+              {col.cards.map((item) => (
                 <div
                   className="rounded-md border border-border bg-card p-2 text-xs shadow-2xs"
-                  key={`${item.title}-${idx}`}
+                  key={item.title}
                 >
                   <p className="font-medium text-foreground leading-snug">
                     {item.title}
@@ -279,10 +279,10 @@ export function FaqCard(props: Partial<z.infer<typeof FaqProps>>) {
   return (
     <GalleryFrame caption={caption} title={title}>
       <div className="divide-y divide-border/60">
-        {items.map((item, idx) => (
+        {items.map((item) => (
           <div
             className="py-2.5 first:pt-0 last:pb-0"
-            key={`${item.question}-${idx}`}
+            key={item.question}
           >
             <div className="flex items-baseline justify-between gap-2">
               <h5 className="font-semibold text-sm text-foreground">

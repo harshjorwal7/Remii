@@ -1,8 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { createDatabase } from "../src/db/client";
 import { createRemiStore } from "../src/remi/store";
-import { TEST_POOL, testDatabase, testDatabaseUrl } from "./support/database";
+import { testDatabase, } from "./support/database";
 import { REMII_AGENT_ID } from "../../shared/remii";
 
 /**

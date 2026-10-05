@@ -158,7 +158,7 @@ describe("the watch panel, which has no turn of its own", () => {
   });
 
   test("opens the live stream rather than only reporting a screen it could have sampled", async () => {
-    const { container } = await mount({
+    await mount({
       computerId: "panel-bot",
       followingRun: true,
       name: "Panel Bot",

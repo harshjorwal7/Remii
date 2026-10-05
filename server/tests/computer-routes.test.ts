@@ -69,7 +69,7 @@ const member: AuthenticatedActor = {
   role: "user",
 };
 
-const administrator: AuthenticatedActor = {
+const _administrator: AuthenticatedActor = {
   id: "admin-1",
   email: "admin@remii.test",
   role: "admin",

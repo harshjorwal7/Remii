@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { OnboardingStore } from "../src/people/onboarding";
 import { createTestApp } from "./support/app";
 
-const MEMBER = {
+const _MEMBER = {
   id: "member-1",
   email: "member@remii.test",
   name: "A Member",

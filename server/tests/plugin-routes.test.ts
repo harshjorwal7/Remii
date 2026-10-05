@@ -1906,7 +1906,7 @@ const AUTHORIZATION_URL = "https://backend.composio.dev/s/a-bearer-capability";
  */
 const RETURN_URL =
   "http://localhost:3001/settings/connected-accounts/composio-linear";
-const ADMIN_RETURN_URL = "http://localhost:3001/admin/plugins/composio-linear";
+const _ADMIN_RETURN_URL = "http://localhost:3001/admin/plugins/composio-linear";
 
 /**
  * A failure in the shape `vendorSentence` reaches into, with the vendor's sentence at the bottom.

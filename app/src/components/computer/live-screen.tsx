@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ControlState } from "@/lib/computers/control";
 import { openDesktopStream, vncUrlFor } from "@/lib/computers/screen";
 
 /**
@@ -95,31 +94,19 @@ type Props = {
   session?: WarmedSession | null;
   /** Called with a human-readable reason when the screen cannot be established. */
   onProblem?: (problem: string | null) => void;
-  /**
-   * Take the wheel, for the overlay's own button.
+  /*
+   * NO `takeControl` PROP, and that is a fix rather than a leftover.
    *
-   * Optional, and optional is a real limit rather than a convenience: without it the overlay still
-   * blocks input, and a person who wanted the wheel has to find the button elsewhere on the panel. That
-   * is worse than having no overlay, so a caller that can supply this should — but the screen must not
-   * depend on it, because a read-only desktop is still correct if the escape hatch is missing.
+   * This component used to accept the pair and ignore both: the overlay that was supposed to draw
+   * their button is not drawn here, so the screen is simply click-through-locked while a Bot drives.
+   * A caller that passed `takeControl` had every reason to believe the overlay had a way out of it,
+   * which is the exact situation the panel's own Take control button exists to prevent. The props are
+   * gone so nothing can wire an escape hatch that does not exist; `driving` remains the parent's to
+   * decide, and the panel owns the control.
    */
-  takeControl?: () => Promise<ControlState | null>;
-  /**
-   * Told when this component took the wheel.
-   *
-   * Separate from `takeControl` because the parent holds the authoritative control state it derives
-   * `driving` from; without being told, the overlay would keep covering a desktop this person now owns.
-   */
-  onControl?: (state: ControlState) => void;
 };
 
-export function LiveScreen({
-  driving,
-  session: warmed,
-  onProblem,
-  takeControl,
-  onControl,
-}: Props) {
+export function LiveScreen({ driving, session: warmed, onProblem }: Props) {
   const [session, setSession] = useState<{ url: string } | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   /*

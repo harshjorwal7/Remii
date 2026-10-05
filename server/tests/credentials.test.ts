@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { loadConfig } from "../src/config";
 import {
   createCredential,
   createCredentialStore,
@@ -15,7 +14,6 @@ import {
 import { createDatabase } from "../src/db/client";
 import { credentials } from "../src/db/schema";
 import { TEST_POOL, testDatabaseUrl } from "./support/database";
-import { testEnvironment } from "./support/environment";
 
 const key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const database = createDatabase(testDatabaseUrl(), TEST_POOL);

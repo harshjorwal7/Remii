@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import type { AppVariables } from "../src/auth/guards";
-import { createApp } from "../src/app";
 import { createTestApp } from "./support/app";
 import { loadConfig } from "../src/config";
 import { createRoutingRoutes } from "../src/routing/routes";

@@ -102,7 +102,8 @@ for (const row of orphans as unknown as {
     });
     continue;
   }
-  const mapping = mappings[0]!;
+  const mapping = mappings[0];
+  if (!mapping) continue;
 
   // The mapping must name a person who exists and belongs to the channel that claims the thread.
   const membership = await database

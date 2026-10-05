@@ -170,11 +170,14 @@ function RouteComponent() {
                 />
               </div>
 
-              <div
-                aria-label="Filter apps by category"
-                className="flex flex-wrap items-center gap-1.5"
-                role="group"
-              >
+              {/*
+               * A `div` with `role="group"` and an `aria-label` is a `fieldset` and a `legend`
+               * spelled the long way round. Spelled the short way, the group's name is announced as
+               * a caption, so a screen reader reading the filter buttons out one at a time says what
+               * each one is rather than what they belong to.
+               */}
+              <fieldset className="flex flex-wrap items-center gap-1.5">
+                <legend className="sr-only">Filter apps by category</legend>
                 {CONNECTED_ACCOUNT_CATEGORIES.map((cat) => {
                   const isSelected = selectedCategory === cat.id;
                   return (
@@ -195,7 +198,7 @@ function RouteComponent() {
                     </Button>
                   );
                 })}
-              </div>
+              </fieldset>
             </div>
           )}
           {visibleYours.length === 0 && visibleBrokered.length === 0 ? (

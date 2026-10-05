@@ -4,7 +4,6 @@ import { and, eq, sql } from "drizzle-orm";
 
 import {
   AgentNotFoundError,
-  AgentNotManageableError,
   type AgentProfileStore,
   createAgentProfileStore,
   ManagedAgentUnavailableError,
@@ -421,7 +420,7 @@ describe("agent profile store integration", () => {
 
   test("stores hiding per user and moves the caller between default and hidden lists", async () => {
     const owner = await createUser();
-    const other = await createUser();
+    const _other = await createUser();
     /*
      * Private, and owned, rather than public.
      *

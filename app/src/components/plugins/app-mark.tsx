@@ -112,7 +112,7 @@ export function AppMark({ serverId, logo, className, alt = "" }: AppMarkProps) {
     return (
       <img
         alt={alt}
-        className={cn("rounded-xs object-contain", className ?? "size-4")}
+        className={cn("size-4 shrink-0 rounded-xs object-contain", className)}
         loading="lazy"
         referrerPolicy="no-referrer"
         src={logo}
@@ -121,5 +121,5 @@ export function AppMark({ serverId, logo, className, alt = "" }: AppMarkProps) {
     );
   }
 
-  return <FallbackMark className={className ?? "size-4"} />;
+  return <FallbackMark className={cn("size-4 shrink-0", className)} />;
 }

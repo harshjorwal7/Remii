@@ -257,10 +257,14 @@ export function DateRangeCard(props: Waiting<DateRangeArgs>) {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1">
+              <label
+                htmlFor="interactive-start-date"
+                className="block text-xs font-medium text-muted-foreground mb-1"
+              >
                 Start date
               </label>
               <input
+                id="interactive-start-date"
                 type="date"
                 className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-xs text-foreground"
                 disabled={sending}
@@ -272,10 +276,14 @@ export function DateRangeCard(props: Waiting<DateRangeArgs>) {
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1">
+              <label
+                htmlFor="interactive-end-date"
+                className="block text-xs font-medium text-muted-foreground mb-1"
+              >
                 End date
               </label>
               <input
+                id="interactive-end-date"
                 type="date"
                 className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-xs text-foreground"
                 disabled={sending}

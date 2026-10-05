@@ -32,7 +32,7 @@ const actor = {
   role: "user",
 } as const;
 
-function channel(overrides: Partial<AgentChannel> = {}): AgentChannel {
+function _channel(overrides: Partial<AgentChannel> = {}): AgentChannel {
   return {
     id: "channel-1",
     name: "Assistant channel",

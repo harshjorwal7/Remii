@@ -691,14 +691,6 @@ export function ComputerView({
         driving={driving}
         session={warmedSession}
         onProblem={setLiveProblem}
-        /*
-         * The overlay's way out, wired to the same pair of calls the panel's own Take control button
-         * uses. Supplied here as well because the overlay is what a person meets FIRST when the Bot is
-         * driving — a read-only screen with no way to take the wheel would be a worse answer than the
-         * one it replaced.
-         */
-        takeControl={() => takeControl(computerId)}
-        onControl={(state) => setControl(state)}
       />
     </div>
   ) : null;
@@ -928,8 +920,6 @@ export function ComputerView({
                         driving={driving}
                         session={warmedSession}
                         onProblem={setLiveProblem}
-                        takeControl={() => takeControl(computerId)}
-                        onControl={(state) => setControl(state)}
                       />
                       {liveProblem ? (
                         <div className="absolute inset-0 flex items-center justify-center bg-background/85 p-4 text-center text-sm text-muted-foreground">
