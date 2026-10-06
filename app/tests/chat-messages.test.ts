@@ -1318,6 +1318,44 @@ describe("a turn's work, folded", () => {
     expect(rest.map((item) => item.kind)).toEqual(["text"]);
   });
 
+  test("connect_app is drawn outside the work disclosure", () => {
+    const [work, connectCard, ...rest] = groupChatWork(
+      toVisibleChatItems([
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "c1",
+              type: "function",
+              function: { name: "composio_search_tools", arguments: "{}" },
+            },
+            {
+              id: "c2",
+              type: "function",
+              function: {
+                name: "connect_app",
+                arguments: '{"app":"linkedin"}',
+              },
+            },
+          ],
+        },
+        PROSE,
+      ]),
+      (name) => name === "connect_app",
+    );
+
+    expect(work?.kind).toBe("work");
+    if (work?.kind !== "work") throw new Error("expected a work group");
+    expect(work.rows.map((row) => row.kind)).toEqual(["tool"]);
+    expect(connectCard?.kind).toBe("tool");
+    if (connectCard?.kind === "tool") {
+      expect(connectCard.toolCall.function.name).toBe("connect_app");
+    }
+    expect(rest.map((item) => item.kind)).toEqual(["text"]);
+  });
+
   test("the work before a drawn component is already answered once prose follows", () => {
     const [work] = itemsWithDrawn([
       {

@@ -56,7 +56,7 @@ const UNAVAILABLE_THREAD: StoredThread = {
   availability: "unavailable",
 };
 
-const THREAD_MESSAGES_DEADLINE_MS = 2500;
+const THREAD_MESSAGES_DEADLINE_MS = 8000;
 
 type ReadThreadMessagesOptions = {
   /** Shorter only in tests; production uses the mount/send ordering deadline. */

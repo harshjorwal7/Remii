@@ -459,6 +459,7 @@ export function createThreadStore(database: Database) {
           else seenResults.set(result.id, new Set([result.content]));
         }
       }
+      const pending: (typeof threadMessages.$inferInsert)[] = [];
       for (const message of messages) {
         const record = message as unknown as Record<string, unknown>;
         // Streamed messages can arrive without an id until the run
@@ -496,26 +497,35 @@ export function createThreadStore(database: Database) {
           if (contents) contents.add(result.content);
           else seenResults.set(result.id, new Set([result.content]));
         }
-        await database
-          .insert(threadMessages)
-          .values({
-            id: `${threadId}:${messageId}`,
-            threadId,
-            messageId,
-            role: String(
-              (storing as unknown as Record<string, unknown>).role ??
-                record.role ??
-                "assistant",
-            ),
-            // Stored as Remi parts, read back as AG-UI in fromRow: the wire keeps
-            // speaking AG-UI while Postgres holds typed parts. Anything without a parts
-            // shape (activities and future roles) stores byte-identical AG-UI instead.
-            content: (toPartsRow(storing) ?? storing) as unknown as Record<
-              string,
-              unknown
-            >,
-          })
-          .onConflictDoNothing();
+        pending.push({
+          id: `${threadId}:${messageId}`,
+          threadId,
+          messageId,
+          role: String(
+            (storing as unknown as Record<string, unknown>).role ??
+              record.role ??
+              "assistant",
+          ),
+          // Stored as Remi parts, read back as AG-UI in fromRow: the wire keeps
+          // speaking AG-UI while Postgres holds typed parts. Anything without a parts
+          // shape (activities and future roles) stores byte-identical AG-UI instead.
+          content: (toPartsRow(storing) ?? storing) as unknown as Record<
+            string,
+            unknown
+          >,
+        });
+      }
+      if (pending.length > 0) {
+        /*
+         * ONE INSERT FOR THE WHOLE BATCH, not a per-message loop.
+         *
+         * The old shape did an awaited INSERT per message: sixty turns in a tool-heavy
+         * conversation was sixty network round trips to Neon, occupying a pooled
+         * connection for tens of seconds and queueing every concurrent read (history
+         * loads included) behind it — the "earlier messages can't load" stall. One
+         * statement holds the connection for a single round trip.
+         */
+        await database.insert(threadMessages).values(pending).onConflictDoNothing();
       }
       await database
         .update(threads)

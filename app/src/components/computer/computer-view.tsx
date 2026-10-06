@@ -235,6 +235,23 @@ type Props = {
    * means "something is happening right now", which it has to be told and which changes what is drawn.
    */
   followingRun?: boolean;
+  /**
+   * A session somebody opened earlier, adopted rather than fetched again.
+   *
+   * OPTIONAL AND NOT A CORRECTNESS REQUIREMENT — without it this component warms its own, the effect below,
+   * and the screen is slower and identical in outcome. It exists for the one caller whose screen the person
+   * was already looking at a while before they got here: the onboarding wizard opens the desktop while they
+   * read the welcome copy, because `openDesktopStream` STARTS a paused desktop and CREATES one that has
+   * never existed, and `live-screen.tsx` puts that first request at twenty seconds or more. Waiting for
+   * this component's own warming to get there would put those twenty seconds between the person's click
+   * and anything appearing, on the one screen where they are forming an opinion of the product.
+   *
+   * ADOPTED AND NOT READ THROUGH. The value is copied into state when it changes, because `LiveScreen`
+   * attaches to a session once and must not be re-pointed at a new one mid-handshake. A parent that
+   * re-created this object on every render would attach, detach and attach again forever, which is worse
+   * than never passing it — so a caller passes the same object for the life of the screen.
+   */
+  session?: WarmedSession | null;
 };
 
 export function ComputerView({
@@ -249,6 +266,7 @@ export function ComputerView({
   finished,
   toolCallId,
   followingRun = false,
+  session: adoptedSession,
 }: Props) {
   const [shot, setShot] = useState<Screenshot | null>(null);
   /*
@@ -366,10 +384,24 @@ export function ComputerView({
    * fetches for real, and reporting here would paint an error over a transcript for a failure nobody
    * asked about.
    */
+  /*
+   * Whether this surface already holds a session, and the two ways it can come to hold one.
+   *
+   * Declared here because it is a DEPENDENCY of the warming effect below and not merely a convenience
+   * for the line after it: a dependency array is evaluated while the component body is still running, so
+   * a `const` declared after the `useEffect` that reads it is a reference to an uninitialised binding
+   * and the screen throws on its first render rather than failing quietly somewhere useful.
+   */
+  const warmed = warmedSession !== null;
+
   useEffect(() => {
     // `settled` first: it is the cheapest statement of "there is a running turn", and it is the state
     // in which the still-frame poll — the only thing that can tell us a computer exists — is running.
-    if (driving || settled || !computerExists || !visualVisible) return;
+    //
+    // `warmed` is last for the opposite reason: a screen that already holds a session has nothing to
+    // warm, and re-asking would attach, detach and attach again rather than save anything.
+    if (driving || settled || !computerExists || !visualVisible || warmed)
+      return;
     let live = true;
     void openDesktopStream()
       .then((opened) => {
@@ -380,7 +412,25 @@ export function ComputerView({
     return () => {
       live = false;
     };
-  }, [driving, settled, computerExists, visualVisible]);
+  }, [driving, settled, computerExists, visualVisible, warmed]);
+
+  /*
+   * A session somebody opened before this surface mounted, taken as-is.
+   *
+   * ADOPTED RATHER THAN READ THROUGH, and that is the whole reason this is an effect instead of
+   * `session ?? warmedSession` at the point of use. `LiveScreen` attaches to a session once, inside its
+   * own effect keyed on the URL; handing it a new object that is equal in value re-runs that attach,
+   * and a parent that built this object during render would hand it a new one every render. Copying it
+   * into state on identity makes the prop mean "here is a session, once", which is what a caller
+   * warming a screen in the background actually has.
+   *
+   * Never cleared afterwards. A parent that loses its session — a wizard leaving, say — must not take a
+   * live desktop away from a screen that is still driving one, and this component's own warming has
+   * already been skipped because it saw one.
+   */
+  useEffect(() => {
+    if (adoptedSession) setWarmedSession(adoptedSession);
+  }, [adoptedSession]);
 
   /*
    * The frame this turn's page was showing, fetched once and then kept.

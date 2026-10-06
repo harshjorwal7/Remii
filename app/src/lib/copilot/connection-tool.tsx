@@ -1,12 +1,18 @@
 import { useRenderTool } from "@copilotkit/react-core/v2";
-import { IconArrowUpRight, IconCheck, IconX } from "@tabler/icons-react";
-import { useQueryClient } from "@tanstack/react-query";
+import {
+  IconArrowUpRight,
+  IconCheck,
+  IconLoader2,
+  IconX,
+} from "@tabler/icons-react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import { z } from "zod";
-import { ToolLine } from "@/components/channels/tool-line";
 import { AppMark } from "@/components/plugins/app-mark";
 import { Button } from "@/components/ui/button";
 import { client } from "@/lib/client";
+import { useActiveBotId } from "@/lib/copilot/active-bot";
+import { setServerAppGrantMutationOptions } from "@/lib/plugins/mutations";
 import { pluginKeys } from "@/lib/plugins/queries";
 
 const parameters = z.object({
@@ -64,6 +70,10 @@ function ConnectionCard({
   given?: { app?: string; reason?: string };
 }) {
   const queryClient = useQueryClient();
+  const botId = useActiveBotId();
+  const setAppGrant = useMutation(
+    setServerAppGrantMutationOptions(queryClient),
+  );
   const [connected, setConnected] = useState(false);
   const [discarded, setDiscarded] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
@@ -71,6 +81,17 @@ function ConnectionCard({
   const serverId =
     payload.serverId ?? (payload.app ? `composio-${payload.app}` : null);
   const title = payload.title ?? payload.app ?? given?.app ?? "App";
+
+  const handleDiscard = useCallback(() => {
+    setDiscarded(true);
+    if (serverId && botId && botId !== "default") {
+      setAppGrant.mutate({
+        serverId,
+        agentId: botId,
+        granted: false,
+      });
+    }
+  }, [serverId, botId, setAppGrant]);
 
   const checkConnection = useCallback(async () => {
     if (!serverId) return;
@@ -107,7 +128,7 @@ function ConnectionCard({
 
   if (payload.ok === false) {
     return (
-      <div className="flex flex-col gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+      <div className="my-2 flex flex-col gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-3.5 text-xs text-destructive max-w-md">
         <p className="font-medium">Could not connect to {title}</p>
         <p className="text-muted-foreground">{payload.error}</p>
       </div>
@@ -115,7 +136,7 @@ function ConnectionCard({
   }
 
   return (
-    <div className="my-1 flex max-w-md flex-col gap-2.5 rounded-lg border border-border bg-card p-3.5 text-xs shadow-xs">
+    <div className="my-2 flex max-w-md flex-col gap-2.5 rounded-lg border border-border bg-card p-3.5 text-xs shadow-xs">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2">
           <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-muted">
@@ -176,7 +197,8 @@ function ConnectionCard({
                 size="sm"
                 variant="outline"
                 className="px-2.5 text-xs text-muted-foreground"
-                onClick={() => setDiscarded(true)}
+                disabled={setAppGrant.isPending}
+                onClick={handleDiscard}
               >
                 <IconX data-icon="inline-start" />
                 Discard
@@ -208,22 +230,16 @@ export function ConnectionTool() {
 
       const payload = decodePayload(result);
 
-      return (
-        <ToolLine
-          label={payload.title ? `Connect ${payload.title}` : "Connect App"}
-          detail={given?.app}
-          running={running}
-          defaultOpen
-        >
-          {running ? (
-            <p className="text-xs text-muted-foreground">
-              Preparing connection link for {given?.app ?? "app"}…
-            </p>
-          ) : (
-            <ConnectionCard payload={payload} given={given} />
-          )}
-        </ToolLine>
-      );
+      if (running) {
+        return (
+          <div className="my-2 flex max-w-md items-center gap-2.5 rounded-lg border border-border bg-card p-3.5 text-xs text-muted-foreground shadow-xs">
+            <IconLoader2 className="size-4 animate-spin text-primary shrink-0" />
+            <span>Preparing connection link for {given?.app ?? "app"}…</span>
+          </div>
+        );
+      }
+
+      return <ConnectionCard payload={payload} given={given} />;
     },
   });
 

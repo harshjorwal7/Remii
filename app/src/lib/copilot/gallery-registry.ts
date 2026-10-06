@@ -103,9 +103,10 @@ export function galleryManifest(): GalleryManifestEntry[] {
 }
 
 /** The names this build can actually draw, for telling a catalogue row from a component. */
-export const RENDERABLE_NAMES: ReadonlySet<string> = new Set(
-  GALLERY_COMPONENTS.map((component) => component.name),
-);
+export const RENDERABLE_NAMES: ReadonlySet<string> = new Set([
+  ...GALLERY_COMPONENTS.map((component) => component.name),
+  "connect_app",
+]);
 
 const BY_NAME: ReadonlyMap<string, GalleryComponent> = new Map(
   GALLERY_COMPONENTS.map((component) => [component.name, component]),
