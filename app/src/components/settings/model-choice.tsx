@@ -61,7 +61,7 @@ export function ModelChoice() {
       save.mutate({ modelSlug: null, modelProvider: null });
     } else {
       save.mutate({
-        modelSlug: "abliterated-model",
+        modelSlug: "abliterated-model-large-v2",
         modelProvider: "abliteration",
       });
     }

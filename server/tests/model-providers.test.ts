@@ -597,7 +597,7 @@ test("cancelling the selector closes its in-flight HTTP request", async () => {
 describe("per-person model choice", () => {
   test("an abliteration instance dials abliteration.ai with its own key", () => {
     const chain = buildModelChain(
-      { provider: "abliteration", model: "abliterated-model" },
+      { provider: "abliteration", model: "abliterated-model-large-v2" },
       { ABLITERATION_API_KEY: "ak_test" },
       "sk-deepseek-key",
     );
@@ -610,7 +610,7 @@ describe("per-person model choice", () => {
   test("an abliteration instance with no key is an empty chain", () => {
     expect(
       buildModelChain(
-        { provider: "abliteration", model: "abliterated-model" },
+        { provider: "abliteration", model: "abliterated-model-large-v2" },
         {},
         "sk-deepseek-key",
       ),

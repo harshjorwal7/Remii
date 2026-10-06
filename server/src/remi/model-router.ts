@@ -45,7 +45,7 @@ const DEEPSEEK_FLASH_MODEL = "deepseek-flash";
 
 const ABLITERATION_PROVIDER = "abliteration";
 const ABLITERATION_BASE_URL = "https://api.abliteration.ai/v1";
-const ABLITERATION_MODEL = "abliterated-model";
+const ABLITERATION_MODEL = "abliterated-model-large-v2";
 
 const clientCache = new Map<string, OpenAI>();
 
