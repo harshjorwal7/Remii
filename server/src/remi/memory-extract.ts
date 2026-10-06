@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import { buildModelChain } from "./model-router";
+import { buildModelChain, type ModelProvider } from "./model-router";
 import type { createRemiStore } from "./store";
 
 /**
@@ -41,7 +41,7 @@ export async function extractMemoriesAfterRun(input: {
   actorId: string;
   userText: string;
   assistantText: string;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   /**
    * The deployment's key for that model, resolved per turn rather than captured at boot.
    *

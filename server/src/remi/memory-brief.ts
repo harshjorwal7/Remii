@@ -1,3 +1,4 @@
+import type { ModelProvider } from "./model-router";
 import type { createRemiStore } from "./store";
 
 /**
@@ -16,7 +17,7 @@ const BRIEF_PROMPT = `Write a short morning brief for the person, in second pers
 export async function buildMorningBrief(input: {
   store: ReturnType<typeof createRemiStore>;
   userId: string;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   apiKey?: string | null;
   environment?: Record<string, string | undefined>;
   date?: string;

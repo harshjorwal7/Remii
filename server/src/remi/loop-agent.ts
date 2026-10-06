@@ -23,6 +23,7 @@ import { toolResultText } from "../plugins/tools";
 import {
   buildModelChain,
   classifyProviderError,
+  type ModelProvider,
   noModelError,
   ProviderRequestError,
 } from "./model-router";
@@ -64,7 +65,7 @@ export type RemiLoopConfig = {
   /** Server-executed tools, resolved for this run's Bot and person. */
   tools: GrantedTool[];
   /** Which model answers, and which provider it belongs to. */
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   /**
    * The resolved key the primary link spends. Null means the deployment's model identity is
    * unconfigured and the chain is empty: fallbacks cover an outage, never a missing

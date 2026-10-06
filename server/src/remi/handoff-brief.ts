@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import { buildModelChain } from "./model-router";
+import { buildModelChain, type ModelProvider } from "./model-router";
 import type { createRemiStore } from "./store";
 
 /**
@@ -31,7 +31,7 @@ function clientOf(link: {
 }
 
 async function completeJson<T>(input: {
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   apiKey?: string | null;
   environment?: Record<string, string | undefined>;
   system: string;
@@ -91,7 +91,7 @@ export async function buildBrief(input: {
   task: string;
   /** Explicit constraints ("Coco drafts, never sends", "no further compensation"). */
   constraints?: string[];
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   environment?: Record<string, string | undefined>;
 }): Promise<HandoffBrief> {
   const episode = await input.store
@@ -152,7 +152,7 @@ export async function debriefHandoff(input: {
   sourceBotId: string;
   taskId: string;
   outcomeText: string;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   apiKey?: string | null;
   environment?: Record<string, string | undefined>;
 }): Promise<HandoffDebrief> {
@@ -236,7 +236,7 @@ export async function closeTaskEpisode(input: {
   store: ReturnType<typeof createRemiStore>;
   userId: string;
   taskId: string;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   apiKey?: string | null;
   environment?: Record<string, string | undefined>;
   /** Override the conclusions (tests). Defaults to the model. */

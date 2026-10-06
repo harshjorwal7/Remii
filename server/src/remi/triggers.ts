@@ -15,7 +15,7 @@ import {
   users,
 } from "../db/schema";
 import type { TurnRunner } from "../routines/runner";
-import { buildModelChain } from "./model-router";
+import { buildModelChain, type ModelProvider } from "./model-router";
 import type { createRemiStore } from "./store";
 
 /**
@@ -285,7 +285,7 @@ export async function triageTriggerEvent(input: {
   triggerSlug: string;
   rawPayload: unknown;
   normalized: NormalizedTrigger;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   environment?: Record<string, string | undefined>;
 }): Promise<TriggerTriage> {
   const failClosed = (reason: string): TriggerTriage => ({
@@ -486,7 +486,7 @@ export type TriggerDeps = {
   runTurn: TurnRunner;
   automations: AutomationStore;
   audit?: AuditStore;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   environment?: Record<string, string | undefined>;
   defaultBotId?: string;
   by?: string;

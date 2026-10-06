@@ -35,10 +35,17 @@ export type ModelLink = {
   client: OpenAI;
 };
 
+/** Which vendor a person's turns can dial. */
+export type ModelProvider = "openai" | "abliteration";
+
 const DEEPSEEK_PROVIDER = "deepseek";
 /** DeepSeek's own endpoint, version segment included — the SDK appends `/chat/completions` under it. */
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
 const DEEPSEEK_FLASH_MODEL = "deepseek-flash";
+
+const ABLITERATION_PROVIDER = "abliteration";
+const ABLITERATION_BASE_URL = "https://api.abliteration.ai/v1";
+const ABLITERATION_MODEL = "abliterated-model";
 
 const clientCache = new Map<string, OpenAI>();
 
@@ -99,16 +106,35 @@ export function deepseekBaseUrl(
  * a display value (`copilot.runtimeModelForEnvironment`) and nothing more.
  */
 export function buildModelChain(
-  _primary: { provider: string; model: string },
+  primary: { provider: string; model: string },
   environment: Record<string, string | undefined> = process.env,
   primaryApiKey?: string | null,
 ): ModelLink[] {
+  if (primary.provider === ABLITERATION_PROVIDER) {
+    const apiKey =
+      envOf(environment, "ABLITERATION_API_KEY") ||
+      envOf(environment, "ABLIT_KEY");
+    if (!apiKey) return [];
+    const model = primary.model?.trim() || ABLITERATION_MODEL;
+    return [
+      {
+        provider: ABLITERATION_PROVIDER,
+        model,
+        client: clientFor(
+          ABLITERATION_PROVIDER,
+          ABLITERATION_BASE_URL,
+          apiKey,
+        ),
+      },
+    ];
+  }
   const apiKey = primaryApiKey?.trim() ?? "";
   if (!apiKey) return [];
   return [
     {
       provider: DEEPSEEK_PROVIDER,
       model: deepseekModel(environment),
+      extraBody: { reasoning_effort: "medium" },
       client: clientFor(
         DEEPSEEK_PROVIDER,
         deepseekBaseUrl(environment),
@@ -119,9 +145,11 @@ export function buildModelChain(
 }
 
 /** The sentence a turn fails with when no link exists at all. */
-export function noModelError(_provider: "openai"): Error {
+export function noModelError(provider: string): Error {
   return new Error(
-    "No model credential is configured. Set DEEPSEEK_API_KEY (or OPENAI_API_KEY).",
+    provider === ABLITERATION_PROVIDER
+      ? "No model credential is configured. Set ABLITERATION_API_KEY."
+      : "No model credential is configured. Set DEEPSEEK_API_KEY (or OPENAI_API_KEY).",
   );
 }
 

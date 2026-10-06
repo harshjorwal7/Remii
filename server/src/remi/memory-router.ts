@@ -1,7 +1,7 @@
 import type { RunAgentInput } from "@ag-ui/client";
 import type OpenAI from "openai";
 import { memoryConfig } from "./memory-config";
-import { buildModelChain } from "./model-router";
+import { buildModelChain, type ModelProvider } from "./model-router";
 import type { createRemiStore } from "./store";
 
 /**
@@ -57,7 +57,7 @@ function clientOf(link: {
 
 export async function decideRecall(input: {
   userText: string;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   apiKey?: string | null;
   environment?: Record<string, string | undefined>;
 }): Promise<RecallDecision> {
@@ -124,7 +124,7 @@ export async function recallForTurn(input: {
    * never see each other's working notes.
    */
   taskId?: string;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   apiKey?: string | null;
   environment?: Record<string, string | undefined>;
   limit?: number;
@@ -333,7 +333,7 @@ function latestUserText(messages: RunAgentInput["messages"]): string {
 export function recallHooksFor(input: {
   store: ReturnType<typeof createRemiStore>;
   userId: string;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   /**
    * The resolved model key, read per turn rather than captured at boot: a
    * credential added a moment ago applies to the next recall, and a missing
@@ -406,7 +406,7 @@ const ENTITY_PROMPT = `Extract the named entities memories are about: people, pr
 export async function extractEntities(
   texts: string[],
   input: {
-    model: { provider: "openai"; model: string };
+    model: { provider: ModelProvider; model: string };
     apiKey?: string | null;
     environment?: Record<string, string | undefined>;
   },

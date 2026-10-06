@@ -1,3 +1,4 @@
+import type { ModelProvider } from "./model-router";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -28,7 +29,7 @@ export type RemiToolsOptions = {
    * deployment never chose: a delegation brief written by no model is a task
    * handed over with no context.
    */
-  model?: { provider: "openai"; model: string };
+  model?: { provider: ModelProvider; model: string };
   environment?: Record<string, string | undefined>;
   /** Resolved lazily per call: briefs and debriefs spend the deployment key. */
   getApiKey?: () => Promise<string | null>;
@@ -1085,6 +1086,14 @@ function webTools(
           };
           const text = String(data.content ?? "").trim();
           if (!text) return "That page had no readable text.";
+          if (
+            text.includes("<html") &&
+            (text.includes("web application firewall") ||
+              text.includes("<title>Blocked</title>") ||
+              text.includes("Your request was blocked"))
+          ) {
+            return "That URL returned a 403 block page from the site's WAF — the request was rejected at the edge, not by the app.";
+          }
           const limit = a.max_chars ?? 15_000;
           const latency =
             typeof data.meta?.latency_ms === "number"

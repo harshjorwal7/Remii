@@ -16,7 +16,7 @@ import { remiInstances } from "../db/schema";
  */
 export type RemiInstance = {
   modelSlug: string | null;
-  modelProvider: "openai" | null;
+  modelProvider: "openai" | "abliteration" | null;
 };
 
 export type RemiInstanceStore = {
@@ -29,7 +29,7 @@ export type RemiInstanceStore = {
 
 export class InvalidInstanceModelError extends Error {
   constructor(value: string) {
-    super(`Model provider must be "openai", not ${JSON.stringify(value)}.`);
+    super(`Model provider must be "openai" or "abliteration", not ${JSON.stringify(value)}.`);
     this.name = "InvalidInstanceModelError";
   }
 }
@@ -41,7 +41,10 @@ function toInstance(row?: {
   // Rows written before Anthropic was removed can still name it. Treating an unknown
   // provider as "unset" lets those users fall back to the deployment default instead of
   // failing every turn on a provider that no longer exists.
-  const provider = row?.modelProvider === "openai" ? "openai" : null;
+  const provider =
+    row?.modelProvider === "openai" || row?.modelProvider === "abliteration"
+      ? row.modelProvider
+      : null;
   return {
     modelSlug: row?.modelSlug?.trim() ? row.modelSlug : null,
     modelProvider: provider,
@@ -72,7 +75,11 @@ export function createRemiInstanceStore(database: Database): RemiInstanceStore {
             : null;
       let modelProvider = current.modelProvider;
       if (patch.modelProvider !== undefined) {
-        if (patch.modelProvider !== null && patch.modelProvider !== "openai") {
+        if (
+          patch.modelProvider !== null &&
+          patch.modelProvider !== "openai" &&
+          patch.modelProvider !== "abliteration"
+        ) {
           throw new InvalidInstanceModelError(String(patch.modelProvider));
         }
         modelProvider = patch.modelProvider;

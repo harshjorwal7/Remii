@@ -630,7 +630,7 @@ export function createRemiRoutes(options: {
           ? {
               modelProvider: body.modelProvider as
                 | "openai"
-                | "anthropic"
+                | "abliteration"
                 | null,
             }
           : {}),

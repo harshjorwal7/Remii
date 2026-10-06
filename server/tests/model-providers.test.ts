@@ -7,6 +7,7 @@ import {
   runtimeModelForEnvironment,
 } from "../src/copilot";
 import { encryptSecret, resolveModelApiKey } from "../src/credentials";
+import { buildModelChain } from "../src/remi/model-router";
 import { createModelCompleter } from "../src/routing/model";
 import { validateTenantPackage } from "../src/tenant-package";
 
@@ -592,3 +593,39 @@ test("cancelling the selector closes its in-flight HTTP request", async () => {
     await server.stop(true);
   }
 }, 5000);
+
+describe("per-person model choice", () => {
+  test("an abliteration instance dials abliteration.ai with its own key", () => {
+    const chain = buildModelChain(
+      { provider: "abliteration", model: "abliterated-model" },
+      { ABLITERATION_API_KEY: "ak_test" },
+      "sk-deepseek-key",
+    );
+    expect(chain).toHaveLength(1);
+    expect(chain[0]?.provider).toBe("abliteration");
+    expect(chain[0]?.model).toBe("abliterated-model");
+    expect(chain[0]?.client.baseURL).toBe("https://api.abliteration.ai/v1");
+  });
+
+  test("an abliteration instance with no key is an empty chain", () => {
+    expect(
+      buildModelChain(
+        { provider: "abliteration", model: "abliterated-model" },
+        {},
+        "sk-deepseek-key",
+      ),
+    ).toEqual([]);
+  });
+
+  test("the deployment default stays DeepSeek flash with medium thinking", () => {
+    const chain = buildModelChain(
+      { provider: "openai", model: "deepseek-flash" },
+      {},
+      "sk-deepseek-key",
+    );
+    expect(chain).toHaveLength(1);
+    expect(chain[0]?.provider).toBe("deepseek");
+    expect(chain[0]?.model).toBe("deepseek-flash");
+    expect(chain[0]?.extraBody).toEqual({ reasoning_effort: "medium" });
+  });
+});

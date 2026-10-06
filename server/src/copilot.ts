@@ -67,6 +67,7 @@ import {
 } from "./remi/composio-tools";
 import { GOG_TOOL_NAMES } from "./remi/gog";
 import type { RemiInstance } from "./remi/instance";
+import type { ModelProvider } from "./remi/model-router";
 import { type RemiAfterRun, RemiLoopAgent } from "./remi/loop-agent";
 import type { RecallHooks } from "./remi/memory-router";
 import { REMI_TOOL_NAMES } from "./remi/tools";
@@ -197,7 +198,7 @@ export function standingRoleMessage(
 }
 
 export type RuntimeModel = {
-  provider: "openai";
+  provider: ModelProvider;
   defaultModel: string;
 };
 

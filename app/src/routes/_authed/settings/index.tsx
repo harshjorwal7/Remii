@@ -7,6 +7,7 @@ import {
   PageShell,
 } from "@/components/layout/page-shell";
 import { ExecutionMode } from "@/components/settings/execution-mode";
+import { ModelChoice } from "@/components/settings/model-choice";
 import { StandingInstructions } from "@/components/settings/standing-instructions";
 import { useTheme } from "@/components/theme-provider";
 import { Button } from "@/components/ui/button";
@@ -68,6 +69,12 @@ function RouteComponent() {
        * screen that changes what a coworker says rather than what this browser looks like.
        */}
       <StandingInstructions />
+      {/*
+       * Which model answers this person's turns: the deployment default (Space Flash) or the
+       * abliterated model (Darkside). Above execution mode because it changes what a coworker
+       * says, not just how it acts.
+       */}
+      <ModelChoice />
       {/*
        * Beside standing instructions: the other thing on this screen that changes what a
        * coworker does rather than what this browser looks like — whether it acts directly or

@@ -1,3 +1,4 @@
+import type { ModelProvider } from "./model-router";
 import type { createRemiStore } from "./store";
 
 /**
@@ -43,7 +44,7 @@ Return ONLY JSON: {"groups": [{"keep": "<id>", "drop": ["<id>"], "reason": "<one
 export async function consolidateUserMemory(input: {
   store: ReturnType<typeof createRemiStore>;
   userId: string;
-  model: { provider: "openai"; model: string };
+  model: { provider: ModelProvider; model: string };
   apiKey?: string | null;
   environment?: Record<string, string | undefined>;
   limit?: number;
@@ -150,7 +151,7 @@ export async function consolidateUserMemory(input: {
 
 async function decideWithModel(
   input: {
-    model: { provider: "openai"; model: string };
+    model: { provider: ModelProvider; model: string };
     apiKey?: string | null;
     environment?: Record<string, string | undefined>;
   },
