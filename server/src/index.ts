@@ -257,13 +257,10 @@ const identifyActor: IdentifyActor = async (request) => {
 };
 
 const config = loadConfig();
-console.log("[debug] config loaded, databaseUrl:", config.databaseUrl ? "present" : "missing");
 // Read with the rest of the configuration, where an empty variable is an absent one. See
 // `serverPort` in config.ts for what `process.env.PORT ?? …` did with `PORT=` instead.
 const port = config.port;
-console.log("[debug] entering createDatabase");
 const database = createDatabase(config.databaseUrl);
-console.log("[debug] createDatabase done");
 
 /**
  * What every run is doing, for the roster and the status line. Needs only the database, so it is
@@ -462,8 +459,7 @@ const _runActivityListener = await startRunActivityListener(
 const loadAgentsForActor = createRuntimeAgentLoader(
   database,
   config.managedAgent,
-console.log("[debug] before synchronizeTenantPackage");
-await synchronizeTenantPackage(database, tenantPackage); console.log("[debug] after synchronizeTenantPackage");
+);
 await synchronizeTenantPackage(database, tenantPackage);
 const identityProviderStore = createIdentityProviderStore(database);
 /*
