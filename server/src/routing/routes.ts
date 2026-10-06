@@ -10,6 +10,7 @@ import type {
   RoutingCandidate,
   RoutingUndecided,
 } from "./classify";
+import { REMII_AGENT_ID } from "../../../shared/remii";
 
 const PICKED_HARNESS_AGENT_ID = "picked-harness";
 
@@ -177,6 +178,34 @@ export function createRoutingRoutes(
         viaMention: true,
       });
     }
+    /*
+     * No `@` means nobody was picked, and an unpicked message goes to Remii — not to whichever
+     * coworker a model happens to guess. The router is only asked when the person named somebody,
+     * which it never is: a mention already decided. So the router is skipped here, and the trail
+     * says the message was unaddressed and landed on Remii by default.
+     */
+    const remii = roster.find((a) => a.id === REMII_AGENT_ID);
+    if (remii) {
+      const reason = "no coworker was named, so it went to Remii";
+      await record(
+        actorId(actor),
+        remii.id,
+        reason,
+        true,
+        false,
+        [remii.id],
+        null,
+      );
+      return context.json({
+        agentId: remii.id,
+        name: remii.name,
+        reason,
+        fallback: true,
+        undecided: null,
+        viaMention: false,
+      });
+    }
+
     const candidates: RoutingCandidate[] = await Promise.all(
       roster.map(async (a) => ({
         id: a.id,

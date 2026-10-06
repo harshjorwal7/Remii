@@ -517,6 +517,15 @@ export function createApp(
     return auth.completeSocialSignIn(context.req.raw);
   });
 
+  app.post("/api/auth/sign-out", async (context) => {
+    // No identity provider in front of this deployment: there is no session to end, so
+    // signing out succeeds trivially instead of answering 503 and looking dead.
+    if (!auth) {
+      return context.json({ url: null }, 200);
+    }
+    return auth.handler(context.req.raw);
+  });
+
   app.on(["GET", "POST"], "/api/auth/*", async (context) => {
     if (!auth) {
       return context.json(
