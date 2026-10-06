@@ -34,7 +34,7 @@ services:
     # streaming buffers and the plugin registry at once.
     plan: standard
     env:
-      ABLITERATION_API_KEY: "ak_KoR5ta2vWkh4ueBQlEllvVdQB0aPAIpcW45iO_6okaI"
+      ABLITERATION_API_KEY: "ak_I4pQ9qQHyGhAIxB4__ViJKw9Kxnf73r9H1cPsIKwL28"
 
     # `Dockerfile`'s own HEALTHCHECK is `http://127.0.0.1:3001/health`, and this is that same
     # endpoint. Without an explicit `healthCheckPath`, Render falls back to bare TCP port-binding,
