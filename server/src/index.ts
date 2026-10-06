@@ -43,7 +43,6 @@ import {
   recordAuditEvent,
 } from "./audit";
 import { startRetentionSweeps } from "./audit-retention";
-import { createNeonAuth, readNeonAuthSettings } from "./auth/neon";
 import { DEV_ACTOR, initializeDevActorUser } from "./auth/dev-actor";
 import type { RemiiRole } from "./auth/guards";
 import { createIdentityProviderStore } from "./auth/identity-provider-store";
@@ -258,10 +257,13 @@ const identifyActor: IdentifyActor = async (request) => {
 };
 
 const config = loadConfig();
+console.log("[debug] config loaded, databaseUrl:", config.databaseUrl ? "present" : "missing");
 // Read with the rest of the configuration, where an empty variable is an absent one. See
 // `serverPort` in config.ts for what `process.env.PORT ?? …` did with `PORT=` instead.
 const port = config.port;
+console.log("[debug] entering createDatabase");
 const database = createDatabase(config.databaseUrl);
+console.log("[debug] createDatabase done");
 
 /**
  * What every run is doing, for the roster and the status line. Needs only the database, so it is
@@ -460,7 +462,8 @@ const _runActivityListener = await startRunActivityListener(
 const loadAgentsForActor = createRuntimeAgentLoader(
   database,
   config.managedAgent,
-);
+console.log("[debug] before synchronizeTenantPackage");
+await synchronizeTenantPackage(database, tenantPackage); console.log("[debug] after synchronizeTenantPackage");
 await synchronizeTenantPackage(database, tenantPackage);
 const identityProviderStore = createIdentityProviderStore(database);
 /*
@@ -468,68 +471,7 @@ const identityProviderStore = createIdentityProviderStore(database);
  * store that receives those rows has to exist before anything can sign in.
  */
 const signInAuditStore = createAuditStore(database);
-/*
- * What the provider will actually accept, read once from the branch's own configuration.
- *
- * `neon_auth.project_config` holds the social providers this branch has, whether email-and-password
- * is on, and whether it demands a verified address. `config.auth` cannot know any of it — `loadConfig`
- * is synchronous and takes an environment rather than a pool — so it is read here and written back
- * onto the config before `createApp` reads it, which is the only way the sign-in screen's buttons
- * and the computer gate's verification rule come from the same source as the provider itself.
- *
- * A failure here is not fatal. The provider refuses anything not configured, so the deployment keeps
- * the defaults in `config.auth` and says so; a sign-in screen offering one button too many is a
- * recoverable nuisance, whereas refusing to start would take the whole product down over a row.
- */
-const providerSettings = config.auth
-  ? await readNeonAuthSettings(
-      database,
-      config.auth.neonAuthUrl,
-      config.auth.origin,
-    )
-  : null;
-if (providerSettings && config.auth) {
-  config.auth = {
-    ...config.auth,
-    /*
-     * The branch's own list, UNLESS this deployment named one.
-     *
-     * The provider is the right answer to "what will this branch accept" and the wrong answer to "what
-     * should this deployment offer". A social sign-in through this proxy does not finish — Google
-     * redirects to the provider's host and this origin never receives the cookie — so a deployment
-     * that has said `NEON_AUTH_PROVIDERS=none` must keep saying it, and reading the branch's list over
-     * the top would turn a deliberate choice into a setting that silently does nothing.
-     */
-    socialProviders: config.auth.socialProvidersOverridden
-      ? config.auth.socialProviders
-      : providerSettings.socialProviders,
-    // Replaced rather than merged, so `emailPassword` is absent when the provider has it off rather
-    // than left at whatever the environment said. The environment said it because somebody wrote it
-    // down months ago; the provider is what answers.
-    emailPassword: providerSettings.emailPassword || undefined,
-    ...(providerSettings.requireEmailVerification
-      ? { emailVerificationRequired: true }
-      : {}),
-  };
-} else if (config.auth) {
-  console.error(
-    JSON.stringify({
-      type: "neon-auth-settings-unreadable",
-      note: "Could not read this branch's provider configuration, so the sign-in screen falls back to the defaults in config.ts. If the buttons do not match what Neon Auth accepts, this is why.",
-    }),
-  );
-}
-
-const auth = config.auth
-  ? createNeonAuth(
-      {
-        baseUrl: config.auth.neonAuthUrl,
-        origin: config.auth.origin,
-      },
-      database,
-      signInAuditStore,
-    )
-  : undefined;
+const auth = undefined;
 const ownerOf = async (botId: string): Promise<string | null> => {
   try {
     const rows = await database

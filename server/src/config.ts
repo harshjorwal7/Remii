@@ -145,7 +145,6 @@ export type AuthConfig = {
    * provider holds the client secrets and the session secret on its own side, so there is nothing
    * left to configure here beyond where to reach it and what to call ourselves.
    */
-  neonAuthUrl: string;
   /**
    * This deployment's own public address, sent as `Origin` on every call to the provider.
    *
@@ -153,6 +152,11 @@ export type AuthConfig = {
    * refused — so this is not decoration. See `auth/neon.ts`.
    */
   origin: string;
+  /**
+   * Deprecated: kept for backward compatibility. Auth is now single-user / dev-actor only.
+   * @internal
+   */
+  neonAuthUrl?: string;
   /**
    * The social providers this deployment offers, as the provider spells them.
    *
@@ -687,92 +691,6 @@ function commaSeparated(environment: Environment, name: string): string[] {
  * decides whether one would work, and `index.ts` overrides this from what the provider reports so
  * the form and the provider cannot disagree about whether one exists.
  */
-function authConfig(environment: Environment): AuthConfig | undefined {
-  const neonAuthUrl = optional(environment, "NEON_AUTH_BASE_URL");
-  const emailPassword =
-    environment.AUTH_EMAIL_PASSWORD?.trim() === "true" || undefined;
-
-  if (!neonAuthUrl) {
-    if (emailPassword) {
-      throw new Error(
-        "AUTH_EMAIL_PASSWORD is set but NEON_AUTH_BASE_URL is not. Sign-in needs the identity provider: run `neon deploy` with `auth: true` in neon.ts, or unset AUTH_EMAIL_PASSWORD to run without sign-in.",
-      );
-    }
-    return undefined;
-  }
-
-  if (!/^https:\/\//.test(neonAuthUrl)) {
-    throw new Error(
-      "NEON_AUTH_BASE_URL must be an https:// address. The provider holds the session cookie as Secure, and a plain-HTTP endpoint cannot store it.",
-    );
-  }
-
-  /*
-   * Individual-user SaaS has no administrators: every account that can authenticate may sign in, and
-   * its own data is the only thing it can reach. Retired, and refused rather than ignored now — the
-   * old behaviour warned and carried on, which left a setting that looks live and is not.
-   */
-  if (commaSeparated(environment, "INITIAL_ADMIN_EMAILS").length > 0) {
-    throw new Error(
-      "INITIAL_ADMIN_EMAILS is set, but this deployment has no administrator role: every user is sovereign over their own data. Remove it from the environment.",
-    );
-  }
-
-  /*
-   * Which buttons to draw is the provider's answer, not ours.
-   *
-   * Read once in `index.ts` from `neon_auth.project_config` and written here, rather than this
-   * function querying a database — `loadConfig` is synchronous and takes an environment, not a
-   * pool. `NEON_AUTH_PROVIDERS` overrides it for a branch whose provider has none configured, which
-   * is the one case where the default would be a lie.
-   */
-  /*
-   * `NEON_AUTH_PROVIDERS=none` draws no social buttons at all, which is a real setting rather than a
-   * trick.
-   *
-   * A social sign-in through this proxy does not finish: Google redirects to the provider's host, the
-   * provider sets its cookie there, and this origin never sees it. A button that sends somebody there
-   * and returns them to this same screen reads as a rejected account, which is worse than no button
-   * because there is nothing on the page to say otherwise. `docs/deployment.md` writes down what would
-   * have to change; until then this is how a deployment ships email and password without offering a
-   * broken door.
-   */
-  const override = commaSeparated(environment, "NEON_AUTH_PROVIDERS");
-  const noSocialProviders = override.length === 1 && override[0] === "none";
-  const socialProviders = noSocialProviders
-    ? []
-    : override.length > 0
-      ? override
-      : ["google"];
-
-  /*
-   * The origin this deployment answers the provider with, which cannot be absent here.
-   *
-   * `publicOrigin` returns undefined for a deployment with no configured address, and that is what
-   * lets `broker.ts` refuse to mint a connection link pointing at a machine that is not this one. It
-   * cannot happen on this path: `NEON_AUTH_BASE_URL` is set by this point and `publicOrigin` answers
-   * for exactly that reason. Refused rather than defaulted, because a wrong answer to "what origin
-   * does the provider think I am" surfaces as a CORS failure on somebody's first sign-in rather than
-   * as a type error here.
-   */
-  const origin = publicOrigin(environment);
-  if (!origin) {
-    throw new Error(
-      "NEON_AUTH_BASE_URL is set but REMII_PUBLIC_URL is empty, so there is no origin to reach the identity provider with. Set REMII_PUBLIC_URL to the address this deployment is served from.",
-    );
-  }
-
-  return {
-    neonAuthUrl: neonAuthUrl.replace(/\/+$/, ""),
-    origin,
-    socialProvidersOverridden: override.length > 0,
-    socialProviders: socialProviders.filter(
-      (provider): provider is AuthProviderId =>
-        provider === "google" || provider === "github" || provider === "vercel",
-    ),
-    ...(emailPassword ? { emailPassword } : {}),
-  };
-}
 
 /**
  * This deployment's own address, which is what the provider is told the caller is.
@@ -788,6 +706,24 @@ function authConfig(environment: Environment): AuthConfig | undefined {
  * connection link pointing at a machine that is not this one, and the person who follows it lands
  * nowhere. `broker.ts` refuses that case, and this is what gives it something to refuse.
  */
+
+function authConfig(environment: Environment): AuthConfig | undefined {
+  const emailPassword =
+    environment.AUTH_EMAIL_PASSWORD?.trim() === "true" || undefined;
+
+  if (!emailPassword) {
+    return undefined;
+  }
+
+  return {
+    emailPassword,
+    socialProviders: [],
+    socialProvidersOverridden: false,
+    emailVerificationRequired: false,
+    neonAuthUrl: undefined,
+    origin: publicOrigin(environment),
+  };
+}
 function publicOrigin(environment: Environment): string | undefined {
   const configured = optional(environment, "REMII_PUBLIC_URL");
   if (configured) return configured.replace(/\/+$/, "");
