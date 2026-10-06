@@ -244,7 +244,7 @@ either way; the switch is about effects on the world.
 
 ## The Remi engine
 
-Built-in Bots run the ported Remi ReAct loop (up to 40 tool steps a turn, parallel calls, model
+Built-in Bots run the ported Remi ReAct loop (up to 500 tool steps a turn, parallel calls, model
 fallback, truncated tool results) over OpenAI-compatible chat completions, emitting the same
 AG-UI events the previous runtime did — transcript, persistence, metering and handoff are
 unchanged. What the loop is told (role, instructions, grants, computer prose) is unchanged too.

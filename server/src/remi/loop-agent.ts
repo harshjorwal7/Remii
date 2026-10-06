@@ -31,7 +31,7 @@ import {
  * The Remi agent loop, speaking AG-UI.
  *
  * remi.in runs a custom ReAct loop over OpenAI-compatible chat completions rather than a
- * framework agent runtime: up to 40 steps, parallel tool calls, per-step model fallback,
+ * framework agent runtime: up to 500 steps, parallel tool calls, per-step model fallback,
  * truncated tool results, a final text-only pass, and exact token accounting. This is that
  * loop, emitting the same AG-UI event family the CopilotKit `BuiltInAgent` it replaces
  * emitted (`RUN_STARTED`, `TEXT_MESSAGE_CHUNK`, `TOOL_CALL_START/ARGS/END/RESULT`,
@@ -166,7 +166,7 @@ export type RemiAfterRun = {
 export type OpenAIMessage = OpenAI.ChatCompletionMessageParam;
 type OpenAITool = OpenAI.ChatCompletionTool;
 
-const REMI_MAX_STEPS = 40;
+const REMI_MAX_STEPS = 500;
 const REMI_MAX_DURATION_MS = 20 * 60 * 1000;
 const REMI_TOOL_TIMEOUT_MS = 120_000;
 /**
