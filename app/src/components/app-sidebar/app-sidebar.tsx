@@ -43,10 +43,7 @@ import {
 import { REMII_AGENT_ID } from "@/lib/agents/default-agent";
 import { agentListQueryOptions } from "@/lib/agents/queries";
 import { signOutMutationOptions } from "@/lib/auth/mutations";
-import {
-  authProvidersQueryOptions,
-  currentUserQueryOptions,
-} from "@/lib/auth/queries";
+import { currentUserQueryOptions } from "@/lib/auth/queries";
 import { createChannelMutationOptions } from "@/lib/channels/mutations";
 import {
   type ChannelSummary,
@@ -212,7 +209,6 @@ function ChannelRow({
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { data: currentUser } = useQuery(currentUserQueryOptions());
-  const { data: signInOptions } = useQuery(authProvidersQueryOptions());
   const queryClient = useQueryClient();
   const signOut = useMutation(signOutMutationOptions(queryClient));
   const channels = useInfiniteQuery(channelListQueryOptions());
@@ -484,17 +480,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   <IconSettings />
                   Settings
                 </DropdownMenuItem>
-                {signInOptions?.authMode === "single-user" ? null : (
-                  <DropdownMenuItem
-                    className={userMenuItemClassName}
-                    disabled={signOut.isPending}
-                    onClick={handleSignOut}
-                    variant="destructive"
-                  >
-                    <IconLogout />
-                    Log out
-                  </DropdownMenuItem>
-                )}
+                <DropdownMenuItem
+                  className={userMenuItemClassName}
+                  disabled={signOut.isPending}
+                  onClick={handleSignOut}
+                  variant="destructive"
+                >
+                  <IconLogout />
+                  Log out
+                </DropdownMenuItem>
                 {signOutError ? (
                   <p
                     className="px-2 py-1.5 text-xs text-destructive"
